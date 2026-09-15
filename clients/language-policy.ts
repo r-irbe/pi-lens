@@ -202,6 +202,7 @@ const PRIMARY_DISPATCH_GROUPS: Partial<Record<FileKind, RunnerGroup>> = {
 		runnerIds: ["lsp", "dart-analyze"],
 		filterKinds: ["dart"],
 	},
+	lean4: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["lean4"] },
 	lua: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["lua"] },
 	zig: { mode: "all", runnerIds: ["lsp", "zig-check"], filterKinds: ["zig"] },
 	haskell: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["haskell"] },
