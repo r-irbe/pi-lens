@@ -39,6 +39,7 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Lua                   | ✓   | lsp                                                                                                            | stylua                  |
 | Zig                   | ✓   | lsp, zig-check                                                                                                 | zig fmt                 |
 | Haskell               | ✓   | lsp                                                                                                            | ormolu                  |
+| Lean 4                | ✓ (lake serve) | lsp                                                                                                            | —                       |
 | Elixir                | ✓ (ElixirLS default, Expert alternate) | lsp, elixir-check, credo                                                                   | mix format              |
 | Gleam                 | ✓   | lsp, gleam-check                                                                                               | gleam format            |
 | Typst                 | ✓ (tinymist) | —                                                                                                         | typstyle (`.typ`, `.typc`) |
