@@ -1,6 +1,6 @@
 # Language Coverage
 
-pi-lens supports **36+ languages** through dispatch runners and LSP integration.
+pi-lens supports **37+ languages** through dispatch runners and LSP integration.
 
 Formatting uses a single selected formatter per file: explicit project config wins, otherwise pi-lens uses a smart default where supported, and config-first ecosystems do not autoformat without config.
 
@@ -38,6 +38,7 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Lua                   | ✓   | lsp                                                                                                            | stylua                  |
 | Zig                   | ✓   | lsp, zig-check                                                                                                 | zig fmt                 |
 | Haskell               | ✓   | lsp                                                                                                            | ormolu                  |
+| Lean 4                | ✓ (lake serve) | lsp                                                                                                            | —                       |
 | Elixir                | ✓ (ElixirLS default, Expert alternate) | lsp, elixir-check, credo                                                                   | mix format              |
 | Gleam                 | ✓   | lsp, gleam-check                                                                                               | gleam format            |
 | Typst                 | ✓ (tinymist) | —                                                                                                         | typstyle (`.typ`, `.typc`) |

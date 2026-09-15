@@ -149,7 +149,7 @@ carries the named admission until then.
 
 **Unknown — fixture exists, mode not yet captured.** The toolchain-gated family
 (no auto-install today; tracked in #241) — `go` (gopls), `java` (jdtls),
-`kotlin`, `swift` (sourcekit-lsp), `cpp` (clangd), `haskell`, `elixir`,
+`kotlin`, `swift` (sourcekit-lsp), `cpp` (clangd), `haskell`, `lean4` (`lake serve`), `elixir`,
 `ocaml`, `nix` (nixd), `fsharp`. Their servers don't install in the nightly, so
 characterize reports `unknown` (a non-failure ⚠). Once #241 lands they'll fill in
 the same way clojure-lsp/gleam now do (both auto-install via the github strategy
