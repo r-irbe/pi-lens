@@ -129,6 +129,7 @@ Toolchain/binary not installed here, so capabilities weren't captured
 
 - elixir-ls
 - haskell-language-server
+- Lean 4 Language Server (lake serve)
 - jdtls
 - jdtls + lombok javaagent
 - nixd
