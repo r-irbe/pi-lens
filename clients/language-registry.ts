@@ -67,6 +67,7 @@ export type LanguageId =
 	| "jsonc"
 	| "julia"
 	| "kotlin"
+	| "lean4"
 	| "less"
 	| "lua"
 	| "markdown"
@@ -153,6 +154,7 @@ export const PINNED_LANGUAGE_IDS = [
 	"jsonc",
 	"julia",
 	"kotlin",
+	"lean4",
 	"less",
 	"lua",
 	"markdown",
@@ -388,6 +390,7 @@ export const LANGUAGES: readonly LanguageEntry[] = [
 		extensions: [".kt", ".kts"],
 		grammar: "kotlin",
 	},
+	{ id: "lean4", kind: "lean4", extensions: [".lean"] },
 	{ id: "less", kind: "css", extensions: [".less"] },
 	{ id: "lua", kind: "lua", extensions: [".lua"], grammar: "lua" },
 	{ id: "markdown", kind: "markdown", extensions: [".md", ".mdx"] },

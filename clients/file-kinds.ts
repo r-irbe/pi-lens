@@ -33,6 +33,7 @@ export type FileKind =
 	| "json" // JSON
 	| "jsts" // JavaScript/TypeScript/frameworks
 	| "kotlin" // Kotlin
+	| "lean4" // Lean 4
 	| "lua" // Lua
 	| "markdown" // Markdown
 	| "nix" // Nix
@@ -123,6 +124,7 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".vue",
 	],
 	kotlin: [".kt", ".kts"],
+	lean4: [".lean"],
 	lua: [".lua"],
 	markdown: [".md", ".mdx"],
 	nix: [".nix"],
@@ -363,6 +365,7 @@ export const CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
 	"java",
 	"jsts",
 	"kotlin",
+	"lean4",
 	"lua",
 	"nix",
 	"ocaml",
@@ -431,6 +434,7 @@ export function getFileKindLabel(kind: FileKind): string {
 		kotlin: "Kotlin",
 		swift: "Swift",
 		dart: "Dart",
+		lean4: "Lean 4",
 		lua: "Lua",
 		zig: "Zig",
 		haskell: "Haskell",
@@ -478,6 +482,7 @@ export function getLanguageId(kind: FileKind): string {
 		kotlin: "kotlin",
 		swift: "swift",
 		dart: "dart",
+		lean4: "lean4",
 		lua: "lua",
 		zig: "zig",
 		haskell: "haskell",

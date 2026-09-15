@@ -223,6 +223,11 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 		capabilities: ["types", "lint"],
 		writeGroups: [primary("dart")],
 	},
+	lean4: {
+		name: "Lean 4 Linting",
+		capabilities: ["types", "lint"],
+		writeGroups: [primary("lean4")],
+	},
 	lua: {
 		name: "Lua Linting",
 		capabilities: ["types", "lint"],
