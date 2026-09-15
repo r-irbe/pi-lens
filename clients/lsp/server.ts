@@ -3299,6 +3299,18 @@ export const HaskellServer = createInteractiveServer({
 	args: ["--lsp"],
 });
 
+export const Lean4Server = createInteractiveServer({
+	id: "lean4",
+	name: "Lean 4 Language Server",
+	extensions: KIND_EXTENSIONS["lean4"],
+	root: RootWithFallback(
+		createRootDetector(["lakefile.lean", "lakefile.toml", "lean-toolchain"]),
+	),
+	language: "lean4",
+	command: "lake",
+	args: ["serve"],
+});
+
 export const ElixirServer = createInteractiveServer({
 	id: "elixir",
 	name: "ElixirLS",
@@ -4163,6 +4175,7 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	CppServer,
 	ZigServer,
 	HaskellServer,
+	Lean4Server,
 	ElixirServer,
 	ElixirExpertServer,
 	GleamServer,
