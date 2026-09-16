@@ -118,6 +118,12 @@ LEAN_EXPORT lean_object* lp_MyPkg_myTheorem(lean_object*);
 LEAN_EXPORT lean_object* lp_MyPkg_myTheorem(lean_object* x) {
     return x;
 }
+static lean_object* _init_lp_MyPkg_myConst(void) {
+    return lean_unsigned_to_nat(10);
+}
+LEAN_EXPORT lean_object* lp_MyPkg_myBoxedFn___boxed(lean_object* a, lean_object* b) {
+    return a;
+}
 `;
 			fs.writeFileSync(cFile, cCode, "utf-8");
 
@@ -126,6 +132,16 @@ LEAN_EXPORT lean_object* lp_MyPkg_myTheorem(lean_object* x) {
 			expect(loc?.filePath).toBe(cFile);
 			expect(loc?.line).toBe(3);
 			expect(loc?.symbol).toBe("lp_MyPkg_myTheorem");
+
+			const constLoc = lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "myConst");
+			expect(constLoc).not.toBeNull();
+			expect(constLoc?.line).toBe(6);
+			expect(constLoc?.symbol).toBe("_init_lp_MyPkg_myConst");
+
+			const boxedLoc = lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "myBoxedFn");
+			expect(boxedLoc).not.toBeNull();
+			expect(boxedLoc?.line).toBe(9);
+			expect(boxedLoc?.symbol).toBe("lp_MyPkg_myBoxedFn___boxed");
 
 			expect(lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "nonExistent")).toBeNull();
 			expect(lookupGeneratedCDeclaration(tmpDir, "MyPkg.Missing", "myTheorem")).toBeNull();
