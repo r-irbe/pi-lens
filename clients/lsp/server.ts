@@ -7,6 +7,7 @@
  * - Platform-specific handling
  */
 
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { access, readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
@@ -3256,11 +3257,67 @@ export const LuaServer: LSPServerInfo = createTreeBinaryServer({
 	binRelPath: "bin/lua-language-server",
 });
 
+const leanFallbackFlagsCache = new Map<string, string[] | undefined>();
+
+/**
+ * Resolves C/C++ fallback compiler flags for Lean 4 projects interfacing with C FFI.
+ * Dynamically queries the active Lean toolchain sysroot so clangd can resolve
+ * `<lean/lean.h>` and runtime types with zero external scripts or hardcoded paths.
+ */
+export function resolveLeanFallbackFlags(root: string): string[] | undefined {
+	if (leanFallbackFlagsCache.has(root)) {
+		return leanFallbackFlagsCache.get(root);
+	}
+
+	const isLeanProject =
+		existsSync(path.join(root, "lakefile.lean")) ||
+		existsSync(path.join(root, "lakefile.toml")) ||
+		existsSync(path.join(root, "lean-toolchain"));
+
+	if (!isLeanProject) {
+		leanFallbackFlagsCache.set(root, undefined);
+		return undefined;
+	}
+
+	try {
+		const prefix = execSync("lean --print-prefix", {
+			cwd: root,
+			timeout: 2000,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+
+		if (
+			prefix &&
+			existsSync(path.join(prefix, "include", "lean", "lean.h"))
+		) {
+			const includeDir = path.join(prefix, "include");
+			const clangIncludeDir = path.join(includeDir, "clang");
+			const flags = [
+				`-I${includeDir}`,
+				...(existsSync(clangIncludeDir)
+					? ["-isystem", clangIncludeDir]
+					: []),
+				"-Wno-unused-parameter",
+				"-Wno-unused-label",
+				"-fvisibility=hidden",
+			];
+			leanFallbackFlagsCache.set(root, flags);
+			return flags;
+		}
+	} catch {
+		// execSync failed or lean is not installed
+	}
+
+	leanFallbackFlagsCache.set(root, undefined);
+	return undefined;
+}
+
 // clangd ships a self-contained native tree bundle (bin/clangd + bundled
 // libclang headers). Prefer a system clangd on PATH; else auto-install the
 // managed bundle (#241) and launch bin/clangd within it. Graceful skip when
 // neither is available (→ coverage notice); cpp-check stays the fallback.
-export const CppServer: LSPServerInfo = createTreeBinaryServer({
+export const CppServer: LSPServerInfo = {
 	id: "cpp",
 	name: "clangd",
 	extensions: KIND_EXTENSIONS["cxx"],
@@ -3270,12 +3327,35 @@ export const CppServer: LSPServerInfo = createTreeBinaryServer({
 			".clangd",
 			"CMakeLists.txt",
 			"Makefile",
+			"lakefile.lean",
+			"lakefile.toml",
 		]),
 	),
-	binaryName: "clangd",
-	binRelPath: "bin/clangd",
-	args: ["--background-index"],
-});
+	async spawn(root, options) {
+		const launched = await resolveAndLaunchTreeBinary(
+			{
+				candidates: ["clangd"],
+				bundleToolId: "clangd",
+				binRelPath: "bin/clangd",
+				cwd: root,
+				args: ["--background-index"],
+			},
+			options?.allowInstall,
+		);
+		if (!launched) return undefined;
+
+		const leanFlags = resolveLeanFallbackFlags(root);
+		if (leanFlags && leanFlags.length > 0) {
+			return {
+				...launched,
+				initialization: {
+					fallbackFlags: leanFlags,
+				},
+			};
+		}
+		return launched;
+	},
+};
 
 export const ZigServer: LSPServerInfo = {
 	id: "zig",
