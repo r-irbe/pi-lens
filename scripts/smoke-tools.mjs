@@ -952,9 +952,11 @@ const LSP_FIXTURES = [
 	{
 		lang: "lean4",
 		dir: "tests/fixtures/tool-smoke/lean4",
-		file: "Main.lean",
+		file: "bad.lean",
 		serverHint: "Lean 4 Language Server (lake serve)",
-		tools: ["lake"],
+		tools: [],
+		lspGate: true,
+		lspGateMarker: "type mismatch",
 	},
 	{
 		lang: "fish",
