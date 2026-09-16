@@ -165,8 +165,10 @@ describe("detectFileRole", () => {
 		expect(detectFileRole(longestLineFile, content)).toBe("source");
 	});
 
-	it("classifies lakefile.lean as config role", () => {
+	it("classifies lakefile.lean and lakefile.toml as config role", () => {
 		expect(detectFileRole("/repo/lakefile.lean")).toBe("config");
 		expect(detectFileRole("lakefile.lean")).toBe("config");
+		expect(detectFileRole("/repo/lakefile.toml")).toBe("config");
+		expect(detectFileRole("lakefile.toml")).toBe("config");
 	});
 });

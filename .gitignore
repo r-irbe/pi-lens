@@ -192,6 +192,10 @@ PR_issues_Audit.md
 tests/fixtures/**/obj/
 tests/fixtures/**/bin/
 
+# Lean 4 build output and lockfile from test fixtures (never commit)
+tests/fixtures/**/.lake/
+tests/fixtures/**/lake-manifest.json
+
 # Live native-TS7 integration temp projects (removed in afterAll; survive hard aborts)
 tests/native-ts7-live-*/
 

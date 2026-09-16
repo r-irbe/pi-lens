@@ -1800,4 +1800,77 @@ describe("lsp_navigation tool", () => {
 		expect(payload.operation).toBe("moduleImportedBy");
 		expect(result.details?.resultCount).toBe(1);
 	});
+
+	it("resolves omitted character from Unicode symbol word-boundary match", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-nav-"));
+		const filePath = path.join(tmpDir, "unicode-symbol.lean");
+		fs.writeFileSync(filePath, "def foo (α : Type) : Type := α\n");
+		(mocked.service as { references: ReturnType<typeof vi.fn> }).references = vi
+			.fn()
+			.mockResolvedValue([]);
+
+		try {
+			const result = await tool.execute(
+				"unicode-symbol",
+				{ operation: "references", path: filePath, line: 1, symbol: "α" },
+				new AbortController().signal,
+				null,
+				{ cwd: "." },
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(result.details?.columnResolution).toMatchObject({
+				character: 10,
+				strategy: "word-boundary",
+			});
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("retries on 'Cannot process request to closed file' error by opening file", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-nav-"));
+		const filePath = path.join(tmpDir, "test.lean");
+		fs.writeFileSync(filePath, "def x := 1\n");
+		let calls = 0;
+		(mocked.service as { references: ReturnType<typeof vi.fn> }).references = vi
+			.fn()
+			.mockImplementation(async () => {
+				calls++;
+				if (calls === 1) {
+					throw new Error(
+						"Cannot process request to closed file 'file:///test.lean'",
+					);
+				}
+				return [
+					{
+						uri: `file://${filePath}`,
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 1 },
+						},
+					},
+				];
+			});
+
+		try {
+			const result = await tool.execute(
+				"closed-file-retry",
+				{ operation: "references", path: filePath, line: 1, character: 1 },
+				new AbortController().signal,
+				null,
+				{ cwd: "." },
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(calls).toBe(2);
+			expect(
+				(mocked.service as { touchFile: ReturnType<typeof vi.fn> }).touchFile,
+			).toHaveBeenCalled();
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
 });

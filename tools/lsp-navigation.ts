@@ -177,6 +177,13 @@ function firstNonWhitespaceCharacter(lineText: string): number {
 	return (match?.index ?? 0) + 1;
 }
 
+function hasNonAscii(str: string): boolean {
+	for (let i = 0; i < str.length; i++) {
+		if (str.charCodeAt(i) > 127) return true;
+	}
+	return false;
+}
+
 function resolveSymbolColumn(
 	content: string,
 	line1: number,
@@ -210,8 +217,12 @@ function resolveSymbolColumn(
 		};
 	}
 
-	const pattern = `\\b${escapeRegExp(baseSymbol)}\\b`;
-	const exactRegex = new RegExp(pattern, "g");
+	const hasUnicodeWordChar = hasNonAscii(baseSymbol);
+	const pattern = hasUnicodeWordChar
+		? `(?<=^|[^\\p{L}\\p{N}_])${escapeRegExp(baseSymbol)}(?=[^\\p{L}\\p{N}_]|$)`
+		: `\\b${escapeRegExp(baseSymbol)}\\b`;
+	const regexFlags = hasUnicodeWordChar ? "gu" : "g";
+	const exactRegex = new RegExp(pattern, regexFlags);
 	const exact = findNthMatch(lineText, exactRegex, occurrence);
 	if (exact) {
 		return {
@@ -238,7 +249,8 @@ function resolveSymbolColumn(
 		};
 	}
 
-	const insensitiveRegex = new RegExp(pattern, "gi");
+	const insensitiveFlags = hasUnicodeWordChar ? "giu" : "gi";
+	const insensitiveRegex = new RegExp(pattern, insensitiveFlags);
 	const insensitive = findNthMatch(lineText, insensitiveRegex, occurrence);
 	if (insensitive) {
 		return {
@@ -1671,7 +1683,18 @@ export function createLspNavigationTool(
 			let result: unknown;
 			let usedDocumentSymbolFallback = false;
 			try {
-				result = await runOperation();
+				try {
+					result = await runOperation();
+				} catch (opErr) {
+					const opErrMsg =
+						opErr instanceof Error ? opErr.message : String(opErr);
+					if (needsFilePath && /closed file/i.test(opErrMsg)) {
+						await openFileBestEffort(lspService, filePath, true);
+						result = await runOperation();
+					} else {
+						throw opErr;
+					}
+				}
 				const isEmptyInitial =
 					!result || (Array.isArray(result) && result.length === 0);
 				const shouldRetryOnEmpty =
@@ -1689,6 +1712,8 @@ export function createLspNavigationTool(
 						"implementation",
 						"goal",
 						"termGoal",
+						"moduleImports",
+						"moduleImportedBy",
 					].includes(operation);
 				if (shouldRetryOnEmpty) {
 					await openFileBestEffort(lspService, filePath, true);
