@@ -15,9 +15,11 @@ import {
 	getPrimaryDispatchGroup,
 } from "../../../clients/language-policy.js";
 import {
+	CppServer,
 	getServerForExtension,
 	Lean4Server,
 	LSP_SERVERS,
+	resolveLeanFallbackFlags,
 } from "../../../clients/lsp/server.js";
 import { getStrategy } from "../../../clients/lsp/wait-policy/strategies.js";
 import { EXCLUDED_DIRS } from "../../../clients/file-utils.js";
@@ -176,5 +178,22 @@ describe("Lean4Server LSP registration and semantics", () => {
 		expect(profile.detectedKinds).toContain("lean4");
 		expect(profile.configured.lean4).toBe(true);
 		expect(profile.present.lean4).toBe(true);
+	});
+
+	it("integrates Lean 4 root markers and sysroot fallback flags into CppServer (clangd)", () => {
+		expect(CppServer.root.rootMarkers).toContain("lakefile.lean");
+		expect(CppServer.root.rootMarkers).toContain("lakefile.toml");
+
+		const emptyDir = makeTempDir();
+		expect(resolveLeanFallbackFlags(emptyDir)).toBeUndefined();
+
+		const leanDir = "/home/radu/code/tacit-mui/docs/easci/lean";
+		if (fs.existsSync(leanDir)) {
+			const flags = resolveLeanFallbackFlags(leanDir);
+			expect(flags).toBeDefined();
+			expect(flags?.some((f) => f.startsWith("-I") && f.includes("include"))).toBe(true);
+			expect(flags).toContain("-Wno-unused-parameter");
+			expect(flags).toContain("-fvisibility=hidden");
+		}
 	});
 });
