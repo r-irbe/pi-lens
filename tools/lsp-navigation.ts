@@ -54,6 +54,8 @@ const VALID_OPERATIONS = [
 	"executeCommand",
 	"workspaceDiagnostics",
 	"capabilities",
+	"goal",
+	"termGoal",
 ] as const;
 
 const NAVIGABLE_SYMBOL_KINDS = new Set([
@@ -117,6 +119,8 @@ function emptyReasonForOperation(operation: LspNavigationOperation): string {
 	if (operation === "executeCommand") return "command-returned-no-result";
 	if (operation === "incomingCalls" || operation === "outgoingCalls")
 		return "no-call-hierarchy-results";
+	if (operation === "goal") return "no-goals-or-not-in-tactic-state";
+	if (operation === "termGoal") return "no-term-goal-at-position";
 	return "no-results";
 }
 
@@ -898,7 +902,7 @@ export function createLspNavigationTool(
 		parameters: Type.Object({
 			operation: Type.String({
 				description:
-					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities.",
+					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal, termGoal.",
 			}),
 			path: Type.Optional(
 				Type.String({
@@ -1508,6 +1512,8 @@ export function createLspNavigationTool(
 				"rename",
 				"implementation",
 				"prepareCallHierarchy",
+				"goal",
+				"termGoal",
 			].includes(operation);
 			const resolvedCharacter =
 				needsPosition && filePath
@@ -1596,6 +1602,10 @@ export function createLspNavigationTool(
 						return lspService.references(filePath, lspLine, lspChar);
 					case "hover":
 						return lspService.hover(filePath, lspLine, lspChar);
+					case "goal":
+						return lspService.plainGoal(filePath, lspLine, lspChar);
+					case "termGoal":
+						return lspService.plainTermGoal(filePath, lspLine, lspChar);
 					case "signatureHelp":
 						return lspService.signatureHelp(filePath, lspLine, lspChar);
 					case "documentSymbol":
@@ -1831,6 +1841,8 @@ export function createLspNavigationTool(
 						"codeAction",
 						"rename",
 						"implementation",
+						"goal",
+						"termGoal",
 					].includes(operation);
 				if (shouldRetryOnEmpty) {
 					openedFileContent = await openFileBestEffort(
@@ -1942,6 +1954,29 @@ export function createLspNavigationTool(
 			let output = isEmpty
 				? "No results for " + operation + fileCtx + lineCtx
 				: JSON.stringify(result);
+			if (
+				!isEmpty &&
+				operation === "goal" &&
+				typeof result === "object" &&
+				result !== null &&
+				"rendered" in result
+			) {
+				const goalObj = result as { rendered?: string };
+				if (typeof goalObj.rendered === "string") {
+					output = goalObj.rendered;
+				}
+			} else if (
+				!isEmpty &&
+				operation === "termGoal" &&
+				typeof result === "object" &&
+				result !== null &&
+				"goal" in result
+			) {
+				const termGoalObj = result as { goal?: string };
+				if (typeof termGoalObj.goal === "string") {
+					output = termGoalObj.goal;
+				}
+			}
 			if (isEmpty && operation === "workspaceSymbol" && !rawPath) {
 				output +=
 					"\nHint: provide path to scope workspaceSymbol to the active language server/root.";
@@ -1969,11 +2004,19 @@ export function createLspNavigationTool(
 				}
 			}
 
-			const resultCount = Array.isArray(result)
-				? result.length
-				: result
-					? 1
-					: 0;
+			const resultCount =
+				operation === "goal" &&
+				result &&
+				typeof result === "object" &&
+				"goals" in result &&
+				Array.isArray((result as { goals?: unknown[] }).goals) &&
+				(result as { goals: unknown[] }).goals.length > 0
+					? (result as { goals: unknown[] }).goals.length
+					: Array.isArray(result)
+						? result.length
+						: result
+							? 1
+							: 0;
 			const searchReads = collectSearchReadsForOperation(
 				operation,
 				result,
