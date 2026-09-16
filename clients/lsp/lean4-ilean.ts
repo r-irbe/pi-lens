@@ -257,10 +257,25 @@ export function lookupGeneratedCDeclaration(
 			? symbolName.split(".").pop()!
 			: symbolName;
 		const defPattern = new RegExp(
-			`\\b(l[p_][A-Za-z0-9_]*${base})\\s*\\([^;]*\\)\\s*\\{`,
+			`\\b((?:_init_)?(?:lean_|l[p_])[A-Za-z0-9_]*${base}(?:___boxed)?)\\s*\\([^;]*\\)\\s*\\{`,
 		);
 		for (let i = 0; i < lines.length; i++) {
 			const match = lines[i].match(defPattern);
+			if (match) {
+				return {
+					filePath: candidate,
+					line: i,
+					symbol: match[1],
+				};
+			}
+		}
+
+		// Fallback to static/exported variable declaration for constants/values
+		const declPattern = new RegExp(
+			`\\b((?:lean_|l[p_])[A-Za-z0-9_]*${base})\\s*;`,
+		);
+		for (let i = 0; i < lines.length; i++) {
+			const match = lines[i].match(declPattern);
 			if (match) {
 				return {
 					filePath: candidate,
