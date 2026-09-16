@@ -282,6 +282,18 @@ export interface LSPCallHierarchyOutgoingCall {
 	fromRanges: LSPLocation["range"][];
 }
 
+// --- Lean 4 Custom Protocol Types ---
+
+export interface LSPPlainGoal {
+	rendered?: string;
+	goals?: string[];
+}
+
+export interface LSPPlainTermGoal {
+	goal?: string;
+	range?: LSPLocation["range"];
+}
+
 export interface LSPClientInfo {
 	serverId: string;
 	root: string;
@@ -631,6 +643,18 @@ export interface LSPClientInfo {
 	outgoingCalls(
 		item: LSPCallHierarchyItem,
 	): Promise<LSPCallHierarchyOutgoingCall[]>;
+	/** Lean 4: tactic proof goal inspection ($/lean/plainGoal) */
+	plainGoal(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPPlainGoal | null>;
+	/** Lean 4: expected term type inspection ($/lean/plainTermGoal) */
+	plainTermGoal(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPPlainTermGoal | null>;
 	shutdown(options?: LSPShutdownOptions): Promise<void>;
 }
 
@@ -6805,6 +6829,32 @@ export async function createLSPClient(options: {
 				{ item },
 			);
 			return result ?? [];
+		},
+
+		async plainGoal(filePath, line, character) {
+			const result = await navRequest<LSPPlainGoal>(
+				state,
+				"$/lean/plainGoal",
+				{
+					textDocument: { uri: pathToFileURL(filePath).href },
+					position: await toWirePosition(state, filePath, line, character),
+				},
+				filePath,
+			);
+			return result ?? null;
+		},
+
+		async plainTermGoal(filePath, line, character) {
+			const result = await navRequest<LSPPlainTermGoal>(
+				state,
+				"$/lean/plainTermGoal",
+				{
+					textDocument: { uri: pathToFileURL(filePath).href },
+					position: await toWirePosition(state, filePath, line, character),
+				},
+				filePath,
+			);
+			return result ?? null;
 		},
 
 		async shutdown(options?: LSPShutdownOptions) {

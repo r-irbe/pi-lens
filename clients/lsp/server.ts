@@ -1566,6 +1566,10 @@ interface InteractiveServerSpec {
 	 * silently failing. Currently only "java" (jdtls).
 	 */
 	runtime?: "java";
+	/** Optional per-server wait budget for navigation requests (ms) */
+	clientWaitTimeoutMs?: number;
+	/** Optional per-server initialize timeout (ms) */
+	initializeTimeoutMs?: number;
 }
 
 function createInteractiveServer(spec: InteractiveServerSpec): LSPServerInfo {
@@ -1584,6 +1588,8 @@ function createInteractiveServer(spec: InteractiveServerSpec): LSPServerInfo {
 		fallbackFor: spec.fallbackFor,
 		requiresProjectRoot: spec.requiresProjectRoot,
 		executesProjectCode: spec.executesProjectCode,
+		clientWaitTimeoutMs: spec.clientWaitTimeoutMs,
+		initializeTimeoutMs: spec.initializeTimeoutMs,
 		availabilityKey:
 			typeof spec.command === "string" && isSimpleCommand(spec.command)
 				? spec.command
@@ -3661,6 +3667,8 @@ export const Lean4Server = createInteractiveServer({
 	language: "lean4",
 	command: "lake",
 	args: ["serve"],
+	clientWaitTimeoutMs: 25_000,
+	initializeTimeoutMs: 25_000,
 });
 
 export const ElixirServer = createInteractiveServer({
