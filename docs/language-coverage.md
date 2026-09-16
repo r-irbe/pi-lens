@@ -97,17 +97,17 @@ languages could never be analysed on those hosts. A grammar that never loads
 `grammar_unavailable` **skip**, never a clean pass
 (`clients/dispatch/runners/tree-sitter.ts`).
 
-### Lean 4: Parser & Tree-sitter Feasibility
+### Lean 4: Parser and LSP Strategy
 
-Lean 4 features an extensible parser architecture where syntax, macros, notations, and domain-specific embedded languages (such as tactic blocks, `calc` proofs, and custom mathematical notation) are dynamically registered at runtime during elaboration. Consequently, static LR(1) or GLR grammars like `tree-sitter-lean` cannot reliably parse arbitrary Lean 4 modules without knowing the macro context and environment established by imports (e.g. Mathlib).
+Lean 4 uses an extensible runtime parser: macros, syntax extensions, notations, and embedded proof domain languages (tactics, `calc` blocks) are registered dynamically during elaboration. Static grammars (such as `tree-sitter-lean`) cannot reliably parse Lean files without the macro context produced by imports (e.g., Mathlib).
 
-Instead of relying on an inaccurate or fragile static parser, `pi-lens` delegates Lean 4 symbol extraction and semantic analysis exclusively to the authoritative language server (`lake serve`). `Lean4Server` provides kernel-exact `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, specialized proof inspection (`$/lean/plainGoal` and `$/lean/plainTermGoal` via `lsp_navigation`), and forward/reverse module dependency navigation (`moduleImports` and `moduleImportedBy` via `$/lean/prepareModuleHierarchy` and `$/lean/moduleHierarchy/*`).
+`pi-lens` routes Lean 4 analysis through the language server (`lake serve`). `Lean4Server` provides kernel-accurate `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, proof goal inspection (`$/lean/plainGoal`, `$/lean/plainTermGoal`), and dependency DAG traversal (`$/lean/prepareModuleHierarchy`, `$/lean/moduleHierarchy/*`).
 
-Furthermore, Lean 4 repository hygiene and project integration are first-class:
-- **Build & vendor exclusion**: `.lake` is excluded from all source tree walks (`EXCLUDED_DIRS`) and treated as external vendor code (`VENDOR_DIR_NAMES`), protecting indexing budgets from massive dependency suites like Mathlib.
-- **Artifact recognition**: `lake-manifest.json` is classified as a generated lockfile artifact (`LOCKFILE_NAMES`), preventing diff noise and scanner pollution.
-- **Role detection**: `lakefile.lean` is classified as configuration (`config`), preventing logic density warnings on build files.
-- **Topology & roots**: Lean projects are automatically discovered via Lake root markers (`lakefile.lean`, `lakefile.toml`, `lean-toolchain`).
+Repository and scanner integration:
+- Build and dependency trees (`.lake/packages/`, `.lake/build/`) are excluded from in-process walks (`EXCLUDED_DIRS`) and vendor-tagged (`VENDOR_DIR_NAMES`), preventing Mathlib from flooding source indexers.
+- `lake-manifest.json` is treated as a generated lockfile (`LOCKFILE_NAMES`).
+- `lakefile.lean` is classified as build configuration (`config`).
+- Project roots resolve via `lakefile.lean`, `lakefile.toml`, or `lean-toolchain`.
 
 ## Considered and skipped (2026-08-20 survey, closed out by #1757)
 

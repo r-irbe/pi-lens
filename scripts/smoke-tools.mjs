@@ -950,6 +950,13 @@ const LSP_FIXTURES = [
 		tools: ["clojure-lsp"],
 	},
 	{
+		lang: "lean4",
+		dir: "tests/fixtures/tool-smoke/lean4",
+		file: "Main.lean",
+		serverHint: "Lean 4 Language Server (lake serve)",
+		tools: ["lake"],
+	},
+	{
 		lang: "fish",
 		// Local and ubuntu probes could not establish a ready client. The
 		// documented alternate defects are unknown command, unreachable code,

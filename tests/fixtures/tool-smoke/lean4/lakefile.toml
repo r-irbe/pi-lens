@@ -1,0 +1,7 @@
+name = "smoke"
+version = "0.1.0"
+defaultTargets = ["smoke"]
+
+[[lean_exe]]
+name = "smoke"
+root = "Main"
