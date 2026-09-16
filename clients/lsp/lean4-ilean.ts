@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 
 export interface ILeanPosition {
 	line: number;
@@ -228,4 +229,175 @@ export function lookupILeanDeclaration(
 		}
 	}
 	return matches;
+}
+
+export interface GeneratedCLocation {
+	filePath: string;
+	line: number;
+	symbol: string;
+}
+
+/**
+ * Resolves the generated C implementation for a Lean declaration within
+ * Lake's intermediate build directory (.lake/build/ir/).
+ */
+export function lookupGeneratedCDeclaration(
+	workspaceRoot: string,
+	moduleName: string,
+	symbolName: string,
+): GeneratedCLocation | null {
+	const relPath = moduleName.replace(/\./g, path.sep) + ".c";
+	const candidate = path.join(workspaceRoot, ".lake", "build", "ir", relPath);
+	if (!fs.existsSync(candidate)) return null;
+
+	try {
+		const content = fs.readFileSync(candidate, "utf8");
+		const lines = content.split("\n");
+		const base = symbolName.includes(".")
+			? symbolName.split(".").pop()!
+			: symbolName;
+		const defPattern = new RegExp(
+			`\\b(l[p_][A-Za-z0-9_]*${base})\\s*\\([^;]*\\)\\s*\\{`,
+		);
+		for (let i = 0; i < lines.length; i++) {
+			const match = lines[i].match(defPattern);
+			if (match) {
+				return {
+					filePath: candidate,
+					line: i,
+					symbol: match[1],
+				};
+			}
+		}
+	} catch {
+		return null;
+	}
+
+	return null;
+}
+
+/**
+ * Searches for an extern C symbol declaration or definition in human-authored
+ * workspace C/C++ files (explicitly excluding generated .lake build directories).
+ */
+export function lookupExternCDeclaration(
+	workspaceRoot: string,
+	cSymbol: string,
+): GeneratedCLocation | null {
+	const candidates: string[] = [];
+	const queue = [workspaceRoot];
+	const cExtensions = new Set([".c", ".h", ".cpp", ".hpp", ".cc", ".cxx"]);
+
+	while (queue.length > 0) {
+		const current = queue.pop();
+		if (!current) break;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(current, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+
+		for (const entry of entries) {
+			if (
+				entry.name.startsWith(".") ||
+				entry.name === "node_modules" ||
+				entry.name === ".lake"
+			) {
+				continue;
+			}
+			const full = path.join(current, entry.name);
+			if (entry.isDirectory()) {
+				queue.push(full);
+			} else if (
+				entry.isFile() &&
+				cExtensions.has(path.extname(entry.name).toLowerCase())
+			) {
+				candidates.push(full);
+			}
+		}
+	}
+
+	const symbolPattern = new RegExp(`\\b${cSymbol}\\b`);
+	for (const file of candidates) {
+		try {
+			const content = fs.readFileSync(file, "utf8");
+			const lines = content.split("\n");
+			for (let i = 0; i < lines.length; i++) {
+				if (symbolPattern.test(lines[i])) {
+					return {
+						filePath: file,
+						line: i,
+						symbol: cSymbol,
+					};
+				}
+			}
+		} catch {
+			continue;
+		}
+	}
+
+	return null;
+}
+
+/**
+ * Looks up a Lean declaration that binds a given C symbol via @[extern "cSymbol"].
+ */
+export function lookupLeanExternForCSymbol(
+	workspaceRoot: string,
+	cSymbol: string,
+): {
+	uri: string;
+	range: {
+		start: { line: number; character: number };
+		end: { line: number; character: number };
+	};
+} | null {
+	const queue = [workspaceRoot];
+	const pattern = new RegExp(`@\\[extern\\s+"${cSymbol}"\\]`);
+	while (queue.length > 0) {
+		const current = queue.pop();
+		if (!current) break;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(current, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (
+				entry.name.startsWith(".") ||
+				entry.name === "node_modules" ||
+				entry.name === ".lake"
+			) {
+				continue;
+			}
+			const full = path.join(current, entry.name);
+			if (entry.isDirectory()) {
+				queue.push(full);
+			} else if (entry.isFile() && entry.name.endsWith(".lean")) {
+				try {
+					const content = fs.readFileSync(full, "utf8");
+					const lines = content.split("\n");
+					for (let i = 0; i < lines.length; i++) {
+						if (pattern.test(lines[i])) {
+							return {
+								uri: pathToFileURL(full).href,
+								range: {
+									start: { line: i, character: 0 },
+									end: {
+										line: i,
+										character: lines[i].length,
+									},
+								},
+							};
+						}
+					}
+				} catch {
+					continue;
+				}
+			}
+		}
+	}
+	return null;
 }

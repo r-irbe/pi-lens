@@ -1946,4 +1946,145 @@ describe("lsp_navigation tool", () => {
 			removeTempDirSync(tmpDir);
 		}
 	});
+
+	it("falls back to generated C file in .lake/build/ir/ for implementation operation on Lean 4 files", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-nav-c-impl-"),
+		);
+		const filePath = path.join(tmpDir, "Main.lean");
+		fs.writeFileSync(filePath, "def run := myHelper\n");
+		fs.writeFileSync(path.join(tmpDir, "lakefile.lean"), "package test\n");
+
+		const ileanDir = path.join(
+			tmpDir,
+			".lake",
+			"build",
+			"lib",
+			"lean",
+			"Helper",
+		);
+		fs.mkdirSync(ileanDir, { recursive: true });
+		const ileanData = {
+			version: 5,
+			module: "Helper",
+			directImports: [],
+			decls: {
+				myHelper: [0, 0, 0, 24, 0, 4, 0, 12],
+			},
+			references: {},
+		};
+		fs.writeFileSync(
+			path.join(ileanDir, "Helper.ilean"),
+			JSON.stringify(ileanData),
+			"utf-8",
+		);
+
+		const irDir = path.join(tmpDir, ".lake", "build", "ir");
+		fs.mkdirSync(irDir, { recursive: true });
+		const cFilePath = path.join(irDir, "Helper.c");
+		const cCode = `// Lean compiler output
+#include <lean/lean.h>
+LEAN_EXPORT lean_object* lp_Helper_myHelper(lean_object*);
+LEAN_EXPORT lean_object* lp_Helper_myHelper(lean_object* x) {
+    return x;
+}
+`;
+		fs.writeFileSync(cFilePath, cCode, "utf-8");
+
+		(
+			mocked.service as { implementation: ReturnType<typeof vi.fn> }
+		).implementation = vi.fn().mockResolvedValue([]);
+
+		try {
+			const result = await tool.execute(
+				"lean-impl-to-c",
+				{
+					operation: "implementation",
+					path: filePath,
+					line: 1,
+					symbol: "myHelper",
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(result.isError).toBeUndefined();
+			const parsed = parseToolJson(result);
+			expect(parsed.locations).toMatchObject([
+				{
+					filePath: cFilePath,
+					range: {
+						start: { line: 4, character: 1 },
+					},
+				},
+			]);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("cross-navigates from @[extern] Lean declaration to human-authored C FFI implementation", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-nav-extern-c-"),
+		);
+		const leanFile = path.join(tmpDir, "Main.lean");
+		fs.writeFileSync(
+			leanFile,
+			`@[extern "my_native_c_func"]\nopaque myNativeFunc : Nat\n`,
+		);
+		fs.writeFileSync(path.join(tmpDir, "lakefile.lean"), "package test\n");
+
+		const cDir = path.join(tmpDir, "native");
+		fs.mkdirSync(cDir, { recursive: true });
+		const cFile = path.join(cDir, "ffi.c");
+		fs.writeFileSync(
+			cFile,
+			`#include <lean/lean.h>\nLEAN_EXPORT lean_object* my_native_c_func() { return 0; }\n`,
+		);
+
+		// LSP returns the Lean definition line
+		(
+			mocked.service as { definition: ReturnType<typeof vi.fn> }
+		).definition = vi.fn().mockResolvedValue([
+			{
+				uri: pathToFileURL(leanFile).href,
+				range: {
+					start: { line: 1, character: 7 },
+					end: { line: 1, character: 19 },
+				},
+			},
+		]);
+
+		try {
+			const result = await tool.execute(
+				"lean-extern-to-c",
+				{
+					operation: "definition",
+					path: leanFile,
+					line: 2,
+					symbol: "myNativeFunc",
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(result.isError).toBeUndefined();
+			const parsed = parseToolJson(result) as {
+				locations: Array<{
+					filePath: string;
+					range: { start: { line: number } };
+				}>;
+			};
+			expect(parsed.locations).toHaveLength(2);
+			expect(parsed.locations[0]?.filePath).toBe(leanFile);
+			expect(parsed.locations[1]?.filePath).toBe(cFile);
+			expect(parsed.locations[1]?.range.start.line).toBe(2);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
 });

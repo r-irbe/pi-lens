@@ -7,6 +7,9 @@ import {
 	buildILeanModuleGraph,
 	findILeanRoot,
 	lookupILeanDeclaration,
+	lookupGeneratedCDeclaration,
+	lookupExternCDeclaration,
+	lookupLeanExternForCSymbol,
 	readILeanFile,
 	scanAllILeanFiles,
 } from "../../../clients/lsp/lean4-ilean.js";
@@ -98,6 +101,70 @@ describe("lean4-ilean offline reader", () => {
 
 			const nonExistent = path.join(tmpDir, "missing.ilean");
 			expect(readILeanFile(nonExistent)).toBeNull();
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("resolves generated C implementation in .lake/build/ir/", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c-ir-test-"));
+		try {
+			const irDir = path.join(tmpDir, ".lake", "build", "ir", "MyPkg");
+			fs.mkdirSync(irDir, { recursive: true });
+			const cFile = path.join(irDir, "Core.c");
+			const cCode = `// Lean compiler output
+#include <lean/lean.h>
+LEAN_EXPORT lean_object* lp_MyPkg_myTheorem(lean_object*);
+LEAN_EXPORT lean_object* lp_MyPkg_myTheorem(lean_object* x) {
+    return x;
+}
+`;
+			fs.writeFileSync(cFile, cCode, "utf-8");
+
+			const loc = lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "myTheorem");
+			expect(loc).not.toBeNull();
+			expect(loc?.filePath).toBe(cFile);
+			expect(loc?.line).toBe(3);
+			expect(loc?.symbol).toBe("lp_MyPkg_myTheorem");
+
+			expect(lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "nonExistent")).toBeNull();
+			expect(lookupGeneratedCDeclaration(tmpDir, "MyPkg.Missing", "myTheorem")).toBeNull();
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("resolves extern C declarations and reverse Lean bindings", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c-extern-test-"));
+		try {
+			const nativeDir = path.join(tmpDir, "src", "native");
+			fs.mkdirSync(nativeDir, { recursive: true });
+			const cFile = path.join(nativeDir, "ffi.c");
+			const cCode = `#include <lean/lean.h>
+LEAN_EXPORT lean_object* my_native_c_func(lean_object* a) {
+    return a;
+}
+`;
+			fs.writeFileSync(cFile, cCode, "utf-8");
+
+			const leanDir = path.join(tmpDir, "MyPkg");
+			fs.mkdirSync(leanDir, { recursive: true });
+			const leanFile = path.join(leanDir, "Native.lean");
+			const leanCode = `import Init
+@[extern "my_native_c_func"]
+opaque myNativeFunc (n : Nat) : IO Nat
+`;
+			fs.writeFileSync(leanFile, leanCode, "utf-8");
+
+			const cLoc = lookupExternCDeclaration(tmpDir, "my_native_c_func");
+			expect(cLoc).not.toBeNull();
+			expect(cLoc?.filePath).toBe(cFile);
+			expect(cLoc?.line).toBe(1);
+
+			const leanLoc = lookupLeanExternForCSymbol(tmpDir, "my_native_c_func");
+			expect(leanLoc).not.toBeNull();
+			expect(leanLoc?.uri).toContain("Native.lean");
+			expect(leanLoc?.range.start.line).toBe(1);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

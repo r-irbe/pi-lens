@@ -34,6 +34,9 @@ import { resolveLanguageRootForFile } from "../clients/language-profile.js";
 import {
 	buildILeanModuleGraph,
 	lookupILeanDeclaration,
+	lookupGeneratedCDeclaration,
+	lookupExternCDeclaration,
+	lookupLeanExternForCSymbol,
 } from "../clients/lsp/lean4-ilean.js";
 
 const VALID_OPERATIONS = [
@@ -1727,56 +1730,72 @@ export function createLspNavigationTool(
 
 				const stillEmpty =
 					!result || (Array.isArray(result) && result.length === 0);
-				if (stillEmpty && needsFilePath && operation === "definition") {
-					const content = nodeFs.readFileSync(filePath, "utf-8");
-					const token =
-						(line && character
-							? tokenAtPosition(content, line, character)
-							: undefined) ||
-						(symbol ? parseSymbolSelector(symbol).baseSymbol : undefined);
-					if (token) {
-						const docSymbols = (await lspService.documentSymbol(
+				let navToken: string | undefined;
+				if (
+					stillEmpty &&
+					needsFilePath &&
+					(operation === "definition" || operation === "implementation")
+				) {
+					try {
+						const content = nodeFs.readFileSync(filePath, "utf-8");
+						navToken =
+							(line && character
+								? tokenAtPosition(content, line, character)
+								: undefined) ||
+							(symbol
+								? parseSymbolSelector(symbol).baseSymbol
+								: undefined);
+					} catch {
+						// ignore read error
+					}
+				}
+				if (
+					stillEmpty &&
+					needsFilePath &&
+					operation === "definition" &&
+					navToken
+				) {
+					const docSymbols = (await lspService.documentSymbol(
+						filePath,
+					)) as SymbolNode[];
+					const locations = pickLocalSymbolLocation(
+						docSymbols,
+						navToken,
+						filePath,
+					);
+					if (locations.length > 0) {
+						result = locations;
+						usedDocumentSymbolFallback = true;
+					} else if (filePath.endsWith(".lean")) {
+						const root = resolveLanguageRootForFile(
 							filePath,
-						)) as SymbolNode[];
-						const locations = pickLocalSymbolLocation(
-							docSymbols,
-							token,
-							filePath,
+							ctx.cwd || ".",
 						);
-						if (locations.length > 0) {
-							result = locations;
+						const ileanMatches = lookupILeanDeclaration(
+							root,
+							navToken,
+						);
+						if (ileanMatches.length > 0) {
+							const mapped = ileanMatches.map((decl) => {
+								const targetRel =
+									decl.module.replace(/\./g, path.sep) +
+									".lean";
+								const candidatePath = path.join(
+									root,
+									targetRel,
+								);
+								const targetPath = nodeFs.existsSync(
+									candidatePath,
+								)
+									? candidatePath
+									: filePath;
+								return {
+									uri: pathToFileURL(targetPath).href,
+									range: decl.selectionRange,
+								};
+							});
+							result = mapped;
 							usedDocumentSymbolFallback = true;
-						} else if (filePath.endsWith(".lean")) {
-							const root = resolveLanguageRootForFile(
-								filePath,
-								ctx.cwd || ".",
-							);
-							const ileanMatches = lookupILeanDeclaration(
-								root,
-								token,
-							);
-							if (ileanMatches.length > 0) {
-								const mapped = ileanMatches.map((decl) => {
-									const targetRel =
-										decl.module.replace(/\./g, path.sep) +
-										".lean";
-									const candidatePath = path.join(
-										root,
-										targetRel,
-									);
-									const targetPath = nodeFs.existsSync(
-										candidatePath,
-									)
-										? candidatePath
-										: filePath;
-									return {
-										uri: pathToFileURL(targetPath).href,
-										range: decl.selectionRange,
-									};
-								});
-								result = mapped;
-								usedDocumentSymbolFallback = true;
-							}
 						}
 					}
 				}
@@ -1810,6 +1829,135 @@ export function createLspNavigationTool(
 								name,
 								kind: "module",
 							}));
+						}
+					}
+				}
+				if (
+					stillEmpty &&
+					operation === "implementation" &&
+					filePath?.endsWith(".lean") &&
+					navToken
+				) {
+					const root = resolveLanguageRootForFile(
+						filePath,
+						ctx.cwd || ".",
+					);
+					const decls = lookupILeanDeclaration(root, navToken);
+					for (const decl of decls) {
+						const cLoc = lookupGeneratedCDeclaration(
+							root,
+							decl.module,
+							decl.name,
+						);
+						if (cLoc) {
+							result = [
+								{
+									uri: pathToFileURL(cLoc.filePath).href,
+									range: {
+										start: { line: cLoc.line, character: 0 },
+										end: {
+											line: cLoc.line,
+											character: cLoc.symbol.length,
+										},
+									},
+								},
+							];
+							usedDocumentSymbolFallback = true;
+							break;
+						}
+					}
+				}
+				if (
+					stillEmpty &&
+					operation === "definition" &&
+					navToken &&
+					filePath &&
+					/\.(c|h|cpp|hpp|cc)$/i.test(filePath)
+				) {
+					const root = ctx.cwd || ".";
+					const externDecl = lookupLeanExternForCSymbol(
+						root,
+						navToken,
+					);
+					if (externDecl) {
+						result = [externDecl];
+						usedDocumentSymbolFallback = true;
+					}
+				}
+				if (
+					operation === "definition" &&
+					filePath?.endsWith(".lean") &&
+					result
+				) {
+					const locations = Array.isArray(result)
+						? result
+						: typeof result === "object"
+							? [result]
+							: [];
+					for (const loc of locations) {
+						if (
+							loc &&
+							typeof loc === "object" &&
+							"uri" in loc &&
+							typeof loc.uri === "string"
+						) {
+							try {
+								const targetFile = fileURLToPath(loc.uri);
+								if (nodeFs.existsSync(targetFile)) {
+									const lines = nodeFs
+										.readFileSync(targetFile, "utf8")
+										.split("\n");
+									const targetLine =
+										loc.range?.start?.line ?? 0;
+									const checkRange = lines
+										.slice(
+											Math.max(0, targetLine - 2),
+											targetLine + 3,
+										)
+										.join("\n");
+									const externMatch = checkRange.match(
+										/@\[extern\s+"([^"]+)"\]/,
+									);
+									if (externMatch) {
+										const cSymbol = externMatch[1];
+										const root = resolveLanguageRootForFile(
+											filePath,
+											ctx.cwd || ".",
+										);
+										const cMatch = lookupExternCDeclaration(
+											root,
+											cSymbol,
+										);
+										if (cMatch) {
+											const cLoc = {
+												uri: pathToFileURL(
+													cMatch.filePath,
+												).href,
+												range: {
+													start: {
+														line: cMatch.line,
+														character: 0,
+													},
+													end: {
+														line: cMatch.line,
+														character:
+															cMatch.symbol
+																.length,
+													},
+												},
+											};
+											if (Array.isArray(result)) {
+												result.push(cLoc);
+											} else {
+												result = [result, cLoc];
+											}
+											break;
+										}
+									}
+								}
+							} catch {
+								// ignore read error
+							}
 						}
 					}
 				}
