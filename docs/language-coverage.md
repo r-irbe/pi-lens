@@ -97,6 +97,12 @@ languages could never be analysed on those hosts. A grammar that never loads
 `grammar_unavailable` **skip**, never a clean pass
 (`clients/dispatch/runners/tree-sitter.ts`).
 
+### Lean 4: Parser & Tree-sitter Feasibility
+
+Lean 4 features an extensible parser architecture where syntax, macros, notations, and domain-specific embedded languages (such as tactic blocks, `calc` proofs, and custom mathematical notation) are dynamically registered at runtime during elaboration. Consequently, static LR(1) or GLR grammars like `tree-sitter-lean` cannot reliably parse arbitrary Lean 4 modules without knowing the macro context and environment established by imports (e.g. Mathlib).
+
+Instead of relying on an inaccurate or fragile static parser, `pi-lens` delegates Lean 4 symbol extraction and semantic analysis exclusively to the authoritative language server (`lake serve`). `Lean4Server` provides kernel-exact `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, and specialized proof inspection (`$/lean/plainGoal` and `$/lean/plainTermGoal` via `lsp_navigation`).
+
 ## Considered and skipped (2026-08-20 survey, closed out by #1757)
 
 Recorded so these are not re-litigated. The 2026-08-20 survey's first pass

@@ -7710,6 +7710,30 @@ export class LSPService {
 	}
 
 	/**
+	 * Navigation: Lean 4 proof goal inspection ($/lean/plainGoal)
+	 */
+	async plainGoal(filePath: string, line: number, character: number) {
+		const spawned = await this.getClientForFile(
+			filePath,
+			NAV_CLIENT_WAIT_TIMEOUT_MS,
+		);
+		if (!spawned) return null;
+		return spawned.client.plainGoal(filePath, line, character);
+	}
+
+	/**
+	 * Navigation: Lean 4 term goal inspection ($/lean/plainTermGoal)
+	 */
+	async plainTermGoal(filePath: string, line: number, character: number) {
+		const spawned = await this.getClientForFile(
+			filePath,
+			NAV_CLIENT_WAIT_TIMEOUT_MS,
+		);
+		if (!spawned) return null;
+		return spawned.client.plainTermGoal(filePath, line, character);
+	}
+
+	/**
 	 * Resolves "the target client" for a workspace-scope query that has no
 	 * filePath to route through `getClientForFile`. `state.clients` is keyed
 	 * `${serverId}:${root}` in spawn order, not role order, so an auxiliary

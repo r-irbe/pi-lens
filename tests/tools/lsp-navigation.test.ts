@@ -1674,4 +1674,67 @@ describe("lsp_navigation tool", () => {
 	// tests/clients/lsp/integration.test.ts ("records a server-initiated
 	// edit on a sibling package when the mutation context's isRecordable
 	// judges against the project root, not cwd").
+
+	it("dispatches goal operation and renders Markdown directly", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		(
+			mocked.service as { plainGoal: ReturnType<typeof vi.fn> }
+		).plainGoal = vi.fn().mockResolvedValue({
+			rendered: "1 goal\n⊢ True",
+			goals: ["⊢ True"],
+		});
+
+		const result = await tool.execute(
+			"call-goal",
+			{
+				operation: "goal",
+				path: "Proof.lean",
+				line: 5,
+				character: 1,
+			},
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(result.isError).toBeUndefined();
+		const payload = parseToolJson(result);
+		expect(payload.ok).toBe(true);
+		expect(payload.operation).toBe("goal");
+		expect(payload.notes).toEqual(["1 goal", "⊢ True"]);
+		expect(result.details?.resultCount).toBe(1);
+	});
+
+	it("dispatches termGoal operation and formats expected type", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		(
+			mocked.service as { plainTermGoal: ReturnType<typeof vi.fn> }
+		).plainTermGoal = vi.fn().mockResolvedValue({
+			goal: "Nat -> Nat",
+			range: {
+				start: { line: 4, character: 2 },
+				end: { line: 4, character: 10 },
+			},
+		});
+
+		const result = await tool.execute(
+			"call-term-goal",
+			{
+				operation: "termGoal",
+				path: "Proof.lean",
+				line: 5,
+				character: 3,
+			},
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(result.isError).toBeUndefined();
+		const payload = parseToolJson(result);
+		expect(payload.ok).toBe(true);
+		expect(payload.operation).toBe("termGoal");
+		expect(payload.notes).toEqual(["Nat -> Nat"]);
+		expect(result.details?.resultCount).toBe(1);
+	});
 });

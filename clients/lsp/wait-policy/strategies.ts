@@ -261,6 +261,17 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 2000,
 			expectSemanticSecondPush: false,
 		},
+		// Lean 4 Language Server (lake serve). Lean 4 uses push diagnostics.
+		// Elaboration of Mathlib-dependent files can take several seconds, so
+		// aggregateWaitMs is set to 5000ms with a 200ms debounce.
+		lean4: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 200,
+			aggregateWaitMs: 5000,
+			expectSemanticSecondPush: false,
+			reopenOnResync: false,
+		},
 		// Opengrep security scanner (cross-language LSP). It pushes an EMPTY result
 		// during the one-time rule-load window at startup, then the real scan after
 		// `semgrep/rulesRefreshed` — so never seed the first push. Push-only (no pull

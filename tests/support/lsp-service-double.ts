@@ -58,6 +58,8 @@ export function makeLspServiceDouble(
 		references: vi.fn(async () => []),
 		codeAction: vi.fn(async () => []),
 		documentSymbol: vi.fn(async () => []),
+		plainGoal: vi.fn(async () => null),
+		plainTermGoal: vi.fn(async () => null),
 		getOperationSupport: vi.fn(() => undefined),
 		isDocumentOpen: vi.fn(() => false),
 		notifyExternalFileChange: vi.fn(async () => undefined),

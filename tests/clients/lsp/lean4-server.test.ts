@@ -19,6 +19,7 @@ import {
 	Lean4Server,
 	LSP_SERVERS,
 } from "../../../clients/lsp/server.js";
+import { getStrategy } from "../../../clients/lsp/wait-policy/strategies.js";
 
 describe("Lean4Server LSP registration and semantics", () => {
 	const tempDirs: string[] = [];
@@ -121,5 +122,19 @@ describe("Lean4Server LSP registration and semantics", () => {
 
 		const detected = await Lean4Server.root(file);
 		expect(detected).toBe(subDir);
+	});
+
+	it("configures 25,000ms timeouts for Mathlib elaboration", () => {
+		expect(Lean4Server.clientWaitTimeoutMs).toBe(25_000);
+		expect(Lean4Server.initializeTimeoutMs).toBe(25_000);
+	});
+
+	it("has tuned wait policy in SERVER_STRATEGIES with 5000ms aggregateWaitMs and 200ms debounce", () => {
+		const strategy = getStrategy("lean4");
+		expect(strategy).toBeDefined();
+		expect(strategy.aggregateWaitMs).toBe(5000);
+		expect(strategy.debounceMs).toBe(200);
+		expect(strategy.pullRetryBudgetMs).toBe(0);
+		expect(strategy.seedFirstPush).toBe(false);
 	});
 });
