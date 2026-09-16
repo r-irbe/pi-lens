@@ -790,6 +790,7 @@ const VENDOR_DIR_NAMES = new Set([
 	"vendors",
 	"third_party",
 	"third-party",
+	".lake",
 ]);
 
 /**

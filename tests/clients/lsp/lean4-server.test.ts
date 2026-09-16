@@ -20,6 +20,13 @@ import {
 	LSP_SERVERS,
 } from "../../../clients/lsp/server.js";
 import { getStrategy } from "../../../clients/lsp/wait-policy/strategies.js";
+import { EXCLUDED_DIRS } from "../../../clients/file-utils.js";
+import { isExternalOrVendorFile } from "../../../clients/path-utils.js";
+import { isGeneratedOrArtifact } from "../../../clients/generated-artifacts.js";
+import {
+	detectProjectLanguageProfile,
+	rootMarkersForFile,
+} from "../../../clients/language-profile.js";
 
 describe("Lean4Server LSP registration and semantics", () => {
 	const tempDirs: string[] = [];
@@ -136,5 +143,38 @@ describe("Lean4Server LSP registration and semantics", () => {
 		expect(strategy.debounceMs).toBe(200);
 		expect(strategy.pullRetryBudgetMs).toBe(0);
 		expect(strategy.seedFirstPush).toBe(false);
+	});
+
+	it("excludes .lake from source tree walks and classifies .lake as external/vendor", () => {
+		expect(EXCLUDED_DIRS).toContain(".lake");
+		const projectRoot = "/home/dev/project";
+		const vendorFile = "/home/dev/project/.lake/packages/mathlib/Mathlib/Data/Nat/Basic.lean";
+		const buildFile = "/home/dev/project/.lake/build/ir/Main.c";
+		const sourceFile = "/home/dev/project/Main.lean";
+
+		expect(isExternalOrVendorFile(vendorFile, projectRoot)).toBe(true);
+		expect(isExternalOrVendorFile(buildFile, projectRoot)).toBe(true);
+		expect(isExternalOrVendorFile(sourceFile, projectRoot)).toBe(false);
+	});
+
+	it("classifies lake-manifest.json as generated lockfile artifact", () => {
+		expect(isGeneratedOrArtifact("lake-manifest.json")).toBe(true);
+		expect(isGeneratedOrArtifact("/repo/lake-manifest.json")).toBe(true);
+	});
+
+	it("provides root markers for Lean 4 files", () => {
+		const markers = rootMarkersForFile("Main.lean");
+		expect(markers).toContain("lakefile.lean");
+		expect(markers).toContain("lakefile.toml");
+		expect(markers).toContain("lean-toolchain");
+	});
+
+	it("detects lean4 in detectProjectLanguageProfile when lakefile.lean exists", () => {
+		const root = makeTempDir();
+		fs.writeFileSync(path.join(root, "lakefile.lean"), "-- lakefile");
+		const profile = detectProjectLanguageProfile(root);
+		expect(profile.detectedKinds).toContain("lean4");
+		expect(profile.configured.lean4).toBe(true);
+		expect(profile.present.lean4).toBe(true);
 	});
 });

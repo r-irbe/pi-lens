@@ -164,4 +164,9 @@ describe("detectFileRole", () => {
 		expect(measured.meanLineLength).toBeLessThan(200);
 		expect(detectFileRole(longestLineFile, content)).toBe("source");
 	});
+
+	it("classifies lakefile.lean as config role", () => {
+		expect(detectFileRole("/repo/lakefile.lean")).toBe("config");
+		expect(detectFileRole("lakefile.lean")).toBe("config");
+	});
 });

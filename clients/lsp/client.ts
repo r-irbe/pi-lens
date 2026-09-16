@@ -283,6 +283,21 @@ export interface LSPPlainTermGoal {
 	range?: LSPLocation["range"];
 }
 
+export interface LSPLeanModule {
+	name: string;
+	uri: string;
+	data?: unknown;
+}
+
+export interface LSPLeanImport {
+	module: LSPLeanModule;
+	kind?: {
+		isPrivate?: boolean;
+		isAll?: boolean;
+		metaKind?: string;
+	};
+}
+
 export interface LSPClientInfo {
 	serverId: string;
 	root: string;
@@ -602,6 +617,18 @@ export interface LSPClientInfo {
 		line: number,
 		character: number,
 	): Promise<LSPPlainTermGoal | null>;
+	/** Lean 4: prepare module hierarchy ($/lean/prepareModuleHierarchy) */
+	prepareModuleHierarchy(filePath: string): Promise<LSPLeanModule | null>;
+	/** Lean 4: module imports ($/lean/moduleHierarchy/imports) */
+	moduleHierarchyImports(
+		mod: LSPLeanModule,
+		filePath?: string,
+	): Promise<LSPLeanImport[]>;
+	/** Lean 4: module imported by ($/lean/moduleHierarchy/importedBy) */
+	moduleHierarchyImportedBy(
+		mod: LSPLeanModule,
+		filePath?: string,
+	): Promise<LSPLeanImport[]>;
 	shutdown(options?: LSPShutdownOptions): Promise<void>;
 }
 
@@ -6245,6 +6272,42 @@ export async function createLSPClient(options: {
 				filePath,
 			);
 			return result ?? null;
+		},
+
+		async prepareModuleHierarchy(filePath) {
+			const result = await navRequest<LSPLeanModule>(
+				state,
+				"$/lean/prepareModuleHierarchy",
+				{
+					textDocument: { uri: pathToFileURL(filePath).href },
+				},
+				filePath,
+			);
+			return result ?? null;
+		},
+
+		async moduleHierarchyImports(mod, filePath) {
+			const result = await navRequest<LSPLeanImport[]>(
+				state,
+				"$/lean/moduleHierarchy/imports",
+				{
+					module: mod,
+				},
+				filePath,
+			);
+			return result ?? [];
+		},
+
+		async moduleHierarchyImportedBy(mod, filePath) {
+			const result = await navRequest<LSPLeanImport[]>(
+				state,
+				"$/lean/moduleHierarchy/importedBy",
+				{
+					module: mod,
+				},
+				filePath,
+			);
+			return result ?? [];
 		},
 
 		async shutdown(options?: LSPShutdownOptions) {

@@ -53,6 +53,8 @@ const VALID_OPERATIONS = [
 	"capabilities",
 	"goal",
 	"termGoal",
+	"moduleImports",
+	"moduleImportedBy",
 ] as const;
 
 const NAVIGABLE_SYMBOL_KINDS = new Set([
@@ -118,6 +120,8 @@ function emptyReasonForOperation(operation: LspNavigationOperation): string {
 		return "no-call-hierarchy-results";
 	if (operation === "goal") return "no-goals-or-not-in-tactic-state";
 	if (operation === "termGoal") return "no-term-goal-at-position";
+	if (operation === "moduleImports") return "no-module-imports-found";
+	if (operation === "moduleImportedBy") return "no-importing-modules-found";
 	return "no-results";
 }
 
@@ -764,7 +768,7 @@ export function createLspNavigationTool(
 		parameters: Type.Object({
 			operation: Type.String({
 				description:
-					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal, termGoal.",
+					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal, termGoal, moduleImports, moduleImportedBy.",
 			}),
 			path: Type.Optional(
 				Type.String({
@@ -1457,6 +1461,10 @@ export function createLspNavigationTool(
 						return lspService.plainGoal(filePath, lspLine, lspChar);
 					case "termGoal":
 						return lspService.plainTermGoal(filePath, lspLine, lspChar);
+					case "moduleImports":
+						return lspService.moduleHierarchyImports(filePath);
+					case "moduleImportedBy":
+						return lspService.moduleHierarchyImportedBy(filePath);
 					case "signatureHelp":
 						return lspService.signatureHelp(filePath, lspLine, lspChar);
 					case "documentSymbol":
@@ -1810,6 +1818,25 @@ export function createLspNavigationTool(
 				if (typeof termGoalObj.goal === "string") {
 					output = termGoalObj.goal;
 				}
+			} else if (
+				!isEmpty &&
+				(operation === "moduleImports" || operation === "moduleImportedBy") &&
+				Array.isArray(result)
+			) {
+				const imports = result as Array<{
+					module?: { name?: string; uri?: string };
+					kind?: { isPrivate?: boolean; isAll?: boolean; metaKind?: string };
+				}>;
+				const lines = imports.map((imp) => {
+					const name = imp.module?.name ?? "(unknown)";
+					const uri = imp.module?.uri ? ` (${imp.module.uri})` : "";
+					const meta =
+						imp.kind?.metaKind && imp.kind.metaKind !== "nonMeta"
+							? ` [${imp.kind.metaKind}]`
+							: "";
+					return `- ${name}${meta}${uri}`;
+				});
+				output = lines.length > 0 ? lines.join("\n") : "None";
 			}
 			if (isEmpty && operation === "workspaceSymbol" && !rawPath) {
 				output +=

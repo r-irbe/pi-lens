@@ -1737,4 +1737,67 @@ describe("lsp_navigation tool", () => {
 		expect(payload.notes).toEqual(["Nat -> Nat"]);
 		expect(result.details?.resultCount).toBe(1);
 	});
+
+	it("dispatches moduleImports operation and formats import list", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		(
+			mocked.service as { moduleHierarchyImports: ReturnType<typeof vi.fn> }
+		).moduleHierarchyImports = vi.fn().mockResolvedValue([
+			{
+				module: {
+					name: "Init.Data.Nat.Basic",
+					uri: "file:///lean/Init/Data/Nat/Basic.lean",
+				},
+				kind: { isPrivate: false, isAll: false, metaKind: "nonMeta" },
+			},
+		]);
+
+		const result = await tool.execute(
+			"call-module-imports",
+			{
+				operation: "moduleImports",
+				path: "Proof.lean",
+			},
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(result.isError).toBeUndefined();
+		const payload = parseToolJson(result);
+		expect(payload.ok).toBe(true);
+		expect(payload.operation).toBe("moduleImports");
+		expect(result.details?.resultCount).toBe(1);
+	});
+
+	it("dispatches moduleImportedBy operation and formats downstream consumers", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		(
+			mocked.service as { moduleHierarchyImportedBy: ReturnType<typeof vi.fn> }
+		).moduleHierarchyImportedBy = vi.fn().mockResolvedValue([
+			{
+				module: {
+					name: "EASCI.Foundations.Algebra",
+					uri: "file:///project/EASCI/Foundations/Algebra.lean",
+				},
+			},
+		]);
+
+		const result = await tool.execute(
+			"call-module-imported-by",
+			{
+				operation: "moduleImportedBy",
+				path: "EASCI/Foundations/Logic.lean",
+			},
+			new AbortController().signal,
+			null,
+			{ cwd: "." },
+		);
+
+		expect(result.isError).toBeUndefined();
+		const payload = parseToolJson(result);
+		expect(payload.ok).toBe(true);
+		expect(payload.operation).toBe("moduleImportedBy");
+		expect(result.details?.resultCount).toBe(1);
+	});
 });

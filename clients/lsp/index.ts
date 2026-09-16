@@ -7734,6 +7734,34 @@ export class LSPService {
 	}
 
 	/**
+	 * Navigation: Lean 4 module hierarchy imports ($/lean/moduleHierarchy/imports)
+	 */
+	async moduleHierarchyImports(filePath: string) {
+		const spawned = await this.getClientForFile(
+			filePath,
+			NAV_CLIENT_WAIT_TIMEOUT_MS,
+		);
+		if (!spawned) return [];
+		const mod = await spawned.client.prepareModuleHierarchy(filePath);
+		if (!mod) return [];
+		return spawned.client.moduleHierarchyImports(mod, filePath);
+	}
+
+	/**
+	 * Navigation: Lean 4 module hierarchy imported by ($/lean/moduleHierarchy/importedBy)
+	 */
+	async moduleHierarchyImportedBy(filePath: string) {
+		const spawned = await this.getClientForFile(
+			filePath,
+			NAV_CLIENT_WAIT_TIMEOUT_MS,
+		);
+		if (!spawned) return [];
+		const mod = await spawned.client.prepareModuleHierarchy(filePath);
+		if (!mod) return [];
+		return spawned.client.moduleHierarchyImportedBy(mod, filePath);
+	}
+
+	/**
 	 * Resolves "the target client" for a workspace-scope query that has no
 	 * filePath to route through `getClientForFile`. `state.clients` is keyed
 	 * `${serverId}:${root}` in spawn order, not role order, so an auxiliary

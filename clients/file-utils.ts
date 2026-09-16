@@ -386,6 +386,7 @@ export const EXCLUDED_DIRS = [
 	".tox",
 	".pytest_cache",
 	"*.dSYM",
+	".lake", // Lean 4 Lake package manager dependencies and build outputs
 	// Vendored upstream source conventions — universally too large to scan
 	"vendor", // Go modules, PHP Composer, Ruby Bundler
 	"third_party", // Chromium/Google convention (llama.cpp, sherpa-onnx, gRPC, TF)
