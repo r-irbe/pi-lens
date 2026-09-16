@@ -31,21 +31,66 @@ export interface ILeanModuleGraph {
 }
 
 /**
- * Finds the .lake/build/lib/lean directory containing compiled .ilean artifacts.
+ * Finds all directories containing compiled .ilean artifacts (including external packages).
+ */
+export function findILeanRoots(workspaceRoot: string): string[] {
+	const roots: string[] = [];
+
+	const primaryLean = path.join(workspaceRoot, ".lake", "build", "lib", "lean");
+	const primaryLib = path.join(workspaceRoot, ".lake", "build", "lib");
+	try {
+		if (fs.statSync(primaryLean).isDirectory()) {
+			roots.push(primaryLean);
+		} else if (fs.statSync(primaryLib).isDirectory()) {
+			roots.push(primaryLib);
+		}
+	} catch {
+		// does not exist
+	}
+
+	const packagesDir = path.join(workspaceRoot, ".lake", "packages");
+	try {
+		const pkgEntries = fs.readdirSync(packagesDir, { withFileTypes: true });
+		for (const pkg of pkgEntries) {
+			if (pkg.isDirectory()) {
+				const pkgLean = path.join(
+					packagesDir,
+					pkg.name,
+					".lake",
+					"build",
+					"lib",
+					"lean",
+				);
+				const pkgLib = path.join(
+					packagesDir,
+					pkg.name,
+					".lake",
+					"build",
+					"lib",
+				);
+				try {
+					if (fs.statSync(pkgLean).isDirectory()) {
+						roots.push(pkgLean);
+					} else if (fs.statSync(pkgLib).isDirectory()) {
+						roots.push(pkgLib);
+					}
+				} catch {
+					// package lib not built
+				}
+			}
+		}
+	} catch {
+		// no packages directory
+	}
+
+	return roots;
+}
+
+/**
+ * Finds the primary .lake/build/lib/lean directory containing compiled .ilean artifacts.
  */
 export function findILeanRoot(workspaceRoot: string): string | null {
-	const candidates = [
-		path.join(workspaceRoot, ".lake", "build", "lib", "lean"),
-		path.join(workspaceRoot, ".lake", "build", "lib"),
-	];
-	for (const cand of candidates) {
-		try {
-			if (fs.statSync(cand).isDirectory()) return cand;
-		} catch {
-			// directory does not exist
-		}
-	}
-	return null;
+	return findILeanRoots(workspaceRoot)[0] ?? null;
 }
 
 /**
@@ -104,14 +149,14 @@ export function readILeanFile(ileanPath: string): ILeanData | null {
 }
 
 /**
- * Recursively scans all .ilean files in a workspace root.
+ * Recursively scans all .ilean files in a workspace root across all roots.
  */
 export function scanAllILeanFiles(workspaceRoot: string): ILeanData[] {
-	const root = findILeanRoot(workspaceRoot);
-	if (!root) return [];
+	const roots = findILeanRoots(workspaceRoot);
+	if (roots.length === 0) return [];
 
 	const results: ILeanData[] = [];
-	const queue = [root];
+	const queue = [...roots];
 
 	while (queue.length > 0) {
 		const current = queue.pop();
@@ -165,7 +210,8 @@ export function buildILeanModuleGraph(workspaceRoot: string): ILeanModuleGraph {
 }
 
 /**
- * Looks up declarations matching a symbol query from cached .ilean artifacts.
+ * Looks up declarations matching a symbol query from cached .ilean artifacts,
+ * supporting exact names and qualified suffix matches.
  */
 export function lookupILeanDeclaration(
 	workspaceRoot: string,
@@ -173,10 +219,12 @@ export function lookupILeanDeclaration(
 ): ILeanDeclaration[] {
 	const all = scanAllILeanFiles(workspaceRoot);
 	const matches: ILeanDeclaration[] = [];
+	const suffix = `.${symbolName}`;
 	for (const file of all) {
-		const decl = file.decls.get(symbolName);
-		if (decl) {
-			matches.push(decl);
+		for (const [name, decl] of file.decls.entries()) {
+			if (name === symbolName || name.endsWith(suffix)) {
+				matches.push(decl);
+			}
 		}
 	}
 	return matches;
