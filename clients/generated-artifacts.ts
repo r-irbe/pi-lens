@@ -57,6 +57,7 @@ const LOCKFILE_NAMES = new Set([
 	"poetry.lock",
 	"uv.lock",
 	"go.sum",
+	"lake-manifest.json",
 ]);
 
 const GENERATED_FILE_PATTERNS = [

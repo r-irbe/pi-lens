@@ -69,6 +69,7 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 	csharp: DOTNET_CSHARP_ROOT_MARKERS,
 	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
+	lean4: ["lakefile.lean", "lakefile.toml", "lean-toolchain"],
 };
 
 const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
@@ -123,6 +124,7 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 	csharp: DOTNET_CSHARP_ROOT_MARKERS,
 	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
+	lean4: ["lakefile.lean", "lakefile.toml", "lean-toolchain"],
 };
 
 // Tool-owned configuration belongs beside the shared language vocabulary, but

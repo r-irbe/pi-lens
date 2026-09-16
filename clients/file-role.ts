@@ -153,7 +153,8 @@ export function detectFileRole(filePath: string, content?: string): FileRole {
 		base === "tailwind.config.js" ||
 		base === "tailwind.config.ts" ||
 		base === "next.config.js" ||
-		base === "next.config.mjs"
+		base === "next.config.mjs" ||
+		base === "lakefile.lean"
 	)
 		return "config";
 

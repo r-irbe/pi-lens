@@ -908,6 +908,7 @@ const VENDOR_DIR_NAMES = new Set([
 	".venv",
 	"site-packages",
 	"bower_components",
+	".lake",
 ]);
 
 /** True when any path segment names an installed or vendored dependency tree. */
