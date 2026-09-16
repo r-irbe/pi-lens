@@ -42,39 +42,7 @@ import {
 	lookupExternCDeclaration,
 	lookupLeanExternForCSymbol,
 	lookupItpConceptForLeanDeclaration,
-} from "../clients/lsp/lean4-ilean.js";
 							usedDocumentSymbolFallback = true;
-						} else if (filePath.endsWith(".lean")) {
-							const root = resolveLanguageRootForFile(
-								filePath,
-								ctx.cwd || ".",
-							);
-							const ileanMatches = lookupILeanDeclaration(
-								root,
-								token,
-							);
-							if (ileanMatches.length > 0) {
-								const mapped = ileanMatches.map((decl) => {
-									const targetRel =
-										decl.module.replace(/\./g, path.sep) +
-										".lean";
-									const candidatePath = path.join(
-										root,
-										targetRel,
-									);
-									const targetPath = nodeFs.existsSync(
-										candidatePath,
-									)
-										? candidatePath
-										: filePath;
-									return {
-										uri: pathToFileURL(targetPath).href,
-										range: decl.selectionRange,
-									};
-								});
-								result = mapped;
-								usedDocumentSymbolFallback = true;
-							}
 						}
 					}
 				}
