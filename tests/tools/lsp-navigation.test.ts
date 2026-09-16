@@ -1873,4 +1873,77 @@ describe("lsp_navigation tool", () => {
 			removeTempDirSync(tmpDir);
 		}
 	});
+
+	it("falls back to .ilean declaration lookup when definition returns empty for Lean 4 files", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-nav-ilean-"),
+		);
+		const filePath = path.join(tmpDir, "Main.lean");
+		fs.writeFileSync(filePath, "def run := myHelper\n");
+		fs.writeFileSync(path.join(tmpDir, "lakefile.lean"), "package test\n");
+
+		const ileanDir = path.join(
+			tmpDir,
+			".lake",
+			"build",
+			"lib",
+			"lean",
+			"Helper",
+		);
+		fs.mkdirSync(ileanDir, { recursive: true });
+		const helperLeanPath = path.join(tmpDir, "Helper.lean");
+		fs.writeFileSync(helperLeanPath, "def myHelper : Nat := 42\n");
+
+		const ileanData = {
+			version: 5,
+			module: "Helper",
+			directImports: [],
+			decls: {
+				myHelper: [0, 0, 0, 24, 0, 4, 0, 12],
+			},
+			references: {},
+		};
+		fs.writeFileSync(
+			path.join(ileanDir, "Helper.ilean"),
+			JSON.stringify(ileanData),
+			"utf-8",
+		);
+
+		(
+			mocked.service as { definition: ReturnType<typeof vi.fn> }
+		).definition = vi.fn().mockResolvedValue([]);
+		(
+			mocked.service as { documentSymbol: ReturnType<typeof vi.fn> }
+		).documentSymbol = vi.fn().mockResolvedValue([]);
+
+		try {
+			const result = await tool.execute(
+				"ilean-def-fallback",
+				{
+					operation: "definition",
+					path: filePath,
+					line: 1,
+					symbol: "myHelper",
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(result.isError).toBeUndefined();
+			const parsed = parseToolJson(result);
+			expect(parsed.locations).toMatchObject([
+				{
+					filePath: helperLeanPath,
+					range: {
+						start: { line: 1, character: 5 },
+						end: { line: 1, character: 13 },
+					},
+				},
+			]);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
 });

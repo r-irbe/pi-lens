@@ -30,6 +30,11 @@ import {
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
+import { resolveLanguageRootForFile } from "../clients/language-profile.js";
+import {
+	buildILeanModuleGraph,
+	lookupILeanDeclaration,
+} from "../clients/lsp/lean4-ilean.js";
 
 const VALID_OPERATIONS = [
 	"definition",
@@ -1725,9 +1730,10 @@ export function createLspNavigationTool(
 				if (stillEmpty && needsFilePath && operation === "definition") {
 					const content = nodeFs.readFileSync(filePath, "utf-8");
 					const token =
-						line && character
+						(line && character
 							? tokenAtPosition(content, line, character)
-							: undefined;
+							: undefined) ||
+						(symbol ? parseSymbolSelector(symbol).baseSymbol : undefined);
 					if (token) {
 						const docSymbols = (await lspService.documentSymbol(
 							filePath,
@@ -1740,6 +1746,70 @@ export function createLspNavigationTool(
 						if (locations.length > 0) {
 							result = locations;
 							usedDocumentSymbolFallback = true;
+						} else if (filePath.endsWith(".lean")) {
+							const root = resolveLanguageRootForFile(
+								filePath,
+								ctx.cwd || ".",
+							);
+							const ileanMatches = lookupILeanDeclaration(
+								root,
+								token,
+							);
+							if (ileanMatches.length > 0) {
+								const mapped = ileanMatches.map((decl) => {
+									const targetRel =
+										decl.module.replace(/\./g, path.sep) +
+										".lean";
+									const candidatePath = path.join(
+										root,
+										targetRel,
+									);
+									const targetPath = nodeFs.existsSync(
+										candidatePath,
+									)
+										? candidatePath
+										: filePath;
+									return {
+										uri: pathToFileURL(targetPath).href,
+										range: decl.selectionRange,
+									};
+								});
+								result = mapped;
+								usedDocumentSymbolFallback = true;
+							}
+						}
+					}
+				}
+				if (
+					stillEmpty &&
+					(operation === "moduleImports" ||
+						operation === "moduleImportedBy") &&
+					filePath?.endsWith(".lean")
+				) {
+					const root = resolveLanguageRootForFile(
+						filePath,
+						ctx.cwd || ".",
+					);
+					const graph = buildILeanModuleGraph(root);
+					const rel = path
+						.relative(root, filePath)
+						.replace(/\.lean$/, "")
+						.replace(/[/\\]/g, ".");
+					if (operation === "moduleImports") {
+						const imps = graph.imports.get(rel) ?? [];
+						if (imps.length > 0) {
+							result = imps.map((name) => ({
+								name,
+								kind: "module",
+							}));
+						}
+					} else {
+						const impBy = graph.importedBy.get(rel) ?? [];
+						if (impBy.length > 0) {
+							result = impBy.map((name) => ({
+								name,
+								kind: "module",
+							}));
 						}
 					}
 				}
