@@ -1,0 +1,22 @@
+id: rule-lean-no-native-decide
+language: Lean
+severity: error
+message: "Unverified computational reflection via native_decide or decide! detected"
+note: |
+  native_decide and decide! execute unverified native code outside the Lean kernel,
+  introducing the synthetic axiom Lean.ofReduceBool. This compromises the Trusted Computing Base
+  (TCB) and fails dual-kernel verification harnesses (nanoda, comparator).
+  Replace with verified kernel reduction: decide, rfl, omega, or exact of_decide_eq_true rfl.
+rule:
+  any:
+    - pattern: native_decide
+    - pattern: decide!
+    - regex: "\\b(native_decide|decide!)\\b"
+fix: "decide"
+metadata:
+  category: correctness
+  weight: 100
+tags:
+  - lean
+  - tcb
+  - flt-anti-pattern

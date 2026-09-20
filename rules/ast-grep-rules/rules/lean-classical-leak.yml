@@ -1,0 +1,21 @@
+id: rule-lean-classical-leak
+language: Lean
+severity: warning
+message: "Unscoped module-level open Classical or Classical.propDecidable overrides constructive decidability"
+note: |
+  Opening Classical at the module root globally enables nonconstructive choice across all subsequent declarations.
+  This breaks constructive reflection (decide, rfl, omega) by shadowing computable Decidable instances
+  with noncomputable choice instances (Classical.propDecidable).
+  Scope classical axioms using open scoped Classical in <command> or encapsulate in a localized section ... end.
+rule:
+  any:
+    - regex: "^open\\s+(scoped\\s+)?Classical\\b(?!.*\\bin\\b)"
+    - regex: "^attribute\\s*\\[(?:local\\s+)?instance\\]\\s*Classical\\.propDecidable\\b"
+fix: "open scoped Classical in"
+metadata:
+  category: correctness
+  weight: 80
+tags:
+  - lean
+  - decidability
+  - flt-anti-pattern
