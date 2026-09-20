@@ -1,0 +1,30 @@
+id: rule-lean-subproject-docstring-mandate
+valid:
+  - |
+    /-- Computes the fixed point coordinate. -/
+    def documentedDef (x : Nat) : Nat := x
+  - |
+    /-- Main convergence theorem for the system. -/
+    theorem documentedThm : 1 = 1 := rfl
+  - |
+    /-- Auxiliary simplification lemma. -/
+    @[simp]
+    lemma documentedLemma : 2 = 2 := rfl
+  - |
+    /-- Multiline documentation
+        explaining the mathematical contract. -/
+    noncomputable def documentedNoncomp : Nat := 42
+  - |
+    -- Internal helper is private, no public docstring required
+    private def internalSecret (x : Nat) : Nat := x
+invalid:
+  - |
+    def undocumentedDef (x : Nat) : Nat := x
+  - |
+    @[simp]
+    theorem undocumentedThm : 1 = 1 := rfl
+  - |
+    -- Only a standard comment, not a docstring
+    lemma undocumentedLemma : 2 = 2 := rfl
+  - |
+    noncomputable def undocumentedNoncomp : Nat := 42

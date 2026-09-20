@@ -1,0 +1,20 @@
+id: rule-lean-undergeneral-universe
+language: Lean
+severity: warning
+message: "Universe under-generalization: bare Type (Type 0) used in polymorphic universe context"
+note: |
+  Declaration explicitly declares universe parameters (e.g. .{u} or .{u, v}) but binds parameters
+  with bare Type instead of Type u. In Lean 4, bare Type is syntax for Type 0, artificially
+  collapsing polymorphism. This reproduces FLT P2M_UNDERGENERAL failure mode where proofs fail to
+  generalize to higher universe levels (e.g., categories, sheaves, adic completions).
+  Use Type u, Type v, or Sort u to preserve universe polymorphism.
+rule:
+  all:
+    - regex: "(theorem|lemma|def|class|structure)\\s+[A-Za-z0-9_.]+\\s*\\.\\{[^\\}]+\\}[^:]*\\([^)]*:\\s*Type(?:\\s+|\\))"
+metadata:
+  category: correctness
+  weight: 90
+tags:
+  - lean
+  - universes
+  - flt-anti-pattern
