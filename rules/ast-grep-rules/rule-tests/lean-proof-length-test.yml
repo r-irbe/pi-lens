@@ -1,0 +1,5 @@
+id: rule-lean-proof-length
+valid:
+  - |
+    theorem short_proof (n : Nat) : n + 0 = n := by
+      rfl

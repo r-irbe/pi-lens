@@ -1,0 +1,17 @@
+id: rule-lean-classical-leak
+valid:
+  - |
+    section
+    open Classical
+    theorem nonconstructive_ex : exists x, P x := sorry
+    end
+  - |
+    open scoped Classical in
+    theorem scoped_choice : Nonempty alpha -> alpha := Classical.choice
+invalid:
+  - |
+    import Mathlib
+    open Classical
+    def my_def (n : Nat) : Nat := n + 1
+  - |
+    attribute [instance] Classical.propDecidable

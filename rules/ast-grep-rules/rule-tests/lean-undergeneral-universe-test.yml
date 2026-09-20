@@ -1,0 +1,11 @@
+id: rule-lean-undergeneral-universe
+valid:
+  - |
+    def Category.{u, v} (C : Type u) : Type (max u (v + 1)) := sorry
+  - |
+    def SimpleStruct (alpha : Type) : Type := alpha
+invalid:
+  - |
+    theorem bad_poly.{u, v} (alpha : Type) (beta : Type v) : alpha -> beta := sorry
+  - |
+    def BadScheme.{u} (X : Type) : Prop := True

@@ -1,0 +1,15 @@
+id: rule-lean-no-native-decide
+valid:
+  - |
+    theorem test_refl : 2 + 2 = 4 := by
+      decide
+  - |
+    theorem test_omega (n : Nat) (h : n < 5) : n <= 4 := by
+      omega
+invalid:
+  - |
+    theorem test_native : 1000 + 2000 = 3000 := by
+      native_decide
+  - |
+    theorem test_bang : 2 * 3 = 6 := by
+      decide!

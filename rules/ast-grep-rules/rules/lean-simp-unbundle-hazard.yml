@@ -1,0 +1,21 @@
+id: rule-lean-simp-unbundle-hazard
+language: Lean
+severity: warning
+message: "Hazardous @[simp] tag on unbundled equivalence projection (*_apply or *_symm_apply)"
+note: |
+  Tagging equivalence projections with @[simp] eagerly unfolds bundled Equiv/RingEquiv terms
+  into naked projection calls. Without explicit round-trip cancellation lemmas, terms get trapped
+  in unbundled coordinates, breaking Equiv.symm_apply_apply and triggering simp expansion loops.
+  Keep equivalence projections OUT of the global simp set. Simplify with bundled equivalence lemmas
+  or invoke the specific projection lemma manually when unfolding coordinates.
+rule:
+  all:
+    - regex: "@\\[[^\\]]*\\bsimp\\b[^\\]*\\]\\s*(theorem|lemma|def)\\s+([A-Za-z0-9_.]*(?:_apply|_symm_apply))\\b"
+fix: ""
+metadata:
+  category: maintainability
+  weight: 85
+tags:
+  - lean
+  - simp
+  - flt-anti-pattern

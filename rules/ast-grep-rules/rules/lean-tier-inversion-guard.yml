@@ -1,0 +1,34 @@
+id: rule-lean-tier-inversion-guard
+language: Lean
+severity: error
+message: "Illegal upstream tier import violates 4-tier DAG architectural hierarchy"
+note: |
+  The subpackage architecture under `packages/` enforces a strict 4-tier DAG:
+    • Tier 0: tacit-foundations (Foundations)
+    • Tier 1: stochastic-ccv, cusp-catastrophe, phase-portrait
+    • Tier 2: reinforcement-learning (ReinforcementLearning)
+    • Tier 3: agentic-safety, provenance-chain
+  Lower architectural tiers cannot import from higher architectural tiers:
+    - Tier 0 cannot import Tier 1, 2, or 3.
+    - Tier 1 cannot import Tier 2 or 3.
+    - Tier 2 cannot import Tier 3.
+rule:
+  any:
+    - all:
+        - regex: "(?m)^\\s*(?:--\\s*(?:\\[?tier\\s*0\\]?|module\\s+Foundations)|namespace\\s+Foundations\\b)"
+        - regex: "(?m)^\\s*import\\s+(?:[A-Za-z0-9_.]+\\s+)*(?:StochasticCCV|TensorNetwork|CuspCatastrophe|PhasePortrait|ReinforcementLearning|AgenticSafety|ProvenanceChain)\\b"
+    - all:
+        - regex: "(?m)^\\s*(?:--\\s*(?:\\[?tier\\s*1\\]?|module\\s+(?:StochasticCCV|CuspCatastrophe|PhasePortrait))|namespace\\s+(?:StochasticCCV|CuspCatastrophe|PhasePortrait)\\b)"
+        - regex: "(?m)^\\s*import\\s+(?:[A-Za-z0-9_.]+\\s+)*(?:ReinforcementLearning|AgenticSafety|ProvenanceChain)\\b"
+    - all:
+        - regex: "(?m)^\\s*(?:--\\s*(?:\\[?tier\\s*2\\]?|module\\s+ReinforcementLearning)|namespace\\s+ReinforcementLearning\\b)"
+        - regex: "(?m)^\\s*import\\s+(?:[A-Za-z0-9_.]+\\s+)*(?:AgenticSafety|ProvenanceChain)\\b"
+fix: ""
+metadata:
+  category: correctness
+  weight: 95
+tags:
+  - lean
+  - dag-invariants
+  - architecture
+  - tier-integrity

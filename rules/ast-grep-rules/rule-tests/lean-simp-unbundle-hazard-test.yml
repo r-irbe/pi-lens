@@ -1,0 +1,15 @@
+id: rule-lean-simp-unbundle-hazard
+valid:
+  - |
+    theorem fiberEquiv_apply (x : Fiber A B) : fiberEquiv x = x.1 := by
+      rfl
+  - |
+    @[simp] theorem add_zero (n : Nat) : n + 0 = n := by
+      rfl
+invalid:
+  - |
+    @[simp] theorem fiberEquiv_apply (x : Fiber A B) : fiberEquiv x = x.1 := by
+      rfl
+  - |
+    @[simp] lemma equivStdSimplex_symm_apply (p : Simplex 3) : equivStdSimplex.symm p = p := by
+      rfl
