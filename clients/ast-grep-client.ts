@@ -37,6 +37,7 @@ import {
 	type SgExecutionOptions,
 	type SgScanResult,
 } from "./sg-runner.js";
+import { getAstGrepRuleSources } from "./sgconfig.js";
 
 /**
  * #2636: `AstGrepClient`'s constructor falls back to the bundled `rules/`
