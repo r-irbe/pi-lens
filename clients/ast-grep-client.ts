@@ -33,6 +33,7 @@ import {
 	type SgExecutionOptions,
 	type SgScanResult,
 } from "./sg-runner.js";
+import { getAstGrepRuleSources } from "./sgconfig.js";
 
 /**
  * #2636: `AstGrepClient`'s constructor falls back to the bundled `rules/`
@@ -265,7 +266,13 @@ export class AstGrepClient {
 				: resolvePackagePath(import.meta.url, "rules"));
 		this.log = verbose ? createSubsystemLogger("ast-grep") : () => {};
 		this.ensureRulesHealthReported();
-		this.ruleManager = new AstGrepRuleManager(this.ruleDir, this.log);
+		const ruleSources = ruleDir
+			? [this.ruleDir]
+			: getAstGrepRuleSources(process.cwd()).map((s) => s.dir);
+		this.ruleManager = new AstGrepRuleManager(
+			ruleSources.length > 0 ? ruleSources : this.ruleDir,
+			this.log,
+		);
 		this.runner = new SgRunner(verbose);
 	}
 

@@ -1,0 +1,20 @@
+id: rule-lean-pure-scaled-arithmetic
+language: Lean
+severity: warning
+message: "Uncertified hardware floating point type (Float, Float32, Float64): prefer exact Real/Rat or integer-scaled arithmetic"
+note: |
+  Hardware floating point types (Float, Float32, Float64) lack formal algebraic specifications,
+  do not satisfy associativity or distributivity, and introduce non-deterministic IEEE-754 rounding.
+  In formal mathematical proofs, prefer exact field representations (Real, NNReal, Rat) or certified
+  discrete integer scaling (ScaledInt, Int, Nat).
+rule:
+  regex: "\\b(?:Float|Float32|Float64)\\b"
+fix: ""
+metadata:
+  category: robustness
+  weight: 80
+tags:
+  - lean
+  - integer-scaling
+  - numerical-stability
+  - valuation-algebra

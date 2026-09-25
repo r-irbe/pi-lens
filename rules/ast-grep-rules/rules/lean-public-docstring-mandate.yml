@@ -1,11 +1,11 @@
-id: rule-lean-subproject-docstring-mandate
+id: rule-lean-public-docstring-mandate
 language: Lean
 severity: warning
 message: "Public theorem, definition, or lemma missing required '/-- ... -/' docstring"
 note: |
-  All public declarations (def, theorem, lemma) in `packages/` must be documented
-  with a preceding `/-- ... -/` docstring explaining mathematical intent and invariants.
-  Private declarations (`private def`, `private theorem`) are exempt from this mandate.
+  Public mathematical declarations (def, theorem, lemma) should be documented
+  with a preceding '/-- ... -/' docstring explaining mathematical intent and hypotheses.
+  Private declarations (private def, private theorem) are exempt from this mandate.
 rule:
   all:
     - regex: "(?m)(?:^|\\n)(?![ \\t]*/--)(?:(?:[ \\t]*--[^\\n]*\\n|[ \\t]*/\\*(?!\\*)[^*]*\\*+(?:[^/*][^*]*\\*+)*/\\n|[ \\t]*\\n)*)(?:[ \\t]*@\\[[^\\]]+\\][ \\t]*\\n)*[ \\t]*(?<!private\\s)(?:(?:noncomputable|protected|scoped)\\s+)*(?:def|theorem|lemma)\\s+[A-Za-z0-9_.]+\\b"

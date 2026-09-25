@@ -133,6 +133,7 @@ describe("checkAstGrepRulesHealth", () => {
 		// `!rulesPath` branch must still tell this apart from a genuinely
 		// ABSENT ruleDir via a direct readdirSync(ruleDir) probe.
 		const ruleDir = freshRuleDir();
+		const origExists = vi.mocked(fs.existsSync).getMockImplementation();
 		vi.mocked(fs.existsSync).mockReturnValue(false);
 		const error = Object.assign(new Error("permission denied"), {
 			code: "EACCES",
@@ -140,9 +141,30 @@ describe("checkAstGrepRulesHealth", () => {
 		vi.mocked(fs.readdirSync).mockImplementationOnce(() => {
 			throw error;
 		});
-		expect(checkAstGrepRulesHealth(ruleDir)).toEqual({
-			status: "unreadable",
-			fsErrorCode: "EACCES",
-		});
+		try {
+			expect(checkAstGrepRulesHealth(ruleDir)).toEqual({
+				status: "unreadable",
+				fsErrorCode: "EACCES",
+			});
+		} finally {
+			if (origExists) {
+				vi.mocked(fs.existsSync).mockImplementation(origExists);
+			}
+		}
+	});
+
+	it("loads descriptions from an array of directories with earlier directories overriding collisions", () => {
+		const projectDir = freshRuleDir();
+		const bundledDir = freshRuleDir();
+
+		writeYaml(projectDir, path.join("rules", "override.yml"), "dup-id");
+		writeYaml(bundledDir, path.join("rules", "fallback.yml"), "dup-id");
+		writeYaml(bundledDir, path.join("rules", "bundled-only.yml"), "bundled-only");
+
+		const manager = new AstGrepRuleManager([projectDir, bundledDir], () => {});
+		const descs = manager.loadRuleDescriptions();
+		expect(descs.size).toBe(2);
+		expect(descs.get("dup-id")?.message).toBe("dup-id");
+		expect(descs.has("bundled-only")).toBe(true);
 	});
 });

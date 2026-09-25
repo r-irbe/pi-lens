@@ -70,7 +70,47 @@ export function getAstGrepRuleSources(
 	const candidates: AstGrepRuleSource[] = [];
 
 	if (canonicalDir(root) !== canonicalDir(packageRoot)) {
+		// 1. Explicit ruleDirs configured in local sgconfig.y[a]ml
+		const localConfig = findLocalSgconfig(root);
+		if (localConfig && fs.existsSync(localConfig)) {
+			try {
+				const parsed = loadYaml(fs.readFileSync(localConfig, "utf8")) as {
+					ruleDirs?: unknown;
+				};
+				if (Array.isArray(parsed?.ruleDirs)) {
+					const configDir = path.dirname(localConfig);
+					for (const rd of parsed.ruleDirs) {
+						if (typeof rd === "string" && rd.trim()) {
+							candidates.push({
+								dir: path.resolve(configDir, rd.trim()),
+								origin: "project",
+								tier: "primary",
+							});
+						}
+					}
+				}
+			} catch {
+				// Malformed config, fallback to standard project conventions
+			}
+		}
+
+		// 2. Standard project convention directories
 		candidates.push(
+			{
+				dir: path.join(root, ".pi-lens", "ast-grep-rules", "rules"),
+				origin: "project",
+				tier: "primary",
+			},
+			{
+				dir: path.join(root, ".pi-lens", "rules"),
+				origin: "project",
+				tier: "primary",
+			},
+			{
+				dir: path.join(root, ".ast-grep", "rules"),
+				origin: "project",
+				tier: "primary",
+			},
 			{
 				dir: path.join(root, "rules", "ast-grep-rules", "rules"),
 				origin: "project",

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	_resetBaselineSgconfigForTests,
 	resolveBaselineSgconfig,
@@ -269,6 +269,63 @@ describe("ast-grep baseline sgconfig", () => {
 			expect(
 				fs.readFileSync(path.join(mergedDir2, matches2[0]), "utf8"),
 			).toContain("PROJECT OVERRIDE");
+		});
+	});
+
+	describe("project-local rule discovery locations", () => {
+		let scratchCwd: string;
+		let originalCwd: string;
+
+		beforeEach(() => {
+			originalCwd = process.cwd();
+			scratchCwd = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-project-rules-"),
+			);
+			process.chdir(scratchCwd);
+		});
+
+		afterEach(() => {
+			process.chdir(originalCwd);
+			removeTempDirSync(scratchCwd);
+			_resetBaselineSgconfigForTests();
+		});
+
+		it("loads rules placed under .pi-lens/rules", () => {
+			const projectDir = path.join(scratchCwd, ".pi-lens", "rules");
+			fs.mkdirSync(projectDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(projectDir, "custom-project-rule.yml"),
+				"id: custom-pi-lens-rule\nlanguage: TypeScript\nmessage: from .pi-lens/rules\nrule:\n  pattern: bar($$$)\n",
+			);
+
+			_resetBaselineSgconfigForTests();
+			const configPath = resolveBaselineSgconfig();
+			expect(configPath).toBeDefined();
+			if (!configPath) throw new Error("expected baseline sgconfig");
+			const mergedDir = soleRuleDir(configPath);
+			const ids = idsInMergedDir(mergedDir);
+			expect(ids).toContain("custom-pi-lens-rule");
+		});
+
+		it("loads rules specified in project sgconfig.yml ruleDirs", () => {
+			const customRulesDir = path.join(scratchCwd, "custom", "my-rules");
+			fs.mkdirSync(customRulesDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(customRulesDir, "sgconfig-rule.yml"),
+				"id: custom-sgconfig-rule\nlanguage: TypeScript\nmessage: from sgconfig.yml\nrule:\n  pattern: baz($$$)\n",
+			);
+			fs.writeFileSync(
+				path.join(scratchCwd, "sgconfig.yml"),
+				"ruleDirs:\n  - ./custom/my-rules\n",
+			);
+
+			_resetBaselineSgconfigForTests();
+			const configPath = resolveBaselineSgconfig();
+			expect(configPath).toBeDefined();
+			if (!configPath) throw new Error("expected baseline sgconfig");
+			const mergedDir = soleRuleDir(configPath);
+			const ids = idsInMergedDir(mergedDir);
+			expect(ids).toContain("custom-sgconfig-rule");
 		});
 	});
 });

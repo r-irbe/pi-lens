@@ -1,0 +1,7 @@
+id: rule-lean-pure-scaled-arithmetic
+valid:
+  - "def scaleFactor : Nat := 100"
+  - "def probSimplex : Real := 1"
+invalid:
+  - "def lr : Float := 0.01"
+  - "structure State where val : Float64"
