@@ -332,6 +332,7 @@ export const AST_GREP_LSP_ONLY_RULE_LANGUAGES: readonly string[] = [
 	"go",
 	"java",
 	"kotlin",
+	"lean",
 	"php",
 	"python",
 	"ruby",
