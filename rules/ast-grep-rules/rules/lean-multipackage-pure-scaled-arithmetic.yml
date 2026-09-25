@@ -1,0 +1,23 @@
+id: rule-lean-multipackage-pure-scaled-arithmetic
+language: Lean
+severity: warning
+message: "Uncertified floating point type in subpackage: prefer integer-scaled arithmetic (ScaledInt)"
+note: |
+  Subpackages under `packages/` follow integer-scaled arithmetic invariants
+  (e.g., standardScale = 100 or 10000) formalized in `Foundations.DiscreteValuation`.
+  Direct use of uncertified hardware floating point types (`Float`, `Float32`, `Float64`)
+  in subpackage definitions introduces non-deterministic rounding, breaks formal
+  decidability, and violates cross-package exact valuation contracts.
+  - Use `Foundations.ScaledInt` or integer-scaled `Int` / `Nat`.
+  - For real-valued mathematical analysis, use `Real` / `NNReal` with exact proofs.
+rule:
+  regex: "\\b(?:Float|Float32|Float64)\\b"
+fix: ""
+metadata:
+  category: robustness
+  weight: 80
+tags:
+  - lean
+  - integer-scaling
+  - numerical-stability
+  - valuation-algebra
