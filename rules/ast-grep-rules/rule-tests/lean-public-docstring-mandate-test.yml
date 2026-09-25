@@ -1,0 +1,15 @@
+id: rule-lean-public-docstring-mandate
+valid:
+  - |
+    /-- A docstring explaining myDef -/
+    def myDef : Nat := 42
+  - |
+    /-- Documented theorem -/
+    theorem myThm : 1 = 1 := rfl
+  - |
+    private def internalSecret : Nat := 0
+invalid:
+  - |
+    def undocumentedDef : Nat := 42
+  - |
+    theorem undocumentedThm : 1 = 1 := rfl

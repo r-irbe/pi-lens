@@ -68,7 +68,7 @@ export class AstGrepRuleManager {
 	private ruleDescriptions: Map<string, RuleDescription> | null = null;
 
 	constructor(
-		private ruleDir: string,
+		private ruleDir: string | string[],
 		private log: (msg: string) => void,
 	) {}
 
@@ -76,18 +76,41 @@ export class AstGrepRuleManager {
 		if (this.ruleDescriptions !== null) return this.ruleDescriptions;
 
 		const descriptions = new Map<string, RuleDescription>();
-		const possiblePaths = candidateAstGrepRulesPaths(this.ruleDir);
+		const dirs = Array.isArray(this.ruleDir) ? this.ruleDir : [this.ruleDir];
 
-		const rulesPath = possiblePaths.find((p) => fs.existsSync(p));
+		if (!Array.isArray(this.ruleDir)) {
+			const possiblePaths = candidateAstGrepRulesPaths(this.ruleDir);
+			const rulesPath = possiblePaths.find((p) => fs.existsSync(p));
 
-		if (!rulesPath) {
-			this.log(
-				`Rule descriptions: no rules directory found in ${possiblePaths.join(", ")}`,
-			);
+			if (!rulesPath) {
+				this.log(
+					`Rule descriptions: no rules directory found in ${possiblePaths.join(", ")}`,
+				);
+				this.ruleDescriptions = descriptions;
+				return descriptions;
+			}
+
+			this.loadDescriptionsFromPath(rulesPath, descriptions);
 			this.ruleDescriptions = descriptions;
 			return descriptions;
 		}
 
+		for (const dir of dirs) {
+			const possiblePaths = candidateAstGrepRulesPaths(dir);
+			const rulesPath = possiblePaths.find((p) => fs.existsSync(p));
+			if (rulesPath) {
+				this.loadDescriptionsFromPath(rulesPath, descriptions);
+			}
+		}
+
+		this.ruleDescriptions = descriptions;
+		return descriptions;
+	}
+
+	private loadDescriptionsFromPath(
+		rulesPath: string,
+		descriptions: Map<string, RuleDescription>,
+	): void {
 		try {
 			const files = fs.readdirSync(rulesPath).filter((f) => f.endsWith(".yml"));
 			this.log(`Loaded ${files.length} rule descriptions from ${rulesPath}`);
@@ -95,16 +118,13 @@ export class AstGrepRuleManager {
 				const filePath = path.join(rulesPath, file);
 				const content = fs.readFileSync(filePath, "utf-8");
 				const rule = this.parseRuleYaml(content);
-				if (rule) {
+				if (rule && !descriptions.has(rule.id)) {
 					descriptions.set(rule.id, rule);
 				}
 			}
 		} catch (err: any) {
 			this.log(`Failed to load rule descriptions: ${err.message}`);
 		}
-
-		this.ruleDescriptions = descriptions;
-		return descriptions;
 	}
 
 	private parseRuleYaml(content: string): RuleDescription | null {
