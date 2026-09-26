@@ -137,7 +137,10 @@ the cost of not doing so.
    reproduction that goes red for the bug's reason BEFORE you form a theory of
    the fix — a fix asserted from code inspection without a reproducing loop is
    the failure mode reviews keep catching.
-4. Tests are red-first: write them, prove them red on pre-fix code
+4. Before writing the fix, or a unit tested in isolation, list the ways it can
+   fail (inputs, states, orderings, platforms) in the PR body; a space with two
+   axes is a table. The tests cover that list, not only the happy path.
+   Tests are red-first: write them, prove them red on pre-fix code
    — with one honest exception. When the only red-first path would need broad
    harness setup, brittle mocks, or a test you would delete right after it
    proves the fix (shape 7's record: #1114's mock missing `.once`/`.killed`,
@@ -214,6 +217,10 @@ the cost of not doing so.
    `Test assessment` whenever `tests/` is touched). Free-form bodies fail the
    `PR body (advisory)` check (`scripts/check-pr-body.mjs`); a red on that
    check is a fix-before-review item, not advisory to you.
+   Every code fact in the body is a `` `path:line` `` citation the check
+   verifies: the file must be in the committed tree (never an untracked or
+   git-ignored path, which CI cannot read), and a fenced quote after it must
+   match within ±20 lines. Prose about code with no citation is unverified.
 8. After the push: verify that every gating check actually EXECUTES on your
    exact head SHA with ONE REST read —
    `node scripts/ci-verdict.mjs <pr-number|sha>` (#2539; does the same

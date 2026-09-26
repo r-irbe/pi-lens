@@ -1602,6 +1602,106 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		);
 	});
 
+	// #3482 EditDuringGrace: the pair used to be marked with Date.now() AFTER
+	// the ~2 s grace wait, so another writer's edit inside that wait had an
+	// mtime before the baseline and the turn-end gate delivered the older
+	// scan's findings against it. The mark is now the touch's entry.
+	it("REPLAY-EDIT-DURING-GRACE: marks a cut-off pair before its notify, so an edit inside the wait is stale (#3482)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { clearPendingAuxiliaryCoverage, drainPendingAuxiliaryCoverage } =
+			await import("../../../clients/lsp/pending-aux-coverage.js");
+		const { gateFindingsByPathFreshness } =
+			await import("../../../clients/advisory-provenance.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		const auxiliary = makeClient(3000, [], { serverId: "opengrep" });
+		let notifiedAt: number | undefined;
+		auxiliary.notify.open = vi.fn(async () => {
+			notifiedAt = Date.now();
+		});
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(auxiliary);
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "v1", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		await touch;
+
+		const [pair] = drainPendingAuxiliaryCoverage().filter(
+			(entry) => entry.filePath === FILE && entry.serverId === "opengrep",
+		);
+		expect(notifiedAt).toBeDefined();
+		expect(pair).toBeDefined();
+		// Another writer edits 1 s into the 2 s wait. The real turn-end gate,
+		// fed the real mark, must call the scan stale.
+		const editedAt = (notifiedAt as number) + 1000;
+		const { "late-auxiliary-findings": gate } = gateFindingsByPathFreshness({
+			cwd: "C:/repo",
+			sources: {
+				"late-auxiliary-findings": {
+					findings: [{ message: "v1 finding" }],
+					scannedAt: pair?.markedAtMs,
+					citedPath: () => FILE,
+				},
+			},
+			probePath: () => ({ state: "present", mtimeMs: editedAt }),
+		});
+		expect(pair?.markedAtMs).toBeLessThanOrEqual(notifiedAt as number);
+		expect(gate).toEqual({ live: [], stale: [{ message: "v1 finding" }] });
+		clearPendingAuxiliaryCoverage(FILE, "opengrep");
+	});
+
+	// #3482 ReTouchRemark: the mark records how many sends the scanner still
+	// had to publish, read from the client the touch notified, so the turn-end
+	// drain can tell an older scan's version-less publish from this one's.
+	it("binds a cut-off pair to its scanner's unpublished backlog at mark time (#3482)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { clearPendingAuxiliaryCoverage, drainPendingAuxiliaryCoverage } =
+			await import("../../../clients/lsp/pending-aux-coverage.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		const counts = { sent: 3, published: 1 };
+		const auxiliary = Object.assign(
+			makeClient(3000, [], { serverId: "opengrep" }),
+			{ getPublicationCountsForPath: vi.fn(() => ({ ...counts })) },
+		);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(auxiliary);
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "v3", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		await touch;
+
+		const [pair] = drainPendingAuxiliaryCoverage().filter(
+			(entry) => entry.filePath === FILE && entry.serverId === "opengrep",
+		);
+		expect(auxiliary.getPublicationCountsForPath).toHaveBeenCalledWith(FILE);
+		expect(pair?.backlog).toMatchObject({ unpublished: 2, publishedAtMark: 1 });
+		// The drain reads the SAME client's count later, not a snapshot.
+		counts.published = 3;
+		expect(pair?.backlog?.readPublished()).toBe(3);
+		clearPendingAuxiliaryCoverage(FILE, "opengrep");
+	});
+
 	// #1458 S1: `waitForDiagnostics` RESOLVES on its own timeout and never
 	// rejects (client.ts) — so a silent auxiliary's promise settling within
 	// budget looks, promise-wise, identical to one that actually answered.
@@ -2057,6 +2157,48 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		// NARROWED, not collapsed — the primary answered, so the touch is not
 		// inconclusive and its diagnostics are not discarded (#533 cuts both ways).
 		expect(result?.inconclusive).toBeUndefined();
+	});
+
+	it("#3482: marks the collect-later pair at the touch's own notify time, not when the ceiling gives up", async () => {
+		// `markedAtMs` is the turn-end drain's freshness baseline — the pending
+		// pair's doc comment calls it "roughly when the touch's notify went
+		// out". The producer here instead stamped `Date.now()` AFTER the
+		// 2000ms aux-grace ceiling gave up waiting, which is ~2s later than
+		// the notify. A file saved again inside that window has an mtime that
+		// lands BEFORE the (wrongly late) baseline, so the turn-end freshness
+		// gate reads it as unmodified since the mark and delivers the
+		// cut-off scanner's answer for the file's PREVIOUS revision as fresh.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { drainPendingAuxiliaryCoverage } =
+			await import("../../../clients/lsp/pending-aux-coverage.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(
+				makeClient(3000, [makeDiagnostic("never")], { serverId: "opengrep" }),
+			);
+		await service.getClientsForFile(FILE);
+
+		const notifiedAt = Date.now();
+		const touch = service.touchFile(FILE, "probe", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		// 800 (primary) + 2000 (aux ceiling) + slack, same budget probe() uses.
+		await vi.advanceTimersByTimeAsync(3000);
+		await touch;
+
+		const [pair] = drainPendingAuxiliaryCoverage().filter(
+			(p) => p.filePath === FILE && p.serverId === "opengrep",
+		);
+		expect(pair).toBeDefined();
+		expect(Math.abs((pair?.markedAtMs ?? 0) - notifiedAt)).toBeLessThan(50);
 	});
 
 	// CLASS SWEEP (#1470's own acceptance criterion). opengrep is the scanner the

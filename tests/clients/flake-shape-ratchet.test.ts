@@ -4,7 +4,7 @@
  * Three deflake PRs in two days (#2531 alone fixed three shared-slot races)
  * and nothing counted the contention surface those PRs kept fixing, so the
  * set only grew. This ratchet counts it: `tests/support/flake-shape-scan.ts`
- * runs four detectors over every `tests/**\/*.test.ts` file —
+ * runs five detectors over every `tests/**\/*.test.ts` file —
  *
  * 1. `real-process-spawn` — a real child process (`child_process` import,
  *    `execFileSync`/`spawnSync`/`execSync`, a support spawn-helper call, or a
@@ -14,6 +14,10 @@
  * 3. `raw-timer-wait` — a raw `setTimeout`/`setInterval` wait outside a
  *    `vi.useFakeTimers()` scope.
  * 4. `ungoverned-wait-for` — a `vi.waitFor` call outside a fake-timer scope.
+ * 5. `never-settling-wait` — a `new Promise` with an empty executor outside a
+ *    fake-timer scope (#2885): only a real timer, often a production helper's
+ *    budget the other detectors cannot read, ends an await on it. Minted with
+ *    37 files / 73 hits.
  *
  * `FLAKE_SHAPE_BASELINE` (`tests/support/flake-shape-baseline.json`) is
  * today's population, content-keyed as `file → count` per detector — the
@@ -54,7 +58,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import vitestConfig, { realHarnessInclude } from "../../vitest.config.ts";
 import {
@@ -65,6 +69,7 @@ import {
 	DETECTORS,
 	repoRoot,
 	scanElapsedTimeAssertion,
+	scanNeverSettlingWait,
 	scanRawTimerWait,
 	scanRealProcessSpawn,
 	scanUngovernedWaitFor,
@@ -315,7 +320,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:packaging-pack-manifest.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"observes the real npm pack lifecycle (prepack/postpack); no in-process double is faithful",
+			"observes the real npm pack lifecycle (prepack/postpack), and unpacks that real tarball to check what ships (#3219); no in-process double is faithful",
 	},
 	"real-process-spawn:real-harness/child-exit.test.ts": {
 		detector: "real-process-spawn",
@@ -363,7 +368,7 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 	"real-process-spawn:scripts/check-pr-body.test.ts": {
 		detector: "real-process-spawn",
 		reason:
-			"the exact local CLI and shallow checkout are the subjects; an in-process double cannot prove either command boundary",
+			"the exact local CLI, shallow checkout and `git check-ignore` (#2904) are the subjects; an in-process double cannot prove any of those command boundaries",
 	},
 	"real-process-spawn:scripts/git-fixture-env.test.ts": {
 		detector: "real-process-spawn",
@@ -633,7 +638,25 @@ function describeProblem(p: RatchetProblem): string {
 	return `${p.detector}: ${p.file} rose from ${p.before} to ${p.after} hit(s)${admittedNote}`;
 }
 
+// #3514: `countsByDetector` already shares one walk + one parse per file
+// across all five detectors (`countsCache`, flake-shape-scan.ts) — the walk
+// itself is not redone. But that shared cost is only PAID on the first call,
+// and `it.each(DETECTOR_NAMES)` below calls it in DETECTOR_NAMES order, so
+// whichever detector is first (`real-process-spawn`) absorbed the FULL
+// five-detector cost inside its own 30s per-test budget, not just its own
+// share. Measured on this box (4 cores, load average ~27, run 2026-09-26):
+// real-process-spawn's own detector work is ~22s of a ~117s total — raw-
+// timer-wait's AST walk (`timerBindings` + its own call-site visit) is the
+// biggest single share at ~84s. Paying the whole thing once here, under its
+// own budget decoupled from any one detector's timeout, means no single
+// "detector %s" case is billed for work that belongs to all five.
+const WALK_TIMEOUT_MS = 180_000;
+
 describe("flake-shape ratchet (#2547)", () => {
+	beforeAll(() => {
+		for (const detector of DETECTOR_NAMES) countsByDetector(detector);
+	}, WALK_TIMEOUT_MS);
+
 	it("keeps every admission map sorted", () => {
 		// #2671 recurrence: an unsorted admission is a merge-conflict magnet.
 		expect(() => assertSortedRegistry("fixture", ["b", "a"])).toThrow(
@@ -800,6 +823,7 @@ describe("flake-shape ratchet — the compare function", () => {
 			"elapsed-time-assertion": {},
 			"raw-timer-wait": { [file]: 5 },
 			"ungoverned-wait-for": {},
+			"never-settling-wait": {},
 		};
 
 		// Drops to 2 (an improvement — but the ceiling is now stale at 5).
@@ -1377,7 +1401,7 @@ describe("flake-shape scan — ungoverned-wait-for", () => {
 });
 
 describe("flake-shape scan — mutation-proof self-test", () => {
-	it("has exactly the three declared detectors, each catching its own canonical fixture", () => {
+	it("has exactly the declared detectors, each catching its own canonical fixture", () => {
 		const canonicalFixtures: Record<DetectorName, string> = {
 			"real-process-spawn": 'execFileSync("npx", ["vitest", "run"]);\n',
 			"elapsed-time-assertion":
@@ -1385,6 +1409,8 @@ describe("flake-shape scan — mutation-proof self-test", () => {
 			"raw-timer-wait": "setTimeout(() => {}, 10);\n",
 			"ungoverned-wait-for":
 				"await vi.waitFor(() => expect(ready).toBe(true));\n",
+			"never-settling-wait":
+				"await expect(run(() => new Promise(() => {}))).rejects.toThrow();\n",
 		};
 		expect(Object.keys(canonicalFixtures).sort()).toEqual(
 			[...DETECTOR_NAMES].sort(),
@@ -1400,6 +1426,55 @@ describe("flake-shape scan — mutation-proof self-test", () => {
 				`detector "${name}" must flag its own canonical fixture`,
 			).toBeGreaterThan(0);
 		}
+	});
+});
+
+describe("flake-shape scan — never-settling-wait (#2885)", () => {
+	const hitsIn = (body: string) =>
+		scanNeverSettlingWait(
+			"fixture.test.ts",
+			`it("x", async () => {\n${body}\n});\n`,
+		);
+
+	it.each([
+		["an empty arrow executor", "await run(() => new Promise(() => {}));"],
+		[
+			"a typed executor with an unused param",
+			"await run(() => new Promise<never>((_resolve) => {}));",
+		],
+		[
+			"a comment-only executor body",
+			"await run(() => new Promise<void>(() => {\n// never resolves\n}));",
+		],
+		["a function executor", "await run(() => new Promise(function () {}));"],
+		[
+			"an undefined expression body",
+			"await run(() => new Promise(() => undefined));",
+		],
+	])("ATTACK: flags %s", (_name, body) => {
+		expect(hitsIn(body)).toHaveLength(1);
+	});
+
+	it("does not flag an executor that can settle", () => {
+		expect(
+			hitsIn("await new Promise<void>((resolve) => queueMicrotask(resolve));"),
+		).toEqual([]);
+	});
+
+	it("does not flag a never-settling promise under fake timers", () => {
+		expect(
+			hitsIn(
+				"vi.useFakeTimers();\nconst p = run(() => new Promise(() => {}));\nawait vi.advanceTimersByTimeAsync(5000);",
+			),
+		).toEqual([]);
+	});
+
+	it("does not flag the shape named in a comment or a string", () => {
+		expect(
+			hitsIn(
+				'// new Promise(() => {}) would hang\nconst s = "new Promise(() => {})";',
+			),
+		).toEqual([]);
 	});
 });
 
