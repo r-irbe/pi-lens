@@ -1677,12 +1677,12 @@ describe("lsp_navigation tool", () => {
 
 	it("dispatches goal operation and renders Markdown directly", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
-		(
-			mocked.service as { plainGoal: ReturnType<typeof vi.fn> }
-		).plainGoal = vi.fn().mockResolvedValue({
-			rendered: "1 goal\n⊢ True",
-			goals: ["⊢ True"],
-		});
+		(mocked.service as { plainGoal: ReturnType<typeof vi.fn> }).plainGoal = vi
+			.fn()
+			.mockResolvedValue({
+				rendered: "1 goal\n⊢ True",
+				goals: ["⊢ True"],
+			});
 
 		const result = await tool.execute(
 			"call-goal",
@@ -1743,12 +1743,12 @@ describe("lsp_navigation tool", () => {
 
 	it("attaches hygienic dagger note when Lean 4 goal contains inaccessible variables", async () => {
 		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
-		(
-			mocked.service as { plainGoal: ReturnType<typeof vi.fn> }
-		).plainGoal = vi.fn().mockResolvedValue({
-			rendered: "1 goal\nx✝ : Nat\n⊢ x✝ = x✝",
-			goals: ["x✝ : Nat\n⊢ x✝ = x✝"],
-		});
+		(mocked.service as { plainGoal: ReturnType<typeof vi.fn> }).plainGoal = vi
+			.fn()
+			.mockResolvedValue({
+				rendered: "1 goal\nx✝ : Nat\n⊢ x✝ = x✝",
+				goals: ["x✝ : Nat\n⊢ x✝ = x✝"],
+			});
 
 		const result = await tool.execute(
 			"call-goal-dagger",
@@ -1943,9 +1943,9 @@ describe("lsp_navigation tool", () => {
 			"utf-8",
 		);
 
-		(
-			mocked.service as { definition: ReturnType<typeof vi.fn> }
-		).definition = vi.fn().mockResolvedValue([]);
+		(mocked.service as { definition: ReturnType<typeof vi.fn> }).definition = vi
+			.fn()
+			.mockResolvedValue([]);
 		(
 			mocked.service as { documentSymbol: ReturnType<typeof vi.fn> }
 		).documentSymbol = vi.fn().mockResolvedValue([]);
@@ -2079,17 +2079,17 @@ LEAN_EXPORT lean_object* lp_Helper_myHelper(lean_object* x) {
 		);
 
 		// LSP returns the Lean definition line
-		(
-			mocked.service as { definition: ReturnType<typeof vi.fn> }
-		).definition = vi.fn().mockResolvedValue([
-			{
-				uri: pathToFileURL(leanFile).href,
-				range: {
-					start: { line: 1, character: 7 },
-					end: { line: 1, character: 19 },
+		(mocked.service as { definition: ReturnType<typeof vi.fn> }).definition = vi
+			.fn()
+			.mockResolvedValue([
+				{
+					uri: pathToFileURL(leanFile).href,
+					range: {
+						start: { line: 1, character: 7 },
+						end: { line: 1, character: 19 },
+					},
 				},
-			},
-		]);
+			]);
 
 		try {
 			const result = await tool.execute(
@@ -2116,6 +2116,72 @@ LEAN_EXPORT lean_object* lp_Helper_myHelper(lean_object* x) {
 			expect(parsed.locations[0]?.filePath).toBe(leanFile);
 			expect(parsed.locations[1]?.filePath).toBe(cFile);
 			expect(parsed.locations[1]?.range.start.line).toBe(2);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("dispatches itpConcept operation to query ITP master authority concepts", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-nav-itp-"),
+		);
+		const indexDir = path.join(
+			tmpDir,
+			"docs",
+			"investigation-garden",
+			"source-materials",
+			"indexes",
+		);
+		fs.mkdirSync(indexDir, { recursive: true });
+		const sampleIndex = {
+			version: "1.0.0",
+			master_concepts: [
+				{
+					concept_id: "CONCEPT-HOARE-LOGIC-WEAKEST-PRECONDITION",
+					canonical_name: "Hoare Logic & Weakest Preconditions",
+					ranganathan_facet: {
+						domain_theory: "Deductive Program Verification",
+					},
+					msc2020: ["68Q60", "03B44"],
+					prover_mappings: {
+						lean4: {
+							primary_tactics: ["wp", "vcgen", "hoare_step"],
+							syntax_pattern: "wp [h]",
+						},
+					},
+				},
+			],
+		};
+		fs.writeFileSync(
+			path.join(indexDir, "master-authority-index.json"),
+			JSON.stringify(sampleIndex, null, 2),
+			"utf-8",
+		);
+
+		try {
+			const result = await tool.execute(
+				"test-itp-concept",
+				{
+					operation: "itpConcept",
+					symbol: "Hoare",
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(result.isError).toBeUndefined();
+			const envelope = parseToolJson(result);
+			expect(envelope.ok).toBe(true);
+			const concepts = envelope.result as Array<{
+				conceptId: string;
+				canonicalName: string;
+			}>;
+			expect(concepts).toHaveLength(1);
+			expect(concepts[0].conceptId).toBe(
+				"CONCEPT-HOARE-LOGIC-WEAKEST-PRECONDITION",
+			);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

@@ -159,7 +159,11 @@ describe("checkAstGrepRulesHealth", () => {
 
 		writeYaml(projectDir, path.join("rules", "override.yml"), "dup-id");
 		writeYaml(bundledDir, path.join("rules", "fallback.yml"), "dup-id");
-		writeYaml(bundledDir, path.join("rules", "bundled-only.yml"), "bundled-only");
+		writeYaml(
+			bundledDir,
+			path.join("rules", "bundled-only.yml"),
+			"bundled-only",
+		);
 
 		const manager = new AstGrepRuleManager([projectDir, bundledDir], () => {});
 		const descs = manager.loadRuleDescriptions();

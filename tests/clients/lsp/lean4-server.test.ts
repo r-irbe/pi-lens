@@ -114,7 +114,10 @@ describe("Lean4Server LSP registration and semantics", () => {
 		const root = makeTempDir();
 		const subDir = path.join(root, "src");
 		fs.mkdirSync(subDir, { recursive: true });
-		fs.writeFileSync(path.join(root, "lean-toolchain"), "leanprover/lean4:v4.33.1\n");
+		fs.writeFileSync(
+			path.join(root, "lean-toolchain"),
+			"leanprover/lean4:v4.33.1\n",
+		);
 		const file = path.join(subDir, "Main.lean");
 		fs.writeFileSync(file, "-- lean file");
 
@@ -150,7 +153,8 @@ describe("Lean4Server LSP registration and semantics", () => {
 	it("excludes .lake from source tree walks and classifies .lake as external/vendor", () => {
 		expect(EXCLUDED_DIRS).toContain(".lake");
 		const projectRoot = "/home/dev/project";
-		const vendorFile = "/home/dev/project/.lake/packages/mathlib/Mathlib/Data/Nat/Basic.lean";
+		const vendorFile =
+			"/home/dev/project/.lake/packages/mathlib/Mathlib/Data/Nat/Basic.lean";
 		const buildFile = "/home/dev/project/.lake/build/ir/Main.c";
 		const sourceFile = "/home/dev/project/Main.lean";
 
@@ -191,7 +195,9 @@ describe("Lean4Server LSP registration and semantics", () => {
 		if (fs.existsSync(leanDir)) {
 			const flags = resolveLeanFallbackFlags(leanDir);
 			expect(flags).toBeDefined();
-			expect(flags?.some((f) => f.startsWith("-I") && f.includes("include"))).toBe(true);
+			expect(
+				flags?.some((f) => f.startsWith("-I") && f.includes("include")),
+			).toBe(true);
 			expect(flags).toContain("-Wno-unused-parameter");
 			expect(flags).toContain("-fvisibility=hidden");
 		}

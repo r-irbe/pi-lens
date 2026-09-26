@@ -10,13 +10,16 @@ import {
 	lookupGeneratedCDeclaration,
 	lookupExternCDeclaration,
 	lookupLeanExternForCSymbol,
+	lookupItpConceptForLeanDeclaration,
 	readILeanFile,
 	scanAllILeanFiles,
 } from "../../../clients/lsp/lean4-ilean.js";
 
 describe("lean4-ilean offline reader", () => {
 	it("returns null for workspace without .lake directory", () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ilean-empty-"));
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ilean-empty-"),
+		);
 		try {
 			expect(findILeanRoot(tmpDir)).toBeNull();
 			expect(scanAllILeanFiles(tmpDir)).toEqual([]);
@@ -30,9 +33,18 @@ describe("lean4-ilean offline reader", () => {
 	});
 
 	it("parses valid .ilean file with declarations and imports", () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ilean-test-"));
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ilean-test-"),
+		);
 		try {
-			const ileanDir = path.join(tmpDir, ".lake", "build", "lib", "lean", "MyPkg");
+			const ileanDir = path.join(
+				tmpDir,
+				".lake",
+				"build",
+				"lib",
+				"lean",
+				"MyPkg",
+			);
 			fs.mkdirSync(ileanDir, { recursive: true });
 			const samplePath = path.join(ileanDir, "Core.ilean");
 			const sampleJson = {
@@ -93,7 +105,9 @@ describe("lean4-ilean offline reader", () => {
 	});
 
 	it("handles malformed or invalid .ilean files gracefully", () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ilean-corrupt-"));
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ilean-corrupt-"),
+		);
 		try {
 			const badPath = path.join(tmpDir, "bad.ilean");
 			fs.writeFileSync(badPath, "not valid json", "utf-8");
@@ -127,31 +141,49 @@ LEAN_EXPORT lean_object* lp_MyPkg_myBoxedFn___boxed(lean_object* a, lean_object*
 `;
 			fs.writeFileSync(cFile, cCode, "utf-8");
 
-			const loc = lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "myTheorem");
+			const loc = lookupGeneratedCDeclaration(
+				tmpDir,
+				"MyPkg.Core",
+				"myTheorem",
+			);
 			expect(loc).not.toBeNull();
 			expect(loc?.filePath).toBe(cFile);
 			expect(loc?.line).toBe(3);
 			expect(loc?.symbol).toBe("lp_MyPkg_myTheorem");
 
-			const constLoc = lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "myConst");
+			const constLoc = lookupGeneratedCDeclaration(
+				tmpDir,
+				"MyPkg.Core",
+				"myConst",
+			);
 			expect(constLoc).not.toBeNull();
 			expect(constLoc?.line).toBe(6);
 			expect(constLoc?.symbol).toBe("_init_lp_MyPkg_myConst");
 
-			const boxedLoc = lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "myBoxedFn");
+			const boxedLoc = lookupGeneratedCDeclaration(
+				tmpDir,
+				"MyPkg.Core",
+				"myBoxedFn",
+			);
 			expect(boxedLoc).not.toBeNull();
 			expect(boxedLoc?.line).toBe(9);
 			expect(boxedLoc?.symbol).toBe("lp_MyPkg_myBoxedFn___boxed");
 
-			expect(lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "nonExistent")).toBeNull();
-			expect(lookupGeneratedCDeclaration(tmpDir, "MyPkg.Missing", "myTheorem")).toBeNull();
+			expect(
+				lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "nonExistent"),
+			).toBeNull();
+			expect(
+				lookupGeneratedCDeclaration(tmpDir, "MyPkg.Missing", "myTheorem"),
+			).toBeNull();
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
 	});
 
 	it("resolves extern C declarations and reverse Lean bindings", () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c-extern-test-"));
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-c-extern-test-"),
+		);
 		try {
 			const nativeDir = path.join(tmpDir, "src", "native");
 			fs.mkdirSync(nativeDir, { recursive: true });
@@ -181,6 +213,63 @@ opaque myNativeFunc (n : Nat) : IO Nat
 			expect(leanLoc).not.toBeNull();
 			expect(leanLoc?.uri).toContain("Native.lean");
 			expect(leanLoc?.range.start.line).toBe(1);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("looks up ITP master concepts matching queries", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-itp-test-"));
+		try {
+			const indexDir = path.join(
+				tmpDir,
+				"docs",
+				"investigation-garden",
+				"source-materials",
+				"indexes",
+			);
+			fs.mkdirSync(indexDir, { recursive: true });
+			const sampleIndex = {
+				version: "1.0.0",
+				master_concepts: [
+					{
+						concept_id: "CONCEPT-HOARE-LOGIC-WEAKEST-PRECONDITION",
+						canonical_name: "Hoare Logic & Weakest Preconditions",
+						ranganathan_facet: {
+							domain_theory: "Deductive Program Verification",
+						},
+						msc2020: ["68Q60", "03B44"],
+						prover_mappings: {
+							lean4: {
+								primary_tactics: ["wp", "vcgen", "hoare_step"],
+								syntax_pattern: "wp [h]",
+							},
+						},
+					},
+				],
+			};
+			fs.writeFileSync(
+				path.join(indexDir, "master-authority-index.json"),
+				JSON.stringify(sampleIndex, null, 2),
+				"utf-8",
+			);
+
+			const matches = lookupItpConceptForLeanDeclaration("Hoare", tmpDir);
+			expect(matches.length).toBe(1);
+			expect(matches[0].conceptId).toBe(
+				"CONCEPT-HOARE-LOGIC-WEAKEST-PRECONDITION",
+			);
+			expect(matches[0].primaryTactics).toContain("wp");
+			expect(matches[0].domainTheory).toBe("Deductive Program Verification");
+
+			const tacticMatches = lookupItpConceptForLeanDeclaration("vcgen", tmpDir);
+			expect(tacticMatches.length).toBe(1);
+
+			const noMatches = lookupItpConceptForLeanDeclaration(
+				"nonexistent-term",
+				tmpDir,
+			);
+			expect(noMatches.length).toBe(0);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

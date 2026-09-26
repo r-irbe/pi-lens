@@ -3287,17 +3287,12 @@ export function resolveLeanFallbackFlags(root: string): string[] | undefined {
 			stdio: ["ignore", "pipe", "ignore"],
 		}).trim();
 
-		if (
-			prefix &&
-			existsSync(path.join(prefix, "include", "lean", "lean.h"))
-		) {
+		if (prefix && existsSync(path.join(prefix, "include", "lean", "lean.h"))) {
 			const includeDir = path.join(prefix, "include");
 			const clangIncludeDir = path.join(includeDir, "clang");
 			const flags = [
 				`-I${includeDir}`,
-				...(existsSync(clangIncludeDir)
-					? ["-isystem", clangIncludeDir]
-					: []),
+				...(existsSync(clangIncludeDir) ? ["-isystem", clangIncludeDir] : []),
 				"-Wno-unused-parameter",
 				"-Wno-unused-label",
 				"-fvisibility=hidden",

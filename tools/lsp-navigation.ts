@@ -1129,6 +1129,7 @@ export function createLspNavigationTool(
 				operation !== "workspaceSymbol" &&
 				operation !== "executeCommand" &&
 				operation !== "capabilities" &&
+				operation !== "itpConcept" &&
 				!isCallHierarchyTraversal;
 			if (needsFilePath && (!rawPath || rawPath.trim().length === 0)) {
 				return finalize(
@@ -1684,6 +1685,13 @@ export function createLspNavigationTool(
 							);
 						}
 						return lspService.outgoingCalls(callHierarchyItem);
+					}
+					case "itpConcept": {
+						const queryToken = symbol || query || "";
+						const root = filePath
+							? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
+							: ctx.cwd || ".";
+						return lookupItpConceptForLeanDeclaration(queryToken, root);
 					}
 					default:
 						return [];
