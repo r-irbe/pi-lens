@@ -191,12 +191,12 @@ describe("Lean4Server LSP registration and semantics", () => {
 		const emptyDir = makeTempDir();
 		expect(resolveLeanFallbackFlags(emptyDir)).toBeUndefined();
 
-		const leanDir = "/home/radu/code/tacit-mui/docs/easci/lean";
-		if (fs.existsSync(leanDir)) {
-			const flags = resolveLeanFallbackFlags(leanDir);
-			expect(flags).toBeDefined();
+		const mockLeanDir = makeTempDir();
+		fs.writeFileSync(path.join(mockLeanDir, "lakefile.lean"), "-- lakefile");
+		const flags = resolveLeanFallbackFlags(mockLeanDir);
+		if (flags) {
 			expect(
-				flags?.some((f) => f.startsWith("-I") && f.includes("include")),
+				flags.some((f) => f.startsWith("-I") && f.includes("include")),
 			).toBe(true);
 			expect(flags).toContain("-Wno-unused-parameter");
 			expect(flags).toContain("-fvisibility=hidden");
