@@ -37,6 +37,7 @@ import {
 	lookupGeneratedCDeclaration,
 	lookupExternCDeclaration,
 	lookupLeanExternForCSymbol,
+	lookupItpConceptForLeanDeclaration,
 } from "../clients/lsp/lean4-ilean.js";
 
 const VALID_OPERATIONS = [
@@ -63,6 +64,7 @@ const VALID_OPERATIONS = [
 	"termGoal",
 	"moduleImports",
 	"moduleImportedBy",
+	"itpConcept",
 ] as const;
 
 const NAVIGABLE_SYMBOL_KINDS = new Set([
@@ -1742,9 +1744,7 @@ export function createLspNavigationTool(
 							(line && character
 								? tokenAtPosition(content, line, character)
 								: undefined) ||
-							(symbol
-								? parseSymbolSelector(symbol).baseSymbol
-								: undefined);
+							(symbol ? parseSymbolSelector(symbol).baseSymbol : undefined);
 					} catch {
 						// ignore read error
 					}
@@ -1767,26 +1767,14 @@ export function createLspNavigationTool(
 						result = locations;
 						usedDocumentSymbolFallback = true;
 					} else if (filePath.endsWith(".lean")) {
-						const root = resolveLanguageRootForFile(
-							filePath,
-							ctx.cwd || ".",
-						);
-						const ileanMatches = lookupILeanDeclaration(
-							root,
-							navToken,
-						);
+						const root = resolveLanguageRootForFile(filePath, ctx.cwd || ".");
+						const ileanMatches = lookupILeanDeclaration(root, navToken);
 						if (ileanMatches.length > 0) {
 							const mapped = ileanMatches.map((decl) => {
 								const targetRel =
-									decl.module.replace(/\./g, path.sep) +
-									".lean";
-								const candidatePath = path.join(
-									root,
-									targetRel,
-								);
-								const targetPath = nodeFs.existsSync(
-									candidatePath,
-								)
+									decl.module.replace(/\./g, path.sep) + ".lean";
+								const candidatePath = path.join(root, targetRel);
+								const targetPath = nodeFs.existsSync(candidatePath)
 									? candidatePath
 									: filePath;
 								return {
@@ -1801,14 +1789,10 @@ export function createLspNavigationTool(
 				}
 				if (
 					stillEmpty &&
-					(operation === "moduleImports" ||
-						operation === "moduleImportedBy") &&
+					(operation === "moduleImports" || operation === "moduleImportedBy") &&
 					filePath?.endsWith(".lean")
 				) {
-					const root = resolveLanguageRootForFile(
-						filePath,
-						ctx.cwd || ".",
-					);
+					const root = resolveLanguageRootForFile(filePath, ctx.cwd || ".");
 					const graph = buildILeanModuleGraph(root);
 					const rel = path
 						.relative(root, filePath)
@@ -1838,10 +1822,7 @@ export function createLspNavigationTool(
 					filePath?.endsWith(".lean") &&
 					navToken
 				) {
-					const root = resolveLanguageRootForFile(
-						filePath,
-						ctx.cwd || ".",
-					);
+					const root = resolveLanguageRootForFile(filePath, ctx.cwd || ".");
 					const decls = lookupILeanDeclaration(root, navToken);
 					for (const decl of decls) {
 						const cLoc = lookupGeneratedCDeclaration(
@@ -1875,13 +1856,27 @@ export function createLspNavigationTool(
 					/\.(c|h|cpp|hpp|cc)$/i.test(filePath)
 				) {
 					const root = ctx.cwd || ".";
-					const externDecl = lookupLeanExternForCSymbol(
-						root,
-						navToken,
-					);
+					const externDecl = lookupLeanExternForCSymbol(root, navToken);
 					if (externDecl) {
 						result = [externDecl];
 						usedDocumentSymbolFallback = true;
+					}
+				}
+				if (
+					(stillEmpty || operation === "itpConcept") &&
+					(operation === "itpConcept" ||
+						(operation === "hover" && filePath?.endsWith(".lean"))) &&
+					navToken
+				) {
+					const root = filePath
+						? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
+						: ctx.cwd || ".";
+					const itpMatches = lookupItpConceptForLeanDeclaration(navToken, root);
+					if (itpMatches.length > 0) {
+						if (operation === "itpConcept") {
+							result = itpMatches;
+							usedDocumentSymbolFallback = true;
+						}
 					}
 				}
 				if (
@@ -1907,13 +1902,9 @@ export function createLspNavigationTool(
 									const lines = nodeFs
 										.readFileSync(targetFile, "utf8")
 										.split("\n");
-									const targetLine =
-										loc.range?.start?.line ?? 0;
+									const targetLine = loc.range?.start?.line ?? 0;
 									const checkRange = lines
-										.slice(
-											Math.max(0, targetLine - 2),
-											targetLine + 3,
-										)
+										.slice(Math.max(0, targetLine - 2), targetLine + 3)
 										.join("\n");
 									const externMatch = checkRange.match(
 										/@\[extern\s+"([^"]+)"\]/,
@@ -1924,15 +1915,10 @@ export function createLspNavigationTool(
 											filePath,
 											ctx.cwd || ".",
 										);
-										const cMatch = lookupExternCDeclaration(
-											root,
-											cSymbol,
-										);
+										const cMatch = lookupExternCDeclaration(root, cSymbol);
 										if (cMatch) {
 											const cLoc = {
-												uri: pathToFileURL(
-													cMatch.filePath,
-												).href,
+												uri: pathToFileURL(cMatch.filePath).href,
 												range: {
 													start: {
 														line: cMatch.line,
@@ -1940,9 +1926,7 @@ export function createLspNavigationTool(
 													},
 													end: {
 														line: cMatch.line,
-														character:
-															cMatch.symbol
-																.length,
+														character: cMatch.symbol.length,
 													},
 												},
 											};
@@ -2116,7 +2100,8 @@ export function createLspNavigationTool(
 					"\nNote: Hypotheses marked with '✝' are inaccessible hygienic names generated by Lean. Use 'rename_i' or bind them explicitly to reference them in tactics.";
 			}
 			if (!isEmpty && operation === "goal" && output.trim() === "no goals") {
-				output += " (Proof complete: no remaining open goals at this position).";
+				output +=
+					" (Proof complete: no remaining open goals at this position).";
 			}
 			if (!isEmpty && operation === "termGoal") {
 				output +=

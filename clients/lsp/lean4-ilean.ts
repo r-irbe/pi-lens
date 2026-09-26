@@ -416,3 +416,97 @@ export function lookupLeanExternForCSymbol(
 	}
 	return null;
 }
+
+export interface ItpConceptMatch {
+	conceptId: string;
+	canonicalName: string;
+	domainTheory: string;
+	msc2020: string[];
+	primaryTactics: string[];
+	syntaxPattern?: string;
+	authoritativeIntervals?: string[];
+}
+
+/**
+ * Searches the ITP Master Authority Ontology for concepts related to a Lean 4 symbol or tactic.
+ */
+export function lookupItpConceptForLeanDeclaration(
+	symbolOrTactic: string,
+	workspaceRoot?: string,
+): ItpConceptMatch[] {
+	const query = symbolOrTactic.trim().toLowerCase();
+	if (!query) return [];
+
+	const candidatePaths = [
+		workspaceRoot
+			? path.resolve(
+					workspaceRoot,
+					"docs/investigation-garden/source-materials/indexes/master-authority-index.json",
+				)
+			: "",
+		path.resolve(
+			process.cwd(),
+			"docs/investigation-garden/source-materials/indexes/master-authority-index.json",
+		),
+		path.resolve(
+			process.cwd(),
+			"../tacit-mui/docs/investigation-garden/source-materials/indexes/master-authority-index.json",
+		),
+		path.resolve(
+			process.env.HOME || "",
+			"code/tacit-mui/docs/investigation-garden/source-materials/indexes/master-authority-index.json",
+		),
+	].filter(Boolean);
+
+	let indexPath: string | undefined;
+	for (const p of candidatePaths) {
+		if (fs.existsSync(p)) {
+			indexPath = p;
+			break;
+		}
+	}
+
+	if (!indexPath) return [];
+
+	try {
+		const raw = fs.readFileSync(indexPath, "utf8");
+		const data = JSON.parse(raw);
+		const concepts = data.master_concepts || [];
+		const results: ItpConceptMatch[] = [];
+
+		for (const c of concepts) {
+			const cid = (c.concept_id || "").toLowerCase();
+			const cname = (c.canonical_name || "").toLowerCase();
+			const domain = (c.ranganathan_facet?.domain_theory || "").toLowerCase();
+			const synonyms = (c.synonyms || []).map((s: string) => s.toLowerCase());
+
+			const leanMap = c.prover_mappings?.lean4;
+			const leanTactics = (leanMap?.primary_tactics || [])
+				.join(" ")
+				.toLowerCase();
+			const syntaxPat = (leanMap?.syntax_pattern || "").toLowerCase();
+
+			if (
+				cid.includes(query) ||
+				cname.includes(query) ||
+				domain.includes(query) ||
+				synonyms.some((s: string) => s.includes(query)) ||
+				leanTactics.includes(query) ||
+				syntaxPat.includes(query)
+			) {
+				results.push({
+					conceptId: c.concept_id,
+					canonicalName: c.canonical_name,
+					domainTheory: c.ranganathan_facet?.domain_theory || "ITP",
+					msc2020: c.msc2020 || [],
+					primaryTactics: leanMap?.primary_tactics || [],
+					syntaxPattern: leanMap?.syntax_pattern,
+					authoritativeIntervals: c.authoritative_intervals,
+				});
+			}
+		}
+		return results;
+	} catch {
+		return [];
+	}
+}
