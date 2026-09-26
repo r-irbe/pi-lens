@@ -55,10 +55,11 @@ const VALID_STEP_OUTCOMES = /** @type {const} */ ([
 export function isValidReport(report) {
 	return (
 		report.steps.length > 0 &&
-		report.steps.every((s) =>
-			/** @type {readonly string[]} */ (VALID_STEP_OUTCOMES).includes(
-				s.outcome,
-			),
+		report.steps.every(
+			(s) =>
+				/** @type {readonly string[]} */ (VALID_STEP_OUTCOMES).includes(
+					s.outcome,
+				),
 		)
 	);
 }
