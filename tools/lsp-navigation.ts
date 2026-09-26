@@ -48,14 +48,10 @@ import {
 				}
 				if (
 					stillEmpty &&
-					(operation === "moduleImports" ||
-						operation === "moduleImportedBy") &&
+					(operation === "moduleImports" || operation === "moduleImportedBy") &&
 					filePath?.endsWith(".lean")
 				) {
-					const root = resolveLanguageRootForFile(
-						filePath,
-						ctx.cwd || ".",
-					);
+					const root = resolveLanguageRootForFile(filePath, ctx.cwd || ".");
 					const graph = buildILeanModuleGraph(root);
 					const rel = path
 						.relative(root, filePath)
