@@ -444,17 +444,28 @@ export function lookupItpConceptForLeanDeclaration(
 					"docs/investigation-garden/source-materials/indexes/master-authority-index.json",
 				)
 			: "",
+		workspaceRoot
+			? path.resolve(
+					workspaceRoot,
+					"vendor/itp-ontology/master-authority-index.json",
+				)
+			: "",
+		path.resolve(
+			__dirname,
+			"../../vendor/itp-ontology/master-authority-index.json",
+		),
+		path.resolve(
+			__dirname,
+			"../vendor/itp-ontology/master-authority-index.json",
+		),
+		path.resolve(__dirname, "vendor/itp-ontology/master-authority-index.json"),
 		path.resolve(
 			process.cwd(),
 			"docs/investigation-garden/source-materials/indexes/master-authority-index.json",
 		),
 		path.resolve(
 			process.cwd(),
-			"../tacit-mui/docs/investigation-garden/source-materials/indexes/master-authority-index.json",
-		),
-		path.resolve(
-			process.env.HOME || "",
-			"code/tacit-mui/docs/investigation-garden/source-materials/indexes/master-authority-index.json",
+			"vendor/itp-ontology/master-authority-index.json",
 		),
 	].filter(Boolean);
 
