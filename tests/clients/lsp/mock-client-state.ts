@@ -73,8 +73,11 @@ export function createMockState(
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
 		diagnosticsVersionsByPath: new Map(),
+		publicationStoreCountsByPath: new Map(),
+		expectedPublicationsBeyondSends: new Map(),
 		documentVersions: new Map(),
 		notifyChangeQueues: new Map(),
+		sentReadStamps: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
 		incrementalTextRetainedEntries: 0,
@@ -85,6 +88,7 @@ export function createMockState(
 		openDocuments: new Set(),
 		// #3310: mirrors createLSPClient's own initial state literal.
 		emptyFirstPublishHoldSpent: false,
+		diagnosticFences: new Map(),
 		closedDocuments: new Set(),
 		// #1669 review F8: REQUIRED, not left to the `?.`-optional default —
 		// both are `optional` on `LSPClientState`, and a factory that omits

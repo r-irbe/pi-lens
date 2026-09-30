@@ -132,6 +132,14 @@ let recentPhases: Array<{ phase: string; ts: string }> = [];
  * after `didOpen` the server's pre-index empty publish arrived), not its own
  * work. The touch it fires inside owns any real stall.
  *
+ * #3484: `lsp_diagnostics_fence` is a decision record from the notify path
+ * (no fence request to send) or from the fence bound's timer (its duration is
+ * the fence's age). The touch around it owns any real stall.
+ *
+ * #3490: `lsp_rules_refreshed` is a zero-duration decision record written
+ * from opengrep's `semgrep/rulesRefreshed` notification handler, not work of
+ * its own.
+ *
  * #2044: `test_runner_failed_target_state` is a zero-duration decision after a
  * bounded filesystem probe. The surrounding turn-end test-selection phase owns
  * any real work, so this row must not replace it in stall attribution.
@@ -161,6 +169,8 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"concurrent_session_bind_rollup",
 	"auxiliary_readiness",
 	"lsp_empty_first_publish_held",
+	"lsp_diagnostics_fence",
+	"lsp_rules_refreshed",
 ]);
 
 /**
