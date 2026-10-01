@@ -13,6 +13,8 @@ import {
 	lookupItpConceptForLeanDeclaration,
 	readILeanFile,
 	scanAllILeanFiles,
+	auditLeanBlueprintStatus,
+	generatePedagogicalProofWalkthrough,
 } from "../../../clients/lsp/lean4-ilean.js";
 
 describe("lean4-ilean offline reader", () => {
@@ -270,6 +272,121 @@ opaque myNativeFunc (n : Nat) : IO Nat
 				tmpDir,
 			);
 			expect(noMatches.length).toBe(0);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("audits lean blueprint status and detects premature leanok, missing leanok, and ghost nodes", () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-blueprint-status-"),
+		);
+		try {
+			const leanDir = path.join(tmpDir, "EASCI");
+			const bpDir = path.join(tmpDir, "blueprint", "src");
+			fs.mkdirSync(leanDir, { recursive: true });
+			fs.mkdirSync(bpDir, { recursive: true });
+
+			const sampleLean = `
+/-- A fully proven theorem without sorries -/
+theorem proven_theorem (n : Nat) : n + 0 = n := by
+  rfl
+
+/-- A partially formal theorem with sorry -/
+theorem incomplete_theorem (n : Nat) : n * 0 = 0 := by
+  sorry
+
+/-- An untracked theorem -/
+theorem untracked_theorem (n : Nat) : n = n := by
+  rfl
+`;
+			fs.writeFileSync(path.join(leanDir, "Core.lean"), sampleLean, "utf-8");
+
+			const sampleTex = `
+\\begin{theorem}[Proven Theorem]
+\\label{thm:proven}
+\\lean{proven_theorem}
+This theorem is proven.
+\\end{theorem}
+
+\\begin{theorem}[Incomplete Theorem]
+\\label{thm:incomplete}
+\\lean{incomplete_theorem}
+\\leanok
+This theorem falsely claims leanok.
+\\end{theorem}
+
+\\begin{theorem}[Ghost Theorem]
+\\label{thm:ghost}
+\\lean{nonexistent_theorem}
+\\leanok
+This theorem does not exist in Lean.
+\\end{theorem}
+`;
+			fs.writeFileSync(path.join(bpDir, "content.tex"), sampleTex, "utf-8");
+
+			const status = auditLeanBlueprintStatus(tmpDir, {
+				blueprintDir: "blueprint/src",
+				formalizationDir: "EASCI",
+			});
+
+			expect(status.leanTheoremsCount).toBe(3);
+			expect(status.blueprintTheoremsCount).toBe(3);
+			expect(status.prematureLeanokCount).toBe(1);
+			expect(status.prematureLeanok[0].leanSymbol).toBe("incomplete_theorem");
+			expect(status.missingLeanokCount).toBe(1);
+			expect(status.missingLeanok[0].leanSymbol).toBe("proven_theorem");
+			expect(status.ghostNodesCount).toBe(1);
+			expect(status.ghostNodes[0].leanSymbol).toBe("nonexistent_theorem");
+			expect(status.untrackedLeanCount).toBe(1);
+			expect(status.untrackedLean[0].leanSymbol).toBe("untracked_theorem");
+			expect(status.rendered).toContain(
+				"Lean Blueprint Coverage & Integrity Audit",
+			);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("generates pedagogical proof walkthrough with 3-stage mathematical breakdown", () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-pedagogical-walkthrough-"),
+		);
+		try {
+			const leanDir = path.join(tmpDir, "EASCI");
+			fs.mkdirSync(leanDir, { recursive: true });
+
+			const sampleLean = `
+/-- Cauchy-Schwarz inequality for inner products -/
+theorem cauchy_schwarz_inequality (u v : Real) : u * v <= u * u + v * v := by
+  have h1 : 0 <= (u - v) * (u - v) := by sorry
+  have h2 : 2 * (u * v) <= u * u + v * v := by sorry
+  sorry
+`;
+			const filePath = path.join(leanDir, "Analysis.lean");
+			fs.writeFileSync(filePath, sampleLean, "utf-8");
+
+			const walkthrough = generatePedagogicalProofWalkthrough(
+				tmpDir,
+				"cauchy_schwarz_inequality",
+				filePath,
+			);
+
+			expect(walkthrough).not.toBeNull();
+			expect(walkthrough?.symbol).toBe("cauchy_schwarz_inequality");
+			expect(walkthrough?.docstring).toContain("Cauchy-Schwarz inequality");
+			expect(walkthrough?.milestones.length).toBe(2);
+			expect(walkthrough?.milestones[0].text).toContain("have h1");
+			expect(walkthrough?.milestones[1].text).toContain("have h2");
+			expect(walkthrough?.statement.rigorousLatex).toContain("\\le");
+			expect(walkthrough?.statement.rigorousLatex).toContain("\\mathbb{R}");
+			expect(walkthrough?.rendered).toContain(
+				"Stage 1: Intuitive Mathematical Summary",
+			);
+			expect(walkthrough?.rendered).toContain(
+				"Stage 2: Rigorous Mathematical Formulation",
+			);
+			expect(walkthrough?.rendered).toContain("Stage 3: Type De-formalization");
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

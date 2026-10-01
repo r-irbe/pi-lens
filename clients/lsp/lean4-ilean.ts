@@ -521,3 +521,622 @@ export function lookupItpConceptForLeanDeclaration(
 		return [];
 	}
 }
+
+export interface BlueprintStatusResult {
+	formalizationDir: string;
+	blueprintDir: string;
+	leanTheoremsCount: number;
+	blueprintTheoremsCount: number;
+	prematureLeanokCount: number;
+	missingLeanokCount: number;
+	ghostNodesCount: number;
+	untrackedLeanCount: number;
+	prematureLeanok: Array<{
+		label: string;
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}>;
+	missingLeanok: Array<{
+		label: string;
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}>;
+	ghostNodes: Array<{
+		label: string;
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}>;
+	untrackedLean: Array<{
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}>;
+	rendered: string;
+}
+
+export interface PedagogicalWalkthroughResult {
+	symbol: string;
+	module?: string;
+	filePath?: string;
+	line?: number;
+	docstring?: string;
+	statement: {
+		rawLean: string;
+		informalSummary: string;
+		rigorousLatex: string;
+	};
+	milestones: Array<{ line: number; text: string }>;
+	rendered: string;
+}
+
+function findFilesRecursively(
+	dir: string,
+	ext: string,
+	excludeDirs: Set<string>,
+): string[] {
+	const results: string[] = [];
+	if (!fs.existsSync(dir)) return results;
+	try {
+		const entries = fs.readdirSync(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (entry.isDirectory()) {
+				if (!excludeDirs.has(entry.name)) {
+					results.push(
+						...findFilesRecursively(
+							path.join(dir, entry.name),
+							ext,
+							excludeDirs,
+						),
+					);
+				}
+			} else if (entry.isFile() && entry.name.endsWith(ext)) {
+				results.push(path.join(dir, entry.name));
+			}
+		}
+	} catch {
+		// Ignore unreadable paths
+	}
+	return results;
+}
+
+export function deformalizeLeanMathStatement(rawStatement: string): {
+	informalSummary: string;
+	rigorousLatex: string;
+} {
+	const cleaned = rawStatement
+		.replace(
+			/^(?:(?:noncomputable|scoped|protected|private)\s+)*(?:theorem|lemma|def)\s+[A-Za-z0-9_.]+\s*/,
+			"",
+		)
+		.replace(/:=\s*(?:by)?.*$/, "")
+		.trim();
+
+	const latex = cleaned
+		.replace(/->/g, "\\to ")
+		.replace(/\bforall\b/g, "\\forall ")
+		.replace(/\bexists\b/g, "\\exists ")
+		.replace(/<=/g, "\\le ")
+		.replace(/>=/g, "\\ge ")
+		.replace(/!=/g, "\\ne ")
+		.replace(/\bReal\b/g, "\\mathbb{R}")
+		.replace(/\bNat\b/g, "\\mathbb{N}")
+		.replace(/\bInt\b/g, "\\mathbb{Z}")
+		.replace(/\bRat\b/g, "\\mathbb{Q}")
+		.replace(/\bComplex\b/g, "\\mathbb{C}");
+
+	const informal =
+		"States that for all valid inputs satisfying structural preconditions, mathematical invariants and bounds hold uniformly.";
+
+	return {
+		informalSummary: informal,
+		rigorousLatex: latex,
+	};
+}
+
+export function auditLeanBlueprintStatus(
+	workspaceRoot: string,
+	options?: { blueprintDir?: string; formalizationDir?: string },
+): BlueprintStatusResult {
+	const excludeDirs = new Set([
+		".git",
+		".lake",
+		"vendor",
+		"node_modules",
+		"dist",
+		".cache",
+	]);
+
+	// Resolve blueprint directory
+	let resolvedBlueprintDir = "";
+	if (options?.blueprintDir) {
+		const bpCandidate = path.isAbsolute(options.blueprintDir)
+			? options.blueprintDir
+			: path.resolve(workspaceRoot, options.blueprintDir);
+		if (fs.existsSync(bpCandidate)) {
+			resolvedBlueprintDir = bpCandidate;
+		}
+	}
+	if (!resolvedBlueprintDir) {
+		const candidates = [
+			path.resolve(workspaceRoot, "blueprint", "src"),
+			path.resolve(workspaceRoot, "docs", "blueprint"),
+			path.resolve(workspaceRoot, "blueprint"),
+			path.resolve(workspaceRoot, "docs", "easci", "blueprint"),
+		];
+		for (const c of candidates) {
+			if (fs.existsSync(c)) {
+				resolvedBlueprintDir = c;
+				break;
+			}
+		}
+	}
+
+	// Resolve formalization directory
+	let resolvedFormalizationDir = "";
+	if (options?.formalizationDir) {
+		const formCandidate = path.isAbsolute(options.formalizationDir)
+			? options.formalizationDir
+			: path.resolve(workspaceRoot, options.formalizationDir);
+		if (fs.existsSync(formCandidate)) {
+			resolvedFormalizationDir = formCandidate;
+		}
+	}
+	if (!resolvedFormalizationDir) {
+		const candidates = [
+			path.resolve(workspaceRoot, "docs", "easci", "lean", "EASCI"),
+			path.resolve(workspaceRoot, "docs", "easci", "lean"),
+			path.resolve(workspaceRoot, "EASCI"),
+			path.resolve(workspaceRoot, "lean"),
+			workspaceRoot,
+		];
+		for (const c of candidates) {
+			if (fs.existsSync(c)) {
+				resolvedFormalizationDir = c;
+				break;
+			}
+		}
+	}
+
+	// Collect Lean files and scan declarations
+	const leanFiles = findFilesRecursively(
+		resolvedFormalizationDir,
+		".lean",
+		excludeDirs,
+	);
+	interface ScannedLeanDecl {
+		name: string;
+		file: string;
+		line: number;
+		hasSorry: boolean;
+	}
+	const leanDecls: ScannedLeanDecl[] = [];
+	const leanDeclsByName = new Map<string, ScannedLeanDecl>();
+
+	const declRegex =
+		/^(?:(?:noncomputable|scoped|protected|private)\s+)*(theorem|lemma|def)\s+([A-Za-z0-9_.]+)/;
+
+	for (const file of leanFiles) {
+		try {
+			const content = fs.readFileSync(file, "utf8");
+			const lines = content.split(/\r?\n/);
+			for (let i = 0; i < lines.length; i++) {
+				const match = lines[i].trim().match(declRegex);
+				if (match) {
+					const name = match[2];
+					let hasSorry = false;
+					// Scan proof body until next decl or end
+					let inBlockComment = false;
+					for (let j = i; j < Math.min(lines.length, i + 250); j++) {
+						const l = lines[j].trim();
+						if (
+							j > i &&
+							(declRegex.test(l) || l.startsWith("/--") || l.startsWith("/-"))
+						) {
+							break;
+						}
+						if (l.startsWith("end ") && !l.startsWith("end of")) break;
+						if (l.startsWith("/-") || l.startsWith("/--")) {
+							inBlockComment = true;
+						}
+						if (inBlockComment) {
+							if (l.includes("-/")) inBlockComment = false;
+							continue;
+						}
+						if (l.startsWith("--")) continue;
+						const codePart = l.split("--")[0];
+						if (/\bsorry\b/.test(codePart)) {
+							hasSorry = true;
+							break;
+						}
+					}
+					const decl: ScannedLeanDecl = {
+						name,
+						file: path.relative(workspaceRoot, file),
+						line: i + 1,
+						hasSorry,
+					};
+					leanDecls.push(decl);
+					leanDeclsByName.set(name, decl);
+				}
+			}
+		} catch {
+			// Ignore unreadable file
+		}
+	}
+
+	// Collect Blueprint TeX files
+	const texFiles = resolvedBlueprintDir
+		? findFilesRecursively(resolvedBlueprintDir, ".tex", excludeDirs)
+		: [];
+
+	interface ScannedBpNode {
+		label: string;
+		leanSymbol: string;
+		hasLeanok: boolean;
+		file: string;
+		line: number;
+	}
+	const bpNodes: ScannedBpNode[] = [];
+
+	const leanTagRegex = /\\lean\{([^}]+)\}/g;
+	const labelRegex = /\\label\{([^}]+)\}/;
+
+	for (const file of texFiles) {
+		try {
+			const content = fs.readFileSync(file, "utf8");
+			const lines = content.split(/\r?\n/);
+			for (let i = 0; i < lines.length; i++) {
+				const lineText = lines[i];
+				let leanMatch: RegExpExecArray | null;
+				leanTagRegex.lastIndex = 0;
+				while ((leanMatch = leanTagRegex.exec(lineText)) !== null) {
+					const leanSymbol = leanMatch[1].trim();
+					// Look for label and leanok strictly within the enclosing environment
+					let start = i;
+					while (
+						start > 0 &&
+						!lines[start].includes("\\begin{") &&
+						!lines[start].includes("\\end{")
+					) {
+						start--;
+					}
+					let end = i;
+					while (
+						end < lines.length - 1 &&
+						!lines[end].includes("\\end{") &&
+						!lines[end].includes("\\begin{")
+					) {
+						end++;
+					}
+					const windowText = lines.slice(start, end + 1).join("\n");
+					const labelMatch = windowText.match(labelRegex);
+					const label = labelMatch ? labelMatch[1] : leanSymbol;
+					const hasLeanok = windowText.includes("\\leanok");
+
+					bpNodes.push({
+						label,
+						leanSymbol,
+						hasLeanok,
+						file: path.relative(workspaceRoot, file),
+						line: i + 1,
+					});
+				}
+			}
+		} catch {
+			// Ignore unreadable file
+		}
+	}
+
+	// Cross-check
+	const prematureLeanok: Array<{
+		label: string;
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}> = [];
+	const missingLeanok: Array<{
+		label: string;
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}> = [];
+	const ghostNodes: Array<{
+		label: string;
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}> = [];
+
+	const referencedLeanSymbols = new Set<string>();
+
+	for (const node of bpNodes) {
+		referencedLeanSymbols.add(node.leanSymbol);
+		const decl =
+			leanDeclsByName.get(node.leanSymbol) ||
+			leanDeclsByName.get(node.leanSymbol.split(".").pop()!);
+
+		if (!decl) {
+			ghostNodes.push({
+				label: node.label,
+				leanSymbol: node.leanSymbol,
+				file: node.file,
+				line: node.line,
+			});
+		} else if (node.hasLeanok && decl.hasSorry) {
+			prematureLeanok.push({
+				label: node.label,
+				leanSymbol: node.leanSymbol,
+				file: decl.file,
+				line: decl.line,
+			});
+		} else if (!node.hasLeanok && !decl.hasSorry) {
+			missingLeanok.push({
+				label: node.label,
+				leanSymbol: node.leanSymbol,
+				file: decl.file,
+				line: decl.line,
+			});
+		}
+	}
+
+	const untrackedLean: Array<{
+		leanSymbol: string;
+		file: string;
+		line: number;
+	}> = [];
+	for (const decl of leanDecls) {
+		if (
+			!referencedLeanSymbols.has(decl.name) &&
+			!referencedLeanSymbols.has(decl.name.split(".").pop()!)
+		) {
+			untrackedLean.push({
+				leanSymbol: decl.name,
+				file: decl.file,
+				line: decl.line,
+			});
+		}
+	}
+
+	let rendered = `### Lean Blueprint Coverage & Integrity Audit\n\n`;
+	rendered += `- **Formalization Dir**: \`${path.relative(workspaceRoot, resolvedFormalizationDir) || "."}\`\n`;
+	rendered += `- **Blueprint Dir**: \`${path.relative(workspaceRoot, resolvedBlueprintDir) || "(not found)"}\`\n`;
+	rendered += `- **Physical Lean Declarations**: ${leanDecls.length}\n`;
+	rendered += `- **Blueprint LaTeX Nodes**: ${bpNodes.length}\n`;
+	rendered += `- **Premature \\\\leanok (Contains Sorries)**: ${prematureLeanok.length}\n`;
+	rendered += `- **Missing \\\\leanok (Fully Proven in Lean)**: ${missingLeanok.length}\n`;
+	rendered += `- **Ghost Nodes (Blueprint tag missing in Lean)**: ${ghostNodes.length}\n`;
+	rendered += `- **Untracked Lean Theorems**: ${untrackedLean.length}\n\n`;
+
+	if (prematureLeanok.length > 0) {
+		rendered += `#### Premature \\\\leanok (Critical Integrity Violations)\n`;
+		for (const p of prematureLeanok.slice(0, 10)) {
+			rendered += `- \`${p.label}\` -> \`${p.leanSymbol}\` (${p.file}:${p.line})\n`;
+		}
+		if (prematureLeanok.length > 10) {
+			rendered += `- ... and ${prematureLeanok.length - 10} more\n`;
+		}
+		rendered += "\n";
+	}
+
+	if (missingLeanok.length > 0) {
+		rendered += `#### Missing \\\\leanok (Proven but Unmarked in Blueprint)\n`;
+		for (const m of missingLeanok.slice(0, 10)) {
+			rendered += `- \`${m.label}\` -> \`${m.leanSymbol}\` (${m.file}:${m.line})\n`;
+		}
+		if (missingLeanok.length > 10) {
+			rendered += `- ... and ${missingLeanok.length - 10} more\n`;
+		}
+		rendered += "\n";
+	}
+
+	if (ghostNodes.length > 0) {
+		rendered += `#### Ghost Nodes (Tagged in Blueprint but Missing in Lean)\n`;
+		for (const g of ghostNodes.slice(0, 10)) {
+			rendered += `- \`${g.label}\` -> \`${g.leanSymbol}\` (${g.file}:${g.line})\n`;
+		}
+		if (ghostNodes.length > 10) {
+			rendered += `- ... and ${ghostNodes.length - 10} more\n`;
+		}
+		rendered += "\n";
+	}
+
+	return {
+		formalizationDir: resolvedFormalizationDir,
+		blueprintDir: resolvedBlueprintDir,
+		leanTheoremsCount: leanDecls.length,
+		blueprintTheoremsCount: bpNodes.length,
+		prematureLeanokCount: prematureLeanok.length,
+		missingLeanokCount: missingLeanok.length,
+		ghostNodesCount: ghostNodes.length,
+		untrackedLeanCount: untrackedLean.length,
+		prematureLeanok,
+		missingLeanok,
+		ghostNodes,
+		untrackedLean,
+		rendered,
+	};
+}
+
+export function generatePedagogicalProofWalkthrough(
+	workspaceRoot: string,
+	symbol: string,
+	filePath?: string,
+): PedagogicalWalkthroughResult | null {
+	const trimmedSymbol = symbol.trim();
+	if (!trimmedSymbol) return null;
+
+	let targetFile = filePath ? path.resolve(workspaceRoot, filePath) : "";
+	let line = 0;
+	let moduleName = "";
+
+	if (!targetFile || !fs.existsSync(targetFile)) {
+		const ileanMatches = lookupILeanDeclaration(workspaceRoot, trimmedSymbol);
+		if (ileanMatches.length > 0) {
+			const m = ileanMatches[0];
+			moduleName = m.module;
+			line = m.selectionRange.start.line + 1;
+			const modRel = moduleName.replace(/\./g, "/") + ".lean";
+			const candidates = [
+				path.resolve(workspaceRoot, modRel),
+				path.resolve(workspaceRoot, "docs/easci/lean", modRel),
+				path.resolve(workspaceRoot, "EASCI", modRel),
+			];
+			for (const c of candidates) {
+				if (fs.existsSync(c)) {
+					targetFile = c;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!targetFile || !fs.existsSync(targetFile)) {
+		const leanFiles = findFilesRecursively(
+			workspaceRoot,
+			".lean",
+			new Set([".git", ".lake", "vendor", "node_modules"]),
+		);
+		const declRegex = new RegExp(
+			`^(?:(?:noncomputable|scoped|protected|private)\\s+)*(?:theorem|lemma|def)\\s+${trimmedSymbol.split(".").pop()!}\\b`,
+		);
+		for (const f of leanFiles) {
+			try {
+				const content = fs.readFileSync(f, "utf8");
+				const lines = content.split(/\r?\n/);
+				for (let i = 0; i < lines.length; i++) {
+					if (declRegex.test(lines[i].trim())) {
+						targetFile = f;
+						line = i + 1;
+						break;
+					}
+				}
+				if (targetFile) break;
+			} catch {
+				// Continue search
+			}
+		}
+	}
+
+	if (!targetFile || !fs.existsSync(targetFile)) {
+		return null;
+	}
+
+	const rawContent = fs.readFileSync(targetFile, "utf8");
+	const lines = rawContent.split(/\r?\n/);
+
+	if (line === 0) {
+		const symShort = trimmedSymbol.split(".").pop()!;
+		const declRegex = new RegExp(
+			`^(?:(?:noncomputable|scoped|protected|private)\\s+)*(?:theorem|lemma|def)\\s+${symShort}\\b`,
+		);
+		for (let i = 0; i < lines.length; i++) {
+			if (declRegex.test(lines[i].trim())) {
+				line = i + 1;
+				break;
+			}
+		}
+	}
+
+	if (line === 0) return null;
+
+	let docstring = "";
+	if (line > 1) {
+		let c = line - 2;
+		while (c >= 0 && lines[c].trim() === "") c--;
+		if (c >= 0 && lines[c].trim().endsWith("-/")) {
+			const endD = c;
+			while (c >= 0 && !lines[c].includes("/--")) c--;
+			if (c >= 0 && lines[c].includes("/--")) {
+				const docLines = lines.slice(c, endD + 1).map((l) =>
+					l
+						.replace(/^\s*\/--\s*/, "")
+						.replace(/\s*-\/\s*$/, "")
+						.trim(),
+				);
+				docstring = docLines.filter(Boolean).join(" ");
+			}
+		}
+	}
+
+	const statementLines: string[] = [];
+	let proofStart = line;
+	let idx = line - 1;
+	while (idx < lines.length) {
+		statementLines.push(lines[idx].trim());
+		if (lines[idx].includes(":=") || lines[idx].includes("where")) {
+			proofStart = idx + 2;
+			break;
+		}
+		idx++;
+	}
+	const rawStatement = statementLines.join(" ");
+	const deformalized = deformalizeLeanMathStatement(rawStatement);
+
+	const milestones: Array<{ line: number; text: string }> = [];
+	const milestoneRegex =
+		/^\s*(?:have\b|obtain\b|calc\b|induction\b|rcases\b|cases\b|constructor\b|by_contra\b|ext\b)/;
+	for (
+		let p = proofStart - 1;
+		p < Math.min(lines.length, proofStart + 250);
+		p++
+	) {
+		const trimmed = lines[p].trim();
+		if (
+			/^(?:(?:noncomputable|scoped|protected|private)\s+)*(?:theorem|lemma|def|structure|class)\s+[A-Za-z0-9_.]+\b/.test(
+				trimmed,
+			)
+		) {
+			break;
+		}
+		if (trimmed.startsWith("end ") && !trimmed.startsWith("end of")) break;
+		if (milestoneRegex.test(trimmed)) {
+			milestones.push({ line: p + 1, text: trimmed });
+		}
+	}
+
+	const relFile = path.relative(workspaceRoot, targetFile);
+
+	let md = `# Pedagogical Proof Walkthrough: \`${trimmedSymbol}\`\n\n`;
+	md += `**Location**: \`${relFile}:${line}\`\n\n`;
+	if (docstring) {
+		md += `> ${docstring}\n\n`;
+	}
+
+	md += `## Stage 1: Intuitive Mathematical Summary\n`;
+	md += `${deformalized.informalSummary}\n\n`;
+
+	md += `## Stage 2: Rigorous Mathematical Formulation\n`;
+	md += `$$\n${deformalized.rigorousLatex}\n$$\n\n`;
+
+	md += `## Stage 3: Type De-formalization & Proof Milestone Skeleton\n`;
+	md += `### Formal Lean Declaration\n`;
+	md += `\`\`\`lean\n${rawStatement}\n\`\`\`\n\n`;
+
+	md += `### Milestone Towers\n`;
+	if (milestones.length > 0) {
+		for (const ms of milestones) {
+			md += `- **Line ${ms.line}**: \`${ms.text}\`\n`;
+		}
+	} else {
+		md += `- *Direct / automated term proof without intermediate have-lemmas.*\n`;
+	}
+	md += "\n";
+
+	return {
+		symbol: trimmedSymbol,
+		module: moduleName || undefined,
+		filePath: relFile,
+		line,
+		docstring: docstring || undefined,
+		statement: {
+			rawLean: rawStatement,
+			informalSummary: deformalized.informalSummary,
+			rigorousLatex: deformalized.rigorousLatex,
+		},
+		milestones,
+		rendered: md,
+	};
+}

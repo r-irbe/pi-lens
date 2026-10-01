@@ -38,6 +38,8 @@ import {
 	lookupExternCDeclaration,
 	lookupLeanExternForCSymbol,
 	lookupItpConceptForLeanDeclaration,
+	auditLeanBlueprintStatus,
+	generatePedagogicalProofWalkthrough,
 } from "../clients/lsp/lean4-ilean.js";
 
 const VALID_OPERATIONS = [
@@ -65,6 +67,8 @@ const VALID_OPERATIONS = [
 	"moduleImports",
 	"moduleImportedBy",
 	"itpConcept",
+	"blueprintStatus",
+	"pedagogicalWalkthrough",
 ] as const;
 
 const NAVIGABLE_SYMBOL_KINDS = new Set([
@@ -132,6 +136,9 @@ function emptyReasonForOperation(operation: LspNavigationOperation): string {
 	if (operation === "termGoal") return "no-term-goal-at-position";
 	if (operation === "moduleImports") return "no-module-imports-found";
 	if (operation === "moduleImportedBy") return "no-importing-modules-found";
+	if (operation === "blueprintStatus")
+		return "no-blueprint-or-formalization-found";
+	if (operation === "pedagogicalWalkthrough") return "declaration-not-found";
 	return "no-results";
 }
 
@@ -1130,6 +1137,8 @@ export function createLspNavigationTool(
 				operation !== "executeCommand" &&
 				operation !== "capabilities" &&
 				operation !== "itpConcept" &&
+				operation !== "blueprintStatus" &&
+				operation !== "pedagogicalWalkthrough" &&
 				!isCallHierarchyTraversal;
 			if (needsFilePath && (!rawPath || rawPath.trim().length === 0)) {
 				return finalize(
@@ -1692,6 +1701,26 @@ export function createLspNavigationTool(
 							? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
 							: ctx.cwd || ".";
 						return lookupItpConceptForLeanDeclaration(queryToken, root);
+					}
+					case "blueprintStatus": {
+						const root = filePath
+							? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
+							: ctx.cwd || ".";
+						return auditLeanBlueprintStatus(root, {
+							blueprintDir: query,
+							formalizationDir: symbol,
+						});
+					}
+					case "pedagogicalWalkthrough": {
+						const root = filePath
+							? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
+							: ctx.cwd || ".";
+						const targetSymbol = symbol || query || "";
+						return generatePedagogicalProofWalkthrough(
+							root,
+							targetSymbol,
+							filePath,
+						);
 					}
 					default:
 						return [];

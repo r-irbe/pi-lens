@@ -2186,4 +2186,101 @@ LEAN_EXPORT lean_object* lp_Helper_myHelper(lean_object* x) {
 			removeTempDirSync(tmpDir);
 		}
 	});
+
+	it("dispatches blueprintStatus operation in lsp_navigation", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-nav-bp-"),
+		);
+		const leanDir = path.join(tmpDir, "EASCI");
+		const bpDir = path.join(tmpDir, "blueprint", "src");
+		fs.mkdirSync(leanDir, { recursive: true });
+		fs.mkdirSync(bpDir, { recursive: true });
+
+		fs.writeFileSync(
+			path.join(leanDir, "Core.lean"),
+			"theorem test_thm : 1 = 1 := rfl\n",
+			"utf-8",
+		);
+		fs.writeFileSync(
+			path.join(bpDir, "main.tex"),
+			"\\begin{theorem}\\label{thm:test}\\lean{test_thm}\\leanok Proof\\end{theorem}\n",
+			"utf-8",
+		);
+
+		try {
+			const result = await tool.execute(
+				"test-bp-status",
+				{
+					operation: "blueprintStatus",
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(result.isError).toBeUndefined();
+			const envelope = parseToolJson(result);
+			expect(envelope.ok).toBe(true);
+			const status = envelope.result as {
+				leanTheoremsCount: number;
+				blueprintTheoremsCount: number;
+			};
+			expect(status.leanTheoremsCount).toBe(1);
+			expect(status.blueprintTheoremsCount).toBe(1);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("dispatches pedagogicalWalkthrough operation in lsp_navigation", async () => {
+		const tool = createLspNavigationTool((flag) => flag === "lens-lsp");
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-nav-ped-"),
+		);
+		const leanDir = path.join(tmpDir, "EASCI");
+		fs.mkdirSync(leanDir, { recursive: true });
+
+		const sampleLean = `
+/-- Fundamental arithmetic identity -/
+theorem add_comm_zero (n : Nat) : n + 0 = n := by
+  have h1 : n + 0 = n := rfl
+  exact h1
+`;
+		fs.writeFileSync(
+			path.join(leanDir, "Arithmetic.lean"),
+			sampleLean,
+			"utf-8",
+		);
+
+		try {
+			const result = await tool.execute(
+				"test-ped-walkthrough",
+				{
+					operation: "pedagogicalWalkthrough",
+					symbol: "add_comm_zero",
+				},
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+
+			expect(result.isError).toBeUndefined();
+			const envelope = parseToolJson(result);
+			expect(envelope.ok).toBe(true);
+			const walkthrough = envelope.result as {
+				symbol: string;
+				docstring?: string;
+				milestones: Array<{ text: string }>;
+			};
+			expect(walkthrough.symbol).toBe("add_comm_zero");
+			expect(walkthrough.docstring).toContain(
+				"Fundamental arithmetic identity",
+			);
+			expect(walkthrough.milestones.length).toBe(1);
+			expect(walkthrough.milestones[0].text).toContain("have h1");
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
 });
