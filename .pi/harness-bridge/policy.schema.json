@@ -1,0 +1,1374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tacit-mui/pi-harness-bridge/schemas/sdlc-policy.v1.json",
+  "title": "harness-bridge policy",
+  "description": "What this repository allows, requires and watches. The file lives at .pi/harness-bridge/policy.json and is merged over the bridge's built-in defaults, so every block is optional and an absent block means the default behaviour, not no behaviour. Nothing here is inferred: if the bridge enforces, requires or reports something, that decision is written down, and a decision that is not written down does not happen.\n\nHow to write one:\n  1. `harness-bridge policy init` writes a full default policy you can edit, and writes policy.schema.json beside it, so an editor with JSON Schema support completes and validates as you type.\n  2. `harness-bridge policy check` reports the effective policy after merging, and exits non-zero when a declaration cannot work -- an unknown ledger kind, a metric rule with both or neither threshold.\n  3. `harness-bridge policy audit` reports declarations that are valid but do nothing useful: a rule whose pattern matches everyday commands, or one that fights a blocking gate.\n\nWhere to put your reasoning: JSON has no comments, and the reason a rule exists is part of the rule. The fields `reason`, `why`, `note`, `message` and `source` are read back by the tools and printed where the decision applies, so a policy that explains itself needs no separate document.\n\nMerging: a repository policy is merged over the defaults block by block. Single values fall back to the default when absent. Lists such as `rules`, `protectedPaths` and `processes.metrics.rules` are replaced wholesale by a layer that declares them, never concatenated: a rule deleted from a policy must stop firing, and a concatenated list would keep it alive invisibly.",
+  "type": "object",
+  "required": [
+    "version"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional. Where the schema for this file is. `policy init` sets it to the copy written beside the policy, so an editor validates the file without a network fetch.",
+      "examples": [
+        "./policy.schema.json"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Policy schema version. Version 1 is the only version the bridge writes, and it is the one required key: reading a file written for another schema silently is how a policy ends up meaning something other than it says.",
+      "examples": [
+        1
+      ]
+    },
+    "protectedBranches": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "main",
+        "master"
+      ],
+      "description": "Branch names that must not be pushed to directly. The check is on the branch a push would update, so a feature branch whose name merely contains `main` is not protected. Leave it empty in a repository with no remote, where protecting the only branch would refuse every commit.",
+      "examples": [
+        [
+          "main",
+          "master"
+        ],
+        []
+      ]
+    },
+    "branchNamePattern": {
+      "type": "string",
+      "default": "^(feat|fix|docs|chore|refactor|test)/[a-z0-9._-]+$",
+      "description": "Regular expression a new branch name must match when `branchNameAction` is not `allow`. It is evaluated against the name being created, not the current branch, so an existing branch that predates the policy is not retroactively invalid.",
+      "examples": [
+        "^(feat|fix|docs|chore|refactor|test)/[a-z0-9._-]+$"
+      ]
+    },
+    "branchNameAction": {
+      "$ref": "#/$defs/action",
+      "default": "warn",
+      "description": "What an offending branch name means. `warn` reports it and continues, which is the default because a branch name is a convention rather than a hazard. `block` refuses the creation; use it only where a naming scheme is load-bearing for automation."
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/rule"
+      },
+      "description": "Behavioural rules, evaluated against the thing they describe before an action runs. Each rule names one fact (a command, a path, file content, a commit message, a diff), one pattern to match it, and what a match means. Several rules can match at once: the most restrictive action wins and every matching rule is reported, so a block does not hide the warnings beside it.",
+      "examples": [
+        [
+          {
+            "id": "no-force-push",
+            "scope": "destructive-git",
+            "tool": "bash",
+            "kind": "command",
+            "pattern": "\\bgit\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b)",
+            "action": "block",
+            "reason": "Force pushing rewrites shared history; open a new commit instead.",
+            "source": "deny-patterns:git-push-force"
+          }
+        ]
+      ]
+    },
+    "protectedPaths": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/protectedPath"
+      },
+      "description": "Directories and files whose contents are load-bearing: generated records, contracts, fixtures a run is measured against. A protected path is a statement that a change to it is a change to what the repository means, so the reason is required and is printed with the finding.",
+      "examples": [
+        [
+          {
+            "id": "frozen-golden",
+            "glob": "golden/**",
+            "action": "warn",
+            "reason": "The golden fixtures are the ground truth the pipeline is measured against; changing one to make a run pass is the regression this repository exists to catch.",
+            "source": "docs/PIPELINE_AUDIT.md A15"
+          }
+        ]
+      ]
+    },
+    "processes": {
+      "$ref": "#/$defs/processes"
+    },
+    "ci": {
+      "$ref": "#/$defs/ci"
+    },
+    "unicode": {
+      "$ref": "#/$defs/unicode"
+    },
+    "injection": {
+      "$ref": "#/$defs/injection"
+    },
+    "resumeBrief": {
+      "$ref": "#/$defs/resumeBrief"
+    },
+    "escalation": {
+      "$ref": "#/$defs/escalation"
+    },
+    "secrets": {
+      "$ref": "#/$defs/secrets"
+    },
+    "capability": {
+      "$ref": "#/$defs/capability"
+    },
+    "commits": {
+      "$ref": "#/$defs/commits"
+    },
+    "audit": {
+      "$ref": "#/$defs/audit"
+    },
+    "verification": {
+      "type": "object",
+      "description": "The runs that verify this repository, declared rather than reconstructed from CI YAML, a pre-push hook and a README. `verify list` prints them; `verify run` executes them.",
+      "properties": {
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "command",
+              "tier",
+              "summary"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "tier": {
+                "type": "string",
+                "enum": [
+                  "fast",
+                  "long"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "lease": {
+      "type": "object",
+      "description": "Who else is writing this tree, from the fleet's lease store (packages/pi-fleet/src/runtime/workspace_lease.ts). Disabled by default.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "lockDir": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "warn",
+            "escalate",
+            "block"
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "warn",
+        "escalate",
+        "block"
+      ],
+      "description": "What a finding means. The four levels are ordered and the strictest match wins:\n  allow    - recorded and permitted; useful for watching a pattern before deciding what it means.\n  warn     - recorded, reported to the reviewer, and the action proceeds.\n  escalate - requires a human decision. An unattended caller (a git hook, CI, a headless agent) cannot answer, so `escalation.noApprover` decides: `fail` refuses the action, `warn` turns it into a notice for the reviewer.\n  block    - refused, always, in every context. Nothing in the policy can soften a block.",
+      "examples": [
+        "block",
+        "escalate",
+        "warn",
+        "allow"
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "pattern",
+        "action",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "One fact about one kind of action, and what it means. A rule is deliberately single-purpose: two facts in one rule cannot be reported, relaxed or tightened separately.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable identifier, quoted in findings and in the audit log. Renaming a rule starts a new history for it, so prefer a new rule over a renamed one."
+        },
+        "scope": {
+          "type": "string",
+          "description": "A grouping label for humans and for `policy check` summaries, for example `destructive-git` or `frozen-artifacts`. It carries no enforcement: it is how a reader finds the rules that belong together."
+        },
+        "tool": {
+          "type": "string",
+          "description": "Which tool the rule applies to: `bash`, `write`, `edit`, `read`, or `*` for any. A rule for bash looks at the command; a rule for write or edit looks at the path and, for content rules, at the text."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "command",
+            "path",
+            "content",
+            "commit-message",
+            "diff"
+          ],
+          "description": "What the pattern is matched against:\n  command        - a shell command line, as bash will receive it.\n  path           - the path an action would write or read.\n  content        - text being written, matched line by line.\n  commit-message - the message of a commit being created.\n  diff           - the staged or proposed diff as text."
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Regular expression source, in the syntax the runtime provides. It is searched rather than anchored, so anchor it yourself where that matters. A pattern that matches everyday work is the most common policy mistake, and it is what `policy audit` exists to find: a rule matching too much is indistinguishable from a policy that blocks everything."
+        },
+        "flags": {
+          "type": "string",
+          "description": "Regular expression flags for `pattern`, as the regex engine spells them, e.g. `i` for case-insensitive. Case-insensitivity is the common case and the reason this is not folded into the pattern: `--force` and `--FORCE` are the same hazard, and a pattern carrying its own inline flags is harder to read at a glance.",
+          "examples": [
+            "i",
+            "im"
+          ]
+        },
+        "action": {
+          "$ref": "#/$defs/action"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why this rule exists, in the words of the people who will hit it. Printed with the finding, so a refused action explains itself without a trip to a document."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the rule comes from: a standard, an incident, an ADR, a checklist item. Lets a reviewer check the rule against its origin instead of guessing."
+        }
+      }
+    },
+    "protectedPath": {
+      "type": "object",
+      "required": [
+        "id",
+        "glob",
+        "action",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier quoted in findings."
+        },
+        "glob": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path glob, matched against repository-relative paths. `**` crosses directories; `*` does not."
+        },
+        "action": {
+          "$ref": "#/$defs/action",
+          "description": "What a change to a protected path means. `warn` is the common choice: the change is often right, and it needs a human to say so."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What makes this path load-bearing. Required, because a frozen path without a reason gets ignored the first time it is inconvenient."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the protection comes from, for a reviewer who wants to check whether it still applies."
+        }
+      },
+      "description": "One entry in protectedPaths: a glob whose contents are load-bearing, and what a change to them means. The reason is required because the check is a claim about the repository's meaning rather than a preference, and a reader who disagrees with it needs something to disagree with."
+    },
+    "processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Declared processes: a named discipline with stages and gates. SDLC is one, and the shape is general by design -- a research pipeline, a document workflow or a release train is the same thing with different gates.\n\nThe concepts, in the order they matter:\n  process     - a discipline whose steps must leave evidence. It has stages (where work happens) and gates (what must be true at a boundary).\n  gate        - a requirement that certain evidence exists before an action proceeds, plus the consequence when it does not. It is not a checklist item: it names the tools, paths, commands or reads that count as evidence, so `the tests were run` is checked rather than assumed.\n  enforcement - what happens without the evidence: `block` refuses the action, `nudge` reports it and allows the action so the record shows the miss, `off` disables the gate.\n  firing      - evidence for a gate was observed. A miss is a gated action attempted without it. The ledger records both, which is what the metrics block counts.\n  park        - a boundary waiting for a person. Parking is deliberate and is never counted as a miss: the workflow is doing what it was told to do.\n\nGates are enforced while work happens; the ledger of firings, misses and parked boundaries is what `process report`, `process metrics` and the improvement loop read afterwards. A policy that declares gates but no metrics still enforces them; a policy that declares metrics has said what to watch for over time.",
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Process ids that are active. Empty means every known definition is active. A process declared under `definitions` is active whether or not it is listed here, unless it is switched off in `disabled`: declaring a process is itself a statement that it applies."
+        },
+        "definitions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/processOverride"
+          },
+          "description": "Processes by id. An entry either tightens a built-in process, naming only what changes, or defines a new one, naming everything.",
+          "examples": [
+            {
+              "sdlc": {
+                "settings": {
+                  "nudgeTolerance": 2
+                },
+                "gates": [
+                  {
+                    "id": "no-verify",
+                    "enforcement": "block"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Gates switched off, as `processId/gateId` or a bare gate id when it is unambiguous across processes. A disabled gate is dropped before evaluation and leaves no record, which is why a reader cannot tell it from a gate that is no longer declared: use `waivers` when the decision itself is the point."
+        },
+        "waivers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gateWaiver"
+          },
+          "default": [],
+          "description": "Built-in gates this repository has exempted, each with the reason it does not apply and the command that shows it. A waived gate stays active and the guard reports it as waived instead of missing, so the ledger holds the decision rather than an absence. A waiver outranks `disabled` for the same gate, because the recorded reason is the whole point.",
+          "examples": [
+            [
+              {
+                "gate": "deck/D2",
+                "reason": "this repository produces presentations with a different linter, so the shipped deck linter does not exist here",
+                "evidence": "find . -name 'pptx_lint*' -print"
+              }
+            ]
+          ]
+        },
+        "metrics": {
+          "$ref": "#/$defs/metrics"
+        }
+      }
+    },
+    "processOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A process, either defined whole or tightened field by field over a built-in one.",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Human-readable name, used in reports."
+        },
+        "description": {
+          "type": "string",
+          "description": "What the process covers and what it deliberately leaves out."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the process comes from: a convention, a standard, an ADR. A gate that traces to nothing is a gate nobody can argue with."
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ordered stage names, e.g. [\"plan\", \"implement\", \"verify\", \"ship\"]. Gates attach to a stage, which is what orders them and what makes `requiredBefore` meaningful."
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gate"
+          },
+          "description": "The gates. Overriding a built-in gate names its id and only the fields that change; declaring a gate id that does not exist adds it.",
+          "examples": [
+            [
+              {
+                "id": "tests-run",
+                "title": "The test suite ran against the current tree",
+                "stage": "verify",
+                "enforcement": "block",
+                "requiredBefore": [
+                  "git push",
+                  "gh pr create"
+                ],
+                "evidence": {
+                  "commands": [
+                    "\\bpytest\\b",
+                    "\\bnpm (run )?test\\b"
+                  ],
+                  "tools": [
+                    "bash"
+                  ]
+                },
+                "why": "A change that ships without its tests leaves the next reader unable to tell intent from accident.",
+                "source": "AGENTS.md verification section"
+              }
+            ]
+          ]
+        },
+        "settings": {
+          "$ref": "#/$defs/processSettings"
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "description": "One boundary requirement. A gate answers two separate questions and the schema keeps them separate: what counts as evidence (`evidence`), and what happens without it (`enforcement`).",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Gate id, unique within the process and quoted in the ledger, e.g. `no-verify` or `tests-run`."
+        },
+        "title": {
+          "type": "string",
+          "description": "Short name shown in reports and in a nudge."
+        },
+        "stage": {
+          "type": "string",
+          "description": "Which process stage the gate belongs to. The stage orders gates relative to each other and to the work."
+        },
+        "enforcement": {
+          "$ref": "#/$defs/enforcement"
+        },
+        "requiredBefore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Actions that must not proceed before this gate has fired. Matching is by substring against the action, for example `git push`, so a gate can be required before a command an agent chooses freely.",
+          "examples": [
+            [
+              "git push",
+              "gh pr create"
+            ]
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/gateEvidence"
+        },
+        "why": {
+          "type": "string",
+          "description": "What goes wrong without the gate. Printed when the gate fires against an action, which is the moment the reason is worth reading."
+        },
+        "source": {
+          "type": "string",
+          "description": "Where the requirement comes from, so it can be checked rather than obeyed."
+        },
+        "evidenceTtlMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long a firing counts as current, in minutes. A gate satisfied by an hour-old test run is satisfied by a test run that predates the change under discussion. Absent or non-positive means the evidence never expires, which is the historical behaviour and the right choice for gates about things that do not change, such as reading a specification."
+        }
+      }
+    },
+    "gateEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What counts as satisfying the gate. Each list is a set of alternatives and the gate fires when one of them is observed. An empty list means that route cannot satisfy the gate, which is different from a gate with no routes at all: the second can never fire, and `policy audit` says so.",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tool names whose use can satisfy the gate, e.g. [\"bash\"] or [\"write\", \"edit\"]. Use it for gates about doing something rather than about a specific command."
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Globs of files whose creation or modification counts as evidence: an artifact the gate is really about.",
+          "examples": [
+            [
+              "docs/*.md",
+              "out/**/*.json"
+            ]
+          ]
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Regular expressions matched against a command that ran. This is the strongest local evidence available: it says how the fact was established, not merely that something was.",
+          "examples": [
+            [
+              "\\bpytest\\b",
+              "\\bnpm (run )?test\\b"
+            ]
+          ]
+        },
+        "reads": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths that count as evidence when read, for gates that require reading a document before acting on it."
+        }
+      }
+    },
+    "enforcement": {
+      "type": "string",
+      "enum": [
+        "block",
+        "nudge",
+        "off"
+      ],
+      "description": "What happens when the gate is not satisfied:\n  block - the action is refused. Use it where proceeding is unrecoverable or leaves no record.\n  nudge - the action proceeds and the miss is recorded, so the discipline is visible without stopping work. The improvement loop reads those misses and can propose tightening the gate.\n  off   - the gate does not fire, and that is recorded like a disabled gate.",
+      "examples": [
+        "block",
+        "nudge"
+      ]
+    },
+    "processSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-process knobs that are not gates: how much leniency the improvement loop allows, and what this repository treats as the process's own gate command.",
+      "properties": {
+        "nudgeTolerance": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many observed misses a nudge tolerates before the loop proposes promoting the gate to a block. A low tolerance means the proposal arrives early, which is right where misses are rare; raising it states that the misses are acceptable for now."
+        },
+        "gateCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Commands this repository treats as running the process's gates, for example a make target that runs lint, tests and the ladder. Naming them makes a project-specific entry point first-class instead of teaching every agent a different command."
+        },
+        "options": {
+          "type": "object",
+          "description": "Process-specific settings, free-form by design and read by the process that understands them. Keeping them here rather than inventing schema for each is what lets a new process exist without a bridge release."
+        }
+      }
+    },
+    "gateWaiver": {
+      "type": "object",
+      "required": [
+        "gate",
+        "reason",
+        "evidence"
+      ],
+      "additionalProperties": false,
+      "description": "One exemption from a gate the guard would otherwise demand. It exists because the gates ship built in: a repository can be governed by a process convention that describes another repository's work, and the honest answer is a recorded, reviewable exemption rather than a gate silently switched off. The reason and the evidence command are both required, and `process waive` refuses to write one without them.",
+      "properties": {
+        "gate": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The gate exempted, as `processId/gateId` or a bare gate id when it is unambiguous across processes, e.g. `deck/D2`."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why this gate does not apply here. Required, because an exemption nobody explained cannot be argued with at review time."
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The command that shows the gate does not apply: it finds nothing, or fails. Required, so the claim behind the waiver can be re-run instead of believed."
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What to count in the ledger afterwards, and what a count means. Enforcement happens while work happens; this block is the other half of the same discipline -- the thresholds this team considers a problem. They belong in the policy because the bridge cannot know them. Whether a boundary parked twice in a week is diligence or a bottleneck, whether a gate that never missed is habitual or untested: those are judgements about a workflow, and a hard-coded threshold would be one team's opinion wearing a tool's clothes.\n\nRules are reported, never enforced. A fired rule is printed by `process metrics` and `process report` and gives a non-zero exit code; acting on a metric stays a decision the improvement loop proposes rather than one it takes.",
+      "properties": {
+        "observationKinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ledgerKind"
+          },
+          "default": [
+            "gate-fired",
+            "gate-missing"
+          ],
+          "description": "Which ledger events count as reaching a gate at all. This is the denominator of the miss rate, and it is why `gate-parked` is absent by default: being held at a boundary is the gate doing its job, and counting it as an observation would reward waiting with a lower miss rate. Include it when, in this repository, reaching a human boundary is the interesting event.",
+          "examples": [
+            [
+              "gate-fired",
+              "gate-missing"
+            ],
+            [
+              "gate-fired",
+              "gate-missing",
+              "gate-parked"
+            ]
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/metricRule"
+          },
+          "default": [],
+          "description": "Count-based rules over the ledger. No rules by default: the bridge does not decide what a team should worry about.",
+          "examples": [
+            [
+              {
+                "id": "parked-boundary-stuck",
+                "kinds": [
+                  "gate-parked"
+                ],
+                "windowDays": 7,
+                "atLeast": 2,
+                "severity": "major",
+                "message": "a boundary was parked twice this week: either the approver is the bottleneck or the question is not answerable as asked"
+              },
+              {
+                "id": "quiet-pipeline",
+                "kinds": [
+                  "gate-fired"
+                ],
+                "windowDays": 30,
+                "atMost": 0,
+                "severity": "note",
+                "message": "no gated action in 30 days: either the pipeline is unused or its gates are not being evaluated, and the second is the one worth knowing"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "metricRule": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "description": "A count of ledger events with a scope and a threshold. Exactly one of `atLeast` and `atMost` is required: they are two different questions -- `this happens more than it should` and `this is not happening at all` -- and a rule declaring both would be unreadable rather than stricter.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier quoted in the finding, so a firing points at the declaration that produced it."
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ledgerKind"
+          },
+          "description": "Which ledger events the rule counts. Absent means every event, which is how a question about liveness is asked: has anything happened at all.",
+          "examples": [
+            [
+              "gate-parked"
+            ],
+            [
+              "gate-missing"
+            ]
+          ]
+        },
+        "gateId": {
+          "type": "string",
+          "description": "Count only events naming this gate, e.g. `tests-run`. Use it to watch one boundary rather than a whole process."
+        },
+        "processId": {
+          "type": "string",
+          "description": "Count only events naming this process, e.g. `sdlc`. Use it where several processes share one ledger."
+        },
+        "windowDays": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Rolling window in days, counted back from when the rule is evaluated. Absent means the whole ledger, which is right for cumulative questions and wrong for `lately`: a rule about the current state of a workflow usually wants a window."
+        },
+        "atLeast": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Fire when the count is at least this. The threshold for `too much`: misses, parks, nudges ignored."
+        },
+        "atMost": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fire when the count is at most this, zero included. The threshold for `not happening`: a gate that has never fired, a boundary nobody reached. Absence of evidence is a finding, and this is how a policy says so."
+        },
+        "severity": {
+          "$ref": "#/$defs/metricSeverity"
+        },
+        "message": {
+          "type": "string",
+          "description": "What the count means, in the team's words. Printed as the finding's text, because the number without the interpretation is the part nobody reads."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "atLeast"
+          ],
+          "not": {
+            "required": [
+              "atMost"
+            ]
+          }
+        },
+        {
+          "required": [
+            "atMost"
+          ],
+          "not": {
+            "required": [
+              "atLeast"
+            ]
+          }
+        }
+      ]
+    },
+    "metricSeverity": {
+      "type": "string",
+      "enum": [
+        "critical",
+        "major",
+        "minor",
+        "note"
+      ],
+      "description": "How much attention a fired rule deserves. The severities order the findings so the first line of a report is the one that matters:\n  critical - the workflow is not doing what it claims.\n  major    - a person needs to look at this week.\n  minor    - worth knowing, no action expected.\n  note     - context for whoever reads the report.",
+      "examples": [
+        "major",
+        "note"
+      ]
+    },
+    "ledgerKind": {
+      "type": "string",
+      "enum": ["gate-fired", "gate-missing", "gate-waived", "gate-parked", "nudge", "compliance", "promotion", "rollback"],
+      "description": "The event kinds the ledger records. A rule naming a kind the bridge never writes would look right to its author and never fire, so validation rejects it rather than letting it read as a healthy system:\n  gate-fired   - evidence for a gate was observed.\n  gate-missing - a gated action was attempted without its evidence.\n  gate-parked  - a boundary is waiting for a person's decision.\n  nudge        - a miss was reported without refusing the action.\n  compliance   - an action was recorded as complying after a nudge.\n  promotion    - the improvement loop changed a gate's enforcement.\n  rollback     - a promotion was reverted."
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where verification runs. The split is deliberate: the local runner is for the loop a person is already in, fast feedback before a push, and the GitHub subset is for the environment nobody controls. Both run the same stage definitions, so a stage cannot quietly mean two things.",
+      "properties": {
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The local runner and the stages it runs.",
+          "properties": {
+            "runner": {
+              "type": "string",
+              "enum": [
+                "act",
+                "direct"
+              ],
+              "description": "`act` runs the GitHub workflow locally; `direct` runs the stage commands in this checkout. The stages are the same either way: the difference is fidelity against speed, and the runner reports which one it used."
+            },
+            "actMode": {
+              "type": "string",
+              "enum": [
+                "host",
+                "container"
+              ],
+              "description": "`host` uses an act binary; `container` runs the act image with the docker socket mounted, which is how a machine with only Docker still runs the workflow. The runner picks what is available and says so."
+            },
+            "actImage": {
+              "type": "string",
+              "description": "The act image used in container mode."
+            },
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Stage ids run locally, in order. Naming them explicitly is how a repository decides that the slow check is worth its runtime locally, or only in CI."
+            },
+            "requireBeforePush": {
+              "type": "boolean",
+              "description": "Whether a push is refused until the local set passes. The generated runner enforces it, so the setting holds whether the check is run by hand or by the git hook."
+            },
+            "image": {
+              "type": "string",
+              "description": "The container image the workflow's job runs in."
+            },
+            "platform": {
+              "type": "string",
+              "description": "The platform act should emulate, e.g. linux/amd64."
+            },
+            "secretsFile": {
+              "type": "string",
+              "description": "File act reads secrets from, e.g. .act.secrets. It is gitignored by the installer: a secrets file committed to the repository is a leak waiting for its first push."
+            },
+            "workflow": {
+              "type": "string",
+              "description": "The workflow file act executes."
+            },
+            "job": {
+              "type": "string",
+              "description": "The job within that workflow."
+            },
+            "actTtlMinutes": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "How long an act container may exist before it is reaped. act has no daemon, so this is a TTL on the debris of interrupted runs rather than on a service; it is enforced before and after every invocation."
+            }
+          }
+        },
+        "github": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The subset that runs in the repository's own CI.",
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Stage ids the workflow runs, usually a subset: the long stages that do not change the answer on every push."
+            },
+            "workflow": {
+              "type": "string",
+              "description": "Path of the workflow that carries this subset."
+            }
+          }
+        },
+        "stages": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ciStage"
+          },
+          "description": "Stage definitions by id, shared by both runners. A stage is a command with a reason, which is what makes `ci plan` readable.",
+          "examples": [
+            {
+              "unit": {
+                "id": "unit",
+                "title": "Unit tests",
+                "command": "npm test",
+                "reason": "Fast feedback on the module under change."
+              },
+              "ladder": {
+                "id": "ladder",
+                "title": "Verification ladder",
+                "command": "bash scripts/verify.sh",
+                "long": true,
+                "reason": "The complete check; slow, so not on every push."
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ciStage": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "command",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "One stage. A stage reports three outcomes, not two, and the distinction is what keeps the runner trustworthy: exit 0 means it ran and passed; exit 77 means it does not apply in this environment (the automake convention -- a fixture this repository does not carry, a tool that is not installed); any other non-zero exit means it failed and stops the run. Without the middle case, every machine missing one tool looks broken and people stop reading the runner.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stage id, referenced by the local and GitHub stage lists."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable name printed by the runner."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Shell command run from the repository root. It is a plain command line: a stage that needs quoting belongs in a script of its own, referenced by a single word."
+        },
+        "long": {
+          "type": "boolean",
+          "description": "Marks a stage as a poor fit for every push. Long stages run in the full local set and in the pre-push hook only when the fast set is skipped, which keeps the fast path fast without deleting the slow check."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why the stage exists. Quoted in plans and reports so a reader can decide whether it is still worth its runtime."
+        },
+        "timeoutSeconds": {
+          "type": "number",
+          "description": "Wall-clock budget in seconds. The runner wraps the stage in timeout; a stage that exceeds it fails."
+        },
+        "critical": {
+          "type": "boolean",
+          "description": "Whether a failure gates the run. Default true; a stage marked false is advisory: reported and counted, and the verdict does not change."
+        },
+        "tokenBudget": {
+          "type": "number",
+          "description": "Declared budget for the agent work this stage fronts. Carried and surfaced, not metered by the harness."
+        }
+      }
+    },
+    "unicode": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which non-ASCII characters are content and which are a violation. The distinction is the point: mathematical notation, non-Latin scripts and emoji are text, while typographic substitutions (a curly quote where code expects an apostrophe) and invisible characters (a zero-width space inside an identifier) are defects that look like nothing. A policy here states what this repository's files are supposed to be.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the scan runs at all. Disabling it shows in the effective policy that `policy check` prints, so it is a visible decision rather than a silent one."
+        },
+        "defaultMode": {
+          "$ref": "#/$defs/unicodeMode",
+          "description": "The mode applied to files no scope matches. A strict default loosened per scope is safer than the reverse: the files nobody thought about are usually the machine-read ones."
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/unicodeScope"
+          },
+          "description": "Per-glob modes, evaluated in order with the first match winning, each carrying the reason it is exempt.",
+          "examples": [
+            [
+              {
+                "glob": "**/*.lean",
+                "mode": "typographic-free",
+                "reason": "Lean 4 notation is the language's syntax."
+              },
+              {
+                "glob": "**/package.json",
+                "mode": "ascii",
+                "reason": "Machine-read manifest."
+              }
+            ]
+          ]
+        },
+        "ignore": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ignoreEntry"
+          },
+          "description": "Paths the scan does not read, each with its reason. Skipped files are reported with the count, so an exemption is visible rather than a hole."
+        },
+        "respectGitignore": {
+          "type": "boolean",
+          "description": "Also skip whatever git ignores: scratch output that is not part of the repository. A gitignored directory can hold a worktree, which is why `worktrees` is a separate decision."
+        },
+        "worktrees": {
+          "type": "string",
+          "enum": [
+            "current",
+            "all"
+          ],
+          "description": "`current` scans the checkout the scan started from and names every other worktree it left out, with its branch and whether that branch is merged; `all` scans them too, overruling the ignore rule that hides them. The default is `current` because the other worktree is usually someone else's unfinished work, and the report says which it was."
+        },
+        "bannedCharacters": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Code points that are never allowed, whatever the mode, written as integers rather than as characters so the policy file cannot itself smuggle the character it bans."
+        },
+        "bannedRanges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/codePointRange"
+          },
+          "description": "Inclusive code point ranges to reject, for classes of characters such as format controls or private use, rather than one entry per character."
+        },
+        "allowedRanges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/codePointRange"
+          },
+          "description": "Inclusive ranges to accept even where the mode would reject them: this repository's mathematical symbols, or the script its documents are written in."
+        },
+        "maxNonAsciiRatio": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Share of non-ASCII characters a file may contain before it is reported, for files long enough for a ratio to mean something. Catches a file that is mostly not text."
+        },
+        "minCodePointsForRatio": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "File length, in code points, below which the ratio is not applied: on a five-character file a single symbol is twenty percent and means nothing."
+        },
+        "maxNonAsciiPerLine": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Non-ASCII characters allowed on one line. Catches what a ratio cannot: one line of a five-thousand-line source file that is a pasted block of typographic quotes."
+        }
+      }
+    },
+    "unicodeMode": {
+      "type": "string",
+      "enum": [
+        "ascii",
+        "typographic-free",
+        "unrestricted"
+      ],
+      "description": "How strict the scan is in a scope:\n  ascii            - non-ASCII is a finding; for machine-read files and code.\n  typographic-free - typographic substitutions and invisible characters are findings while scripts, mathematics and emoji are content; for prose that must stay greppable.\n  unrestricted     - recorded but not reported; for files whose text is not this repository's to normalise."
+    },
+    "unicodeScope": {
+      "type": "object",
+      "required": [
+        "glob",
+        "mode",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "A glob and the strictness that applies to it, with the reason it is exempt.",
+      "properties": {
+        "glob": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repository-relative path glob."
+        },
+        "mode": {
+          "$ref": "#/$defs/unicodeMode"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why this scope differs from the default. A scope without a reason becomes folklore; `policy check` prints it so it can be argued with."
+        }
+      }
+    },
+    "ignoreEntry": {
+      "type": "object",
+      "required": [
+        "glob",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "description": "A path the scan does not read, and why.",
+      "properties": {
+        "glob": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repository-relative path glob."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why skipping it is safe. Reported with the count of skipped files."
+        }
+      }
+    },
+    "codePointRange": {
+      "type": "object",
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "description": "An inclusive range of Unicode code points.",
+      "properties": {
+        "from": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "First code point, inclusive."
+        },
+        "to": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Last code point, inclusive."
+        }
+      }
+    },
+    "resumeBrief": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Resume-brief injection: whether the recovered-session brief reaches the conversation, from which sources, how often, and whether a reconciliation marker is required so a stale continuation loses its authority in review. Defaults: enabled, the standard brief path, static refresh, optional marker.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the brief is injected at all. False leaves the file on disk untouched; only the injection stops."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Candidate brief paths relative to the workspace; the first existing one is used.",
+          "examples": [
+            [
+              ".pi/harness-bridge/active-resume.md"
+            ]
+          ]
+        },
+        "refreshMode": {
+          "type": "string",
+          "enum": [
+            "static",
+            "annotate",
+            "refresh"
+          ],
+          "description": "static injects once per brief revision; annotate adds the reconcile-marker status to every injected copy; refresh re-injects on every call regardless of the signature."
+        },
+        "markerPolicy": {
+          "type": "string",
+          "enum": [
+            "required",
+            "optional"
+          ],
+          "description": "required states the reconcile-marker status on every injected copy and calls out a brief without a marker; optional reports it only in annotate mode."
+        }
+      }
+    },
+    "injection": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Prompt-injection detection over text this repository does not control: fetched pages, issue bodies, tool output, and agent output that another agent will read. The floor is fixed on purpose -- a handful of detectors cannot be switched off or made weaker, because `obvious injection is allowed here` is not a preference a policy file should be able to express.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether detection runs. Disabling it leaves the mandatory detectors in place; the floor is not configurable."
+        },
+        "detectors": {
+          "type": "object",
+          "description": "Per-detector overrides by id, each naming only the fields that change (severity, action, title, why). Detectors not named keep their defaults.",
+          "examples": [
+            {
+              "ignore-previous-instructions": {
+                "action": "block"
+              }
+            }
+          ]
+        },
+        "disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Detector ids to switch off. Mandatory detectors are refused here rather than silently kept on, so the policy says what will actually happen."
+        },
+        "maxScanChars": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Text beyond this length is scanned in the head and tail only, and says so. The limit is reported rather than silent: a scan that quietly skipped the middle of a document is worse than no scan."
+        },
+        "decodeEncodedPayloads": {
+          "type": "boolean",
+          "description": "Decode base64 and hex runs and inspect the result, which is how an instruction hidden in an encoded blob is caught. On by default; it costs a second pass over the text."
+        },
+        "allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Terms this repository has decided are legitimate despite a detector: a security document quoting an attack, a fixture containing the pattern on purpose. Allowlisting one term is narrower than disabling a detector."
+        }
+      }
+    },
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What an escalation means when no human can answer it: a git hook, a CI job, an agent acting without a UI. Escalation is the level that asks someone; the question here is what to do when nobody is there to ask.",
+      "properties": {
+        "noApprover": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "warn"
+          ],
+          "description": "`fail`, the default, refuses the action: an escalation that cannot be answered is not an approval. `warn` reports the finding and continues, which suits a repository where the change set is itself under human review and the finding is a notice to that reviewer. Blocks are unaffected either way: credentials, the frozen verification ladder and destructive commands always fail."
+        },
+        "note": {
+          "type": "string",
+          "description": "Why this repository chose that. Printed by `policy check`, so the reviewer who wonders why a finding did not stop the run has the answer in front of them."
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Credential scanning of content that is about to be committed. The interesting part is not the scanning but the fixture story: a scanner's own test suite has to contain token-shaped strings, and a policy that blocks them pushes people to turn the check off, which is worse than a notice.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether scanning runs."
+        },
+        "action": {
+          "$ref": "#/$defs/action",
+          "description": "What a finding in ordinary content means. `block` is the usual choice: a real credential in a commit is not recoverable by editing the commit."
+        },
+        "allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Strings that are not secrets despite matching a pattern: documentation placeholders, example tokens. A narrow allowlist beats relaxing a pattern."
+        },
+        "minLength": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Shortest string considered a candidate. Lowering it finds more and costs precision, which is why the fixture settings matter more than this one."
+        },
+        "fixtureGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths where fake credentials are expected: test fixtures, scanner tests, testdata. A scanner tested only against real-shaped secrets is a scanner nobody has tested."
+        },
+        "fixtureAction": {
+          "$ref": "#/$defs/action",
+          "description": "What a finding inside a fixture path means. `warn` keeps it visible to a reviewer while letting the test suite carry the token-shaped strings it needs."
+        },
+        "fixturePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Pattern ids to downgrade inside fixture paths; `*` means every pattern. Narrowing this is how a repository keeps blocking a real key that happens to sit under a fixture directory."
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Capability-scope enforcement for delegated work: when an agent or a pipeline stage runs with a token, this decides whether the scope on that token is checked before an action. A scope nobody verifies is documentation.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether scope checks run."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "block",
+            "warn"
+          ],
+          "description": "`block` refuses an action outside the token's scope; `warn` reports it and continues, which is how a repository starts before it trusts the scope table it wrote."
+        },
+        "cli": {
+          "type": "string",
+          "description": "The verifier command: the program that inspects a scope and answers allow or refuse. Naming it explicitly lets a repository use its own implementation instead of the bridge's."
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long the verifier may take before the check is treated as failed. Optional; absent keeps the default of 15000 ms. A check that cannot answer inside its budget is not an approval, so the timeout fails closed."
+        }
+      }
+    },
+    "commits": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Commit-message conventions checked locally, where the message is still cheap to change.",
+      "properties": {
+        "conventional": {
+          "type": "boolean",
+          "description": "Whether the message must follow the Conventional Commits shape, `type(scope): subject`. Checked before the commit rather than in review, because a message is rewritten in seconds beforehand and by nobody afterwards."
+        },
+        "maxSubject": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum subject length in characters. A limit is a writing constraint: it forces the subject to say one thing."
+        },
+        "forbidNoVerify": {
+          "type": "boolean",
+          "description": "Whether `git commit --no-verify` is refused. The flag exists for emergencies; allowing it by policy means every bypass is deliberate."
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The record of what the bridge decided: append-only JSON Lines, one entry per decision, and the reason a finding is checkable later by someone who was not there.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Where the log lives, relative to the repository root."
+        },
+        "chain": {
+          "type": "boolean",
+          "description": "Whether each entry carries a hash of the previous one. A chain does not prevent editing; it makes editing detectable, which is the property that turns a log into evidence. `audit verify` checks it."
+        },
+        "recordAllows": {
+          "type": "boolean",
+          "description": "Whether permitted actions are recorded as well as findings. Recording allows makes the log a complete account of what happened rather than a list of problems, at the cost of volume."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "version": 1,
+      "$schema": "./policy.schema.json",
+      "protectedPaths": [
+        {
+          "id": "frozen-fixtures",
+          "glob": "test/fixtures/**",
+          "action": "warn",
+          "reason": "Fixtures are the ground truth these tests are measured against.",
+          "source": "AGENTS.md"
+        }
+      ],
+      "processes": {
+        "enabled": [
+          "sdlc"
+        ],
+        "definitions": {
+          "sdlc": {
+            "settings": {
+              "nudgeTolerance": 2,
+              "gateCommands": [
+                "make verify"
+              ]
+            },
+            "gates": [
+              {
+                "id": "tests-run",
+                "enforcement": "block"
+              },
+              {
+                "id": "no-verify",
+                "enforcement": "block"
+              }
+            ]
+          }
+        },
+        "metrics": {
+          "observationKinds": [
+            "gate-fired",
+            "gate-missing",
+            "gate-parked"
+          ],
+          "rules": [
+            {
+              "id": "parked-boundary-stuck",
+              "kinds": [
+                "gate-parked"
+              ],
+              "windowDays": 7,
+              "atLeast": 2,
+              "severity": "major",
+              "message": "a boundary was parked twice this week: either the approver is the bottleneck or the question is not answerable as asked"
+            },
+            {
+              "id": "quiet-pipeline",
+              "kinds": [
+                "gate-fired"
+              ],
+              "windowDays": 30,
+              "atMost": 0,
+              "severity": "note",
+              "message": "no gated action in 30 days: either the pipeline is unused or its gates are not being evaluated"
+            }
+          ]
+        }
+      },
+      "escalation": {
+        "noApprover": "fail",
+        "note": "An escalation nobody can answer is not an approval."
+      }
+    }
+  ],
+  "$comment": "The enum lists are stamped from the code by scripts/build_policy_schema.mjs, and test/policy_schema.test.ts holds the schema to the code: the enums are compared against LEDGER_KINDS, METRIC_SEVERITIES and the RuleAction union, every property must carry a description, the top-level keys must match the default policy's, and the metrics constraints are checked against validateMetricsPolicy on the same probe documents."
+}

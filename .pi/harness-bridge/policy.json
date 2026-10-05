@@ -1,0 +1,788 @@
+{
+  "$schema": "./policy.schema.json",
+  "verification": {
+    "runs": []
+  },
+  "lease": {
+    "enabled": false,
+    "lockDir": ".pi/harness-bridge/leases",
+    "action": "escalate"
+  },
+  "version": 1,
+  "protectedBranches": [
+    "main",
+    "master",
+    "trunk",
+    "release/*"
+  ],
+  "branchNamePattern": "^(feat|fix|docs|chore|refactor|test|perf|ci|build|revert|agent|codex)/[a-z0-9._-]+$",
+  "branchNameAction": "warn",
+  "rules": [
+    {
+      "id": "no-force-push",
+      "scope": "destructive-git",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgit\\s+push\\b[^\\n]*(--force\\b|--force-with-lease\\b|\\s-f\\b)",
+      "action": "block",
+      "reason": "Force pushing rewrites shared history; open a new commit instead.",
+      "source": "deny-patterns:git-push-force"
+    },
+    {
+      "id": "no-history-rewrite",
+      "scope": "destructive-git",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgit\\s+(reset\\s+--hard|filter-branch|filter-repo|reflog\\s+expire|gc\\s+--prune=now)\\b",
+      "action": "block",
+      "reason": "History-rewriting commands discard recovery points.",
+      "source": "deny-patterns:git-reset-hard"
+    },
+    {
+      "id": "no-force-clean",
+      "scope": "destructive-fs",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\b(git\\s+clean\\s+-[a-zA-Z]*[fF]|rm\\b(?=[^\\n]*(?:-[a-zA-Z]*[rR]|--recursive))(?=[^\\n]*(?:-[a-zA-Z]*[fF]|--force)))",
+      "action": "block",
+      "reason": "Recursive force deletion removes untracked work without a backup.",
+      "source": "deny-patterns:rm-rf-path"
+    },
+    {
+      "id": "no-branch-force-delete",
+      "scope": "destructive-git",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgit\\s+(branch\\s+-D|push\\s+[^\\n]*--delete|push\\s+[^\\n]*--mirror)\\b",
+      "action": "block",
+      "reason": "Deleting or mirroring remote refs bypasses review and backup paths.",
+      "source": "deny-patterns:git-branch-force-delete"
+    },
+    {
+      "id": "no-hook-bypass",
+      "scope": "hook-integrity",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgit\\s+commit\\b[^\\n]*--no-verify\\b|\\bHUSKY=0\\b|\\bcore\\.hooksPath\\b",
+      "action": "block",
+      "reason": "Bypassing hooks removes the enforcement layer that this policy exists to provide.",
+      "source": "deny-patterns:git-commit-no-verify"
+    },
+    {
+      "id": "no-peer-review-bypass",
+      "scope": "pr-lifecycle",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgh\\s+(pr\\s+(merge|close)|api\\s+graphql[^\\n]*mergePullRequest)\\b",
+      "action": "escalate",
+      "reason": "Merging or closing pull requests requires human authorization.",
+      "source": "deny-patterns:gh-pr-merge-close"
+    },
+    {
+      "id": "no-push-protected-branch",
+      "scope": "branch-protection",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgit\\s+push\\b[^\\n]*\\s(main|master|trunk|release/[\\w.-]+)(\\s|$)",
+      "action": "escalate",
+      "reason": "Pushing directly to a protected branch bypasses pull-request review.",
+      "source": "deny-patterns:git-push-main"
+    },
+    {
+      "id": "no-indirect-force-push",
+      "scope": "destructive-git",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "^(?!\\s*(?:grep|rg|egrep|fgrep|echo|printf|cat|head|tail|sed\\s+-n|git\\s+(?:log|diff|show))\\b)[^\\n]*\\$\\{?\\w+\\}?\"?\\s+push\\b[^\\n]*(?:\\s-f\\b|\\s--force\\b)",
+      "action": "escalate",
+      "reason": "A push invoked through a variable hides its flags from the plain-text rules; confirm the target and the flags.",
+      "source": "deny-patterns:git-push-force#indirection"
+    },
+    {
+      "id": "no-privilege-escalation",
+      "scope": "environment",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "(^|[;&|])\\s*(sudo|doas)\\b",
+      "action": "escalate",
+      "reason": "Privilege escalation changes state outside the repository and needs approval.",
+      "source": "environment"
+    },
+    {
+      "id": "no-world-writable",
+      "scope": "environment",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bchmod\\s+(-R\\s+)?(0?777|a\\+rwx)\\b",
+      "action": "escalate",
+      "reason": "World-writable permissions weaken the host; scope the permission to the owner.",
+      "source": "environment"
+    },
+    {
+      "id": "no-unreviewed-deploy",
+      "scope": "deployment",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\b(terraform\\s+(apply|destroy)|kubectl\\s+(delete|apply)|helm\\s+(uninstall|upgrade)|docker\\s+push)\\b",
+      "action": "escalate",
+      "reason": "Deployment and teardown actions require a human in the loop.",
+      "source": "deployment"
+    },
+    {
+      "id": "no-secret-egress",
+      "scope": "secret-path",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "(>|>>|tee|cp|mv)\\s+[^\\n]*(\\.env\\b|id_rsa|\\.pem\\b|credentials\\.json)",
+      "action": "block",
+      "reason": "Writing to credential paths risks leaking or corrupting secrets.",
+      "source": "deny-patterns:env-file-write"
+    },
+    {
+      "id": "no-unpinned-install",
+      "scope": "supply-chain",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\b(npm|pnpm|yarn|bun)\\s+(i|install|add)\\b(?![^\\n]*--save-exact)(?![^\\n]*@\\d)",
+      "action": "warn",
+      "reason": "Unpinned installs drift; prefer an exact version so the lockfile stays reproducible.",
+      "source": "supply-chain"
+    },
+    {
+      "id": "no-network-egress-shell",
+      "scope": "supply-chain",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\b(curl|wget)\\b[^\\n]*\\|\\s*(sh|bash|zsh)\\b",
+      "action": "block",
+      "reason": "Piping a remote script into a shell executes unreviewed code.",
+      "source": "supply-chain"
+    },
+    {
+      "id": "no-cron-or-daemon",
+      "scope": "environment",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\b(systemctl|launchctl|crontab\\s+-[er]|nohup\\b[^\\n]*&)\\b",
+      "action": "escalate",
+      "reason": "Registering persistent background work needs explicit approval.",
+      "source": "environment"
+    },
+    {
+      "id": "no-global-config-write",
+      "scope": "environment",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\bgit\\s+config\\s+--global\\b|\\b(npm|pip)\\s+config\\s+set\\b",
+      "action": "escalate",
+      "reason": "Machine-wide configuration changes affect every repository on this host.",
+      "source": "environment"
+    },
+    {
+      "id": "no-destructive-sql",
+      "scope": "destructive-data",
+      "tool": "bash",
+      "kind": "command",
+      "pattern": "\\b(DROP\\s+(DATABASE|TABLE|SCHEMA)|TRUNCATE\\s+TABLE)\\b",
+      "flags": "i",
+      "action": "block",
+      "reason": "Unhedged destructive SQL is not recoverable.",
+      "source": "deny-patterns:destructive-sql"
+    }
+  ],
+  "protectedPaths": [
+    {
+      "id": "grammars",
+      "glob": "grammars/**",
+      "action": "block",
+      "reason": "Tree-sitter wasm grammars with checked provenance (check-grammar-provenance); a hand edit defeats the check.",
+      "source": "policy interview 2026-10-05"
+    },
+    {
+      "id": "dist",
+      "glob": "dist/**",
+      "action": "block",
+      "reason": "Generated bundle (npm run build:dist); never hand-edited.",
+      "source": "policy interview 2026-10-05"
+    },
+    {
+      "id": "ci-workflows",
+      "glob": ".github/workflows/**",
+      "action": "escalate",
+      "reason": "CI changes alter what counts as evidence for every future run.",
+      "source": "ci"
+    },
+    {
+      "id": "agent-contract",
+      "glob": "AGENTS.md",
+      "action": "warn",
+      "reason": "The operating contract is edited on purpose during campaigns; the finding is the record.",
+      "source": "policy template: agent-fleet"
+    },
+    {
+      "id": "agent-skills",
+      "glob": "skills/**",
+      "action": "warn",
+      "reason": "Skill definitions are contract files; edited on purpose, recorded.",
+      "source": "policy template: agent-fleet"
+    },
+    {
+      "id": "credentials",
+      "glob": "**/.env*",
+      "action": "block",
+      "reason": "Credential material must never be edited by an agent.",
+      "source": "secret-path"
+    },
+    {
+      "id": "ssh-keys",
+      "glob": "**/.ssh/**",
+      "action": "block",
+      "reason": "Key material must never be edited by an agent.",
+      "source": "secret-path"
+    },
+    {
+      "id": "package-lock",
+      "glob": "**/package-lock.json",
+      "action": "warn",
+      "reason": "Hand-editing a lockfile breaks reproducibility; regenerate it with the package manager.",
+      "source": "supply-chain"
+    }
+  ],
+  "processes": {
+    "enabled": [],
+    "definitions": {
+      "sdlc": {
+        "gates": [
+          {
+            "id": "no-verify",
+            "title": "A commit may not skip verification",
+            "stage": "verify",
+            "enforcement": "block",
+            "requiredBefore": [],
+            "evidence": {
+              "commands": [
+                "\\bgit\\s+commit\\b[^\\n]*--no-verify"
+              ]
+            },
+            "why": "A bypassed hook leaves the ledger silent about verification that did not happen, which is the case the record exists to catch.",
+            "source": "policy template"
+          },
+          {
+            "id": "tests-run",
+            "title": "The verification command ran against this tree",
+            "stage": "verify",
+            "enforcement": "block",
+            "requiredBefore": [
+              "git push"
+            ],
+            "evidence": {
+              "commands": [
+                "\\bnpm test\\b",
+                "\\bnpm run build\\b"
+              ]
+            },
+            "why": "Verification that runs after the push finds mistakes on the main branch, in front of whoever else is working; before it, they are cheap.",
+            "source": "policy advise: detected verification command"
+          }
+        ]
+      }
+    },
+    "disabled": [],
+    "waivers": [],
+    "metrics": {
+      "observationKinds": [
+        "gate-fired",
+        "gate-missing",
+        "gate-parked"
+      ],
+      "rules": [
+        {
+          "id": "parked-boundary-stuck",
+          "kinds": [
+            "gate-parked"
+          ],
+          "windowDays": 7,
+          "atLeast": 2,
+          "severity": "major",
+          "message": "a boundary was parked twice this week: either the approver is the bottleneck or the question is not answerable as asked"
+        },
+        {
+          "id": "quiet-pipeline",
+          "kinds": [
+            "gate-fired"
+          ],
+          "windowDays": 30,
+          "atMost": 0,
+          "severity": "note",
+          "message": "no gated action in 30 days: either the pipeline is unused or its gates are not being evaluated"
+        },
+        {
+          "id": "gated-action-without-evidence",
+          "kinds": [
+            "gate-missing"
+          ],
+          "severity": "major",
+          "message": "gated actions are being attempted without evidence: the gate is not being read, or its evidence route does not fit how the work is done",
+          "atLeast": 3,
+          "windowDays": 30
+        }
+      ]
+    }
+  },
+  "ci": {
+    "local": {
+      "runner": "direct",
+      "actMode": "host",
+      "actImage": "",
+      "stages": [
+        "test"
+      ],
+      "requireBeforePush": true,
+      "image": "catthehacker/ubuntu:act-latest",
+      "platform": "linux/amd64",
+      "secretsFile": ".act.secrets",
+      "workflow": ".github/workflows/harness-gates.yml",
+      "job": "gates",
+      "actTtlMinutes": 30
+    },
+    "github": {
+      "stages": [
+        "test"
+      ],
+      "workflow": ".github/workflows/ci.yml"
+    },
+    "stages": {
+      "sdlc-gates": {
+        "id": "sdlc-gates",
+        "title": "SDLC policy gates",
+        "command": "harness-bridge process status",
+        "reason": "The gate evidence for the processes declared in the policy.",
+        "timeoutSeconds": 120
+      },
+      "guard-diff": {
+        "id": "guard-diff",
+        "title": "Policy on the change set",
+        "command": "harness-bridge guard diff --base origin/HEAD",
+        "reason": "Secrets, protected paths, and policy on what this change actually touches."
+      },
+      "unicode": {
+        "id": "unicode",
+        "title": "Unicode policy (scoped)",
+        "command": "harness-bridge policy unicode .",
+        "reason": "INV-001 as a scoped rule: typographic substitutions and invisible carriers are violations; mathematics, scripts and emoji are content.",
+        "timeoutSeconds": 600,
+        "critical": false
+      },
+      "unit": {
+        "id": "unit",
+        "title": "Unit tests",
+        "command": "npm test",
+        "reason": "The change's own tests.",
+        "timeoutSeconds": 300
+      },
+      "ladder": {
+        "id": "ladder",
+        "title": "Full verification ladder",
+        "command": "bash scripts/verify_ui.sh",
+        "long": true,
+        "reason": "The repository's own definition of verified; too slow for every push.",
+        "timeoutSeconds": 2700
+      }
+    }
+  },
+  "unicode": {
+    "enabled": true,
+    "ignore": [],
+    "respectGitignore": false,
+    "worktrees": "current",
+    "defaultMode": "typographic-free",
+    "scopes": [
+      {
+        "glob": "**/*.lean",
+        "mode": "typographic-free",
+        "reason": "Lean 4 notation is the language's syntax."
+      },
+      {
+        "glob": "**/lakefile.lean",
+        "mode": "typographic-free",
+        "reason": "Lean build file."
+      },
+      {
+        "glob": "**/lake-manifest.json",
+        "mode": "ascii",
+        "reason": "Machine-read manifest."
+      },
+      {
+        "glob": "**/package.json",
+        "mode": "ascii",
+        "reason": "Machine-read manifest."
+      },
+      {
+        "glob": "**/*.lock",
+        "mode": "ascii",
+        "reason": "Machine-read lockfile."
+      },
+      {
+        "glob": "**/package-lock.json",
+        "mode": "ascii",
+        "reason": "Machine-read lockfile."
+      },
+      {
+        "glob": "**/*.json",
+        "mode": "typographic-free",
+        "reason": "Config and data, read by both people and parsers."
+      },
+      {
+        "glob": "**/*.py",
+        "mode": "typographic-free",
+        "reason": "Source of a tool; typographic substitutes are slop here, math in comments may be legitimate."
+      },
+      {
+        "glob": "**/*.ts",
+        "mode": "typographic-free",
+        "reason": "Source of a tool."
+      },
+      {
+        "glob": "**/*.sh",
+        "mode": "ascii",
+        "reason": "Shell scripts must be ASCII."
+      },
+      {
+        "glob": "**/node_modules/**",
+        "mode": "unrestricted",
+        "reason": "Vendored dependencies are not ours to police."
+      },
+      {
+        "glob": "**/vendor/**",
+        "mode": "unrestricted",
+        "reason": "Vendored copies (mermaid, fonts) are not ours to rewrite."
+      },
+      {
+        "glob": "**/*.min.js",
+        "mode": "unrestricted",
+        "reason": "Minified output: rewriting it would break it."
+      },
+      {
+        "glob": "**/dist/**",
+        "mode": "unrestricted",
+        "reason": "Build output."
+      },
+      {
+        "glob": "**/.lake/**",
+        "mode": "unrestricted",
+        "reason": "Lean build cache."
+      },
+      {
+        "glob": "packages/*/StochasticCCV/**",
+        "mode": "unrestricted",
+        "reason": "Tensor network sources mirror upstream notation."
+      },
+      {
+        "glob": "docs/**",
+        "mode": "typographic-free",
+        "reason": "Prose and reports: substitutions are the thing being prevented."
+      },
+      {
+        "glob": "**/*.md",
+        "mode": "typographic-free",
+        "reason": "Markdown prose."
+      },
+      {
+        "glob": "**/*.tex",
+        "mode": "typographic-free",
+        "reason": "LaTeX: math and quotes are semantic there."
+      }
+    ],
+    "bannedCharacters": [
+      8216,
+      8217,
+      8220,
+      8221,
+      8211,
+      8212,
+      8230,
+      160,
+      8239,
+      8199,
+      8201,
+      8193,
+      8194,
+      8195
+    ],
+    "bannedRanges": [
+      {
+        "from": 917504,
+        "to": 917631
+      },
+      {
+        "from": 55296,
+        "to": 57343
+      },
+      {
+        "from": 8203,
+        "to": 8207
+      },
+      {
+        "from": 8288,
+        "to": 8292
+      },
+      {
+        "from": 8234,
+        "to": 8238
+      },
+      {
+        "from": 8294,
+        "to": 8297
+      },
+      {
+        "from": 65279,
+        "to": 65279
+      },
+      {
+        "from": 6158,
+        "to": 6158
+      },
+      {
+        "from": 917760,
+        "to": 917999
+      },
+      {
+        "from": 65024,
+        "to": 65039
+      }
+    ],
+    "allowedRanges": [
+      {
+        "from": 161,
+        "to": 591
+      },
+      {
+        "from": 768,
+        "to": 879
+      },
+      {
+        "from": 688,
+        "to": 767
+      },
+      {
+        "from": 7468,
+        "to": 7530
+      },
+      {
+        "from": 11360,
+        "to": 11391
+      },
+      {
+        "from": 8448,
+        "to": 8527
+      },
+      {
+        "from": 119808,
+        "to": 120831
+      },
+      {
+        "from": 9472,
+        "to": 9599
+      },
+      {
+        "from": 9600,
+        "to": 9631
+      },
+      {
+        "from": 9989,
+        "to": 10175
+      },
+      {
+        "from": 880,
+        "to": 1023
+      },
+      {
+        "from": 1024,
+        "to": 1279
+      },
+      {
+        "from": 1328,
+        "to": 1423
+      },
+      {
+        "from": 1424,
+        "to": 1535
+      },
+      {
+        "from": 1536,
+        "to": 1791
+      },
+      {
+        "from": 2304,
+        "to": 2431
+      },
+      {
+        "from": 3584,
+        "to": 3711
+      },
+      {
+        "from": 7680,
+        "to": 7935
+      },
+      {
+        "from": 8192,
+        "to": 8303
+      },
+      {
+        "from": 8304,
+        "to": 8351
+      },
+      {
+        "from": 8352,
+        "to": 8399
+      },
+      {
+        "from": 8448,
+        "to": 8527
+      },
+      {
+        "from": 8528,
+        "to": 8591
+      },
+      {
+        "from": 8592,
+        "to": 8703
+      },
+      {
+        "from": 8704,
+        "to": 8959
+      },
+      {
+        "from": 8960,
+        "to": 9215
+      },
+      {
+        "from": 9312,
+        "to": 9471
+      },
+      {
+        "from": 9632,
+        "to": 9727
+      },
+      {
+        "from": 9728,
+        "to": 10175
+      },
+      {
+        "from": 10176,
+        "to": 10223
+      },
+      {
+        "from": 10496,
+        "to": 10623
+      },
+      {
+        "from": 10624,
+        "to": 10751
+      },
+      {
+        "from": 10752,
+        "to": 11007
+      },
+      {
+        "from": 12288,
+        "to": 12543
+      },
+      {
+        "from": 13312,
+        "to": 19903
+      },
+      {
+        "from": 19968,
+        "to": 40959
+      },
+      {
+        "from": 44032,
+        "to": 55215
+      },
+      {
+        "from": 63744,
+        "to": 64255
+      },
+      {
+        "from": 64256,
+        "to": 64335
+      },
+      {
+        "from": 119808,
+        "to": 120831
+      },
+      {
+        "from": 127744,
+        "to": 129791
+      },
+      {
+        "from": 127462,
+        "to": 127487
+      }
+    ],
+    "maxNonAsciiRatio": 0.35,
+    "minCodePointsForRatio": 500,
+    "maxNonAsciiPerLine": 120
+  },
+  "injection": {
+    "enabled": true,
+    "detectors": {},
+    "disabled": [],
+    "maxScanChars": 200000,
+    "decodeEncodedPayloads": true,
+    "allowlist": []
+  },
+  "resumeBrief": {
+    "enabled": true,
+    "sources": [
+      ".pi/harness-bridge/active-resume.md"
+    ],
+    "refreshMode": "static",
+    "markerPolicy": "optional"
+  },
+  "escalation": {
+    "noApprover": "fail",
+    "note": "An unattended caller cannot answer an escalation, and an unanswered question is not an approval."
+  },
+  "secrets": {
+    "enabled": true,
+    "action": "block",
+    "allowlist": [
+      "EXAMPLE",
+      "REDACTED",
+      "PLACEHOLDER",
+      "your-key-here"
+    ],
+    "minLength": 20,
+    "fixtureGlobs": [
+      "**/*.test.ts",
+      "**/*.test.js",
+      "**/*.spec.ts",
+      "**/test/**",
+      "**/tests/**",
+      "**/__tests__/**",
+      "**/fixtures/**",
+      "**/testdata/**"
+    ],
+    "fixtureAction": "warn",
+    "fixturePatterns": [
+      "*"
+    ]
+  },
+  "capability": {
+    "enabled": false,
+    "mode": "warn",
+    "timeoutMs": 15000
+  },
+  "commits": {
+    "conventional": true,
+    "maxSubject": 72,
+    "forbidNoVerify": true
+  },
+  "audit": {
+    "path": ".pi/harness-bridge/audit.jsonl",
+    "chain": true,
+    "recordAllows": false
+  }
+}
