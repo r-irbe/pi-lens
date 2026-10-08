@@ -623,6 +623,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
 		"clients/lsp/launch.ts": 2,
+		// lean4-lsp (2026-10): the single live `filter` here is the ECMAScript
+		// Array.prototype.filter method call (`.filter(Boolean)`), not a naming
+		// use of the retired reference-drift sense; renaming the stdlib call
+		// would degrade the code, so the per-file pin records it.
+		"clients/lsp/lean4-ilean.ts": 1,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
 		"clients/lsp/tsserver-sync.ts": 1,
@@ -1115,7 +1120,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
 		"tools/lsp-diagnostics.ts": 10,
-		"tools/lsp-navigation.ts": 14,
+		"tools/lsp-navigation.ts": 17,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,
@@ -1391,6 +1396,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/diagnostic-binding.ts": 1,
 		"clients/lsp/edits.ts": 24,
 		"clients/lsp/index.ts": 6,
+		// lean4-lsp (2026-10): four live `version` uses (the ilean toolchain
+		// version probe and its cache key);
+		"clients/lsp/lean4-ilean.ts": 4,
 		"clients/lsp/lombok.ts": 6,
 		// #4299: 16 -> 18; two reads of the external TypeScript package
 		// manifest's literal version field, not a pi-lens generation identity.

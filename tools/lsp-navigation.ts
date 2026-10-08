@@ -932,7 +932,7 @@ export function createLspNavigationTool(
 		parameters: Type.Object({
 			operation: Type.String({
 				description:
-					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal (Lean 4: tactic proof state at cursor), termGoal (Lean 4: expected type at cursor), moduleImports (Lean 4: module imports list), moduleImportedBy (Lean 4: reverse module dependents list).",
+					"Operation: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal (Lean 4: proof state at cursor), termGoal (Lean 4: expected type at cursor), moduleImports (Lean 4: imports), moduleImportedBy (Lean 4: reverse dependents).",
 			}),
 			path: Type.Optional(
 				Type.String({

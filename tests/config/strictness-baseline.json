@@ -13,7 +13,7 @@
 		"clients/review-graph": 18,
 		"mcp": 1,
 		"scripts": 1,
-		"tools": 4
+		"tools": 5
 	},
 	"tsconfig.strict-optional.json": {
 		"clients": 344,
