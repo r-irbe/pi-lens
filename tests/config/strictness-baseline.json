@@ -6,14 +6,14 @@
 		"clients/dispatch/rules": 12,
 		"clients/dispatch/runners": 82,
 		"clients/dispatch/runners/utils": 3,
-		"clients/lsp": 44,
+		"clients/lsp": 51,
 		"clients/lsp/wait-policy": 1,
 		"clients/project-diagnostics/runner-adapters": 1,
 		"clients/redact": 16,
 		"clients/review-graph": 18,
 		"mcp": 1,
 		"scripts": 1,
-		"tools": 4
+		"tools": 5
 	},
 	"tsconfig.strict-optional.json": {
 		"clients": 344,

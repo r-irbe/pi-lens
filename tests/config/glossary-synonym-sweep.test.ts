@@ -606,6 +606,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
 		"clients/lsp/launch.ts": 2,
+		// lean4-lsp (2026-10): the single live `filter` here is the ECMAScript
+		// Array.prototype.filter method call (`.filter(Boolean)`), not a naming
+		// use of the retired reference-drift sense; renaming the stdlib call
+		// would degrade the code, so the per-file pin records it.
+		"clients/lsp/lean4-ilean.ts": 1,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
 		"clients/lsp/tsserver-sync.ts": 1,
@@ -916,8 +921,11 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/jvm-runtime.ts": 19,
 		"clients/lsp/language.ts": 3,
 		"clients/lsp/launch.ts": 30,
+		// lean4-lsp (2026-10): the lean4 ilean interop added 19 live `path`
+		// identifier uses (module-graph parameters and extern-C lookup paths);
+		"clients/lsp/lean4-ilean.ts": 19,
 		"clients/lsp/lombok.ts": 14,
-		"clients/lsp/server.ts": 121,
+		"clients/lsp/server.ts": 127,
 		"clients/lsp/session-roots.ts": 6,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
@@ -999,7 +1007,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/session-state-store.ts": 3,
 		"clients/sessionstart-logger.ts": 2,
 		"clients/sg-runner.ts": 12,
-		"clients/sgconfig.ts": 23,
+		"clients/sgconfig.ts": 28,
 		"clients/skills-resolver.ts": 3,
 		"clients/slow-fs.ts": 4,
 		"clients/smells-rollup.ts": 3,
@@ -1037,7 +1045,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
 		"tools/lsp-diagnostics.ts": 10,
-		"tools/lsp-navigation.ts": 14,
+		"tools/lsp-navigation.ts": 17,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,
@@ -1294,6 +1302,9 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/diagnostic-binding.ts": 1,
 		"clients/lsp/edits.ts": 24,
 		"clients/lsp/index.ts": 6,
+		// lean4-lsp (2026-10): four live `version` uses (the ilean toolchain
+		// version probe and its cache key);
+		"clients/lsp/lean4-ilean.ts": 4,
 		"clients/lsp/lombok.ts": 6,
 		"clients/lsp/server.ts": 16,
 		"clients/lsp/workspace-diagnostics-cache.ts": 7,

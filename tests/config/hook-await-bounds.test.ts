@@ -2400,8 +2400,14 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// went 111 -> 112 for the new
 	// `await server.root` inside resolveLspServerCwd. Neither number is the
 	// old bare probe being removed.
-	"clients/lsp/index.ts": 159,
-	"clients/lsp/server.ts": 112,
+	// lean4-lsp (2026-10): the lean4 server path moved each module's unbounded
+	// await to a new line (index 159 -> 165, server 112 -> 113, lsp-navigation
+	// 32 -> 34 — the pins anchor the await site). Per #2523 AC4's own scope
+	// note these cannot be bounded without deps-type signal threading, which
+	// is not in this PR; the anchors move with this stated reason instead of
+	// being absorbed.
+	"clients/lsp/index.ts": 165,
+	"clients/lsp/server.ts": 113,
 	"clients/map-with-concurrency.ts": 2,
 	"clients/observed-mutation.ts": 18,
 	"clients/opaque-mutation-scan.ts": 10,
@@ -2489,7 +2495,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// arm — the fallback for "a service shape without touchFile", which the
 	// real `LSPService` never was.
 	"tools/lsp-diagnostics.ts": 29,
-	"tools/lsp-navigation.ts": 32,
+	"tools/lsp-navigation.ts": 34,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,
 	"tools/symbol-search.ts": 1,

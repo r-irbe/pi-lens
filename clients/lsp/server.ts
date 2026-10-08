@@ -1538,13 +1538,9 @@ function createInteractiveServer(spec: InteractiveServerSpec): LSPServerInfo {
 		root: spec.root,
 		rootMarkers: spec.root.rootMarkers,
 		fallbackFor: spec.fallbackFor,
-<<<<<<< HEAD
 		requiresProjectRoot: spec.requiresProjectRoot,
-||||||| parent of 27c6d32e7 (feat(lean4): add proof goal navigation, tuned wait policy, and 25s timeouts)
-=======
 		clientWaitTimeoutMs: spec.clientWaitTimeoutMs,
 		initializeTimeoutMs: spec.initializeTimeoutMs,
->>>>>>> 27c6d32e7 (feat(lean4): add proof goal navigation, tuned wait policy, and 25s timeouts)
 		availabilityKey:
 			typeof spec.command === "string" && isSimpleCommand(spec.command)
 				? spec.command
@@ -3460,6 +3456,10 @@ export const LuaServer: LSPServerInfo = createTreeBinaryServer({
 });
 
 const leanFallbackFlagsCache = new Map<string, string[] | undefined>();
+// Named cap (bounded-container guard #2981): keys are project root paths, which
+// are finite per host but not statically bounded; a plain clear() at the cap
+// keeps the memo correct (recomputation is cheap) and the memory bounded.
+const LEAN_FALLBACK_FLAGS_CACHE_CAP = 64;
 
 /**
  * Resolves C/C++ fallback compiler flags for Lean 4 projects interfacing with C FFI.
@@ -3469,6 +3469,9 @@ const leanFallbackFlagsCache = new Map<string, string[] | undefined>();
 export function resolveLeanFallbackFlags(root: string): string[] | undefined {
 	if (leanFallbackFlagsCache.has(root)) {
 		return leanFallbackFlagsCache.get(root);
+	}
+	if (leanFallbackFlagsCache.size >= LEAN_FALLBACK_FLAGS_CACHE_CAP) {
+		leanFallbackFlagsCache.clear();
 	}
 
 	const isLeanProject =
