@@ -3666,7 +3666,7 @@ export function resolveLeanFallbackFlags(root: string): string[] | undefined {
 // libclang headers). Prefer a system clangd on PATH; else auto-install the
 // managed bundle (#241) and launch bin/clangd within it. Graceful skip when
 // neither is available (→ coverage notice); cpp-check stays the fallback.
-export const CppServer: LSPServerInfo = {
+export const CppServer: LSPServerInfo = createTreeBinaryServer({
 	id: "cpp",
 	idleEviction: "transparent",
 	name: "clangd",
@@ -3677,35 +3677,12 @@ export const CppServer: LSPServerInfo = {
 			".clangd",
 			"CMakeLists.txt",
 			"Makefile",
-			"lakefile.lean",
-			"lakefile.toml",
 		]),
 	),
-	async spawn(root, options) {
-		const launched = await resolveAndLaunchTreeBinary(
-			{
-				candidates: ["clangd"],
-				bundleToolId: "clangd",
-				binRelPath: "bin/clangd",
-				cwd: root,
-				args: ["--background-index"],
-			},
-			options?.allowInstall,
-		);
-		if (!launched) return undefined;
-
-		const leanFlags = resolveLeanFallbackFlags(root);
-		if (leanFlags && leanFlags.length > 0) {
-			return {
-				...launched,
-				initialization: {
-					fallbackFlags: leanFlags,
-				},
-			};
-		}
-		return launched;
-	},
-};
+	binaryName: "clangd",
+	binRelPath: "bin/clangd",
+	args: ["--background-index"],
+});
 
 export const ZigServer: LSPServerInfo = {
 	id: "zig",
@@ -3742,11 +3719,11 @@ export const HaskellServer = createInteractiveServer({
 export const Lean4Server = createInteractiveServer({
 	id: "lean4",
 	name: "Lean 4 Language Server",
-	extensions: KIND_EXTENSIONS["lean4"],
+	extensions: KIND_EXTENSIONS["lean"],
 	root: RootWithFallback(
 		createRootDetector(["lakefile.lean", "lakefile.toml", "lean-toolchain"]),
 	),
-	language: "lean4",
+	language: "lean",
 	command: "lake",
 	args: ["serve"],
 	clientWaitTimeoutMs: 25_000,

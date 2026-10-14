@@ -98,36 +98,15 @@ export class AstGrepRuleManager {
 
 		const rulesPath = rulesPaths[0];
 
-			if (!rulesPath) {
-				this.log(
-					`Rule descriptions: no rules directory found in ${possiblePaths.join(", ")}`,
-				);
-				this.ruleDescriptions = descriptions;
-				return descriptions;
-			}
-
-			this.loadDescriptionsFromPath(rulesPath, descriptions);
+		if (!rulesPath) {
+			this.log(
+				`Rule descriptions: no rules directory found in ${possiblePaths.join(", ")}`,
+			);
 			this.ruleDescriptions = descriptions;
 			this.ruleFingerprint = fingerprint;
 			return descriptions;
 		}
 
-		for (const dir of dirs) {
-			const possiblePaths = candidateAstGrepRulesPaths(dir);
-			const rulesPath = possiblePaths.find((p) => fs.existsSync(p));
-			if (rulesPath) {
-				this.loadDescriptionsFromPath(rulesPath, descriptions);
-			}
-		}
-
-		this.ruleDescriptions = descriptions;
-		return descriptions;
-	}
-
-	private loadDescriptionsFromPath(
-		rulesPath: string,
-		descriptions: Map<string, RuleDescription>,
-	): void {
 		try {
 			for (const resolvedPath of rulesPaths) {
 				const files = fs

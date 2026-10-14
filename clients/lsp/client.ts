@@ -309,6 +309,379 @@ export interface LSPLeanImport {
 	};
 }
 
+export interface LSPClientInfo {
+	serverId: string;
+	root: string;
+	/** Session cwd, distinct from the language-server project root. */
+	sessionCwd?: string;
+	connection: MessageConnection;
+	/** Check if the connection is still alive */
+	isAlive: () => boolean;
+	/** True if the server process has exited or been killed */
+	processExited: () => boolean;
+	/**
+	 * #1127: true only when THIS client's own `shutdown()` was called before
+	 * it went dead (session teardown, `#743` notify-backpressure eviction,
+	 * generation resets, …). False for a genuine crash — process exit/signal
+	 * with no preceding `shutdown()` call — so a caller respawning a dead
+	 * client can tell a deliberate kill apart from an unexpected runtime exit
+	 * and only count the latter toward the failure breaker.
+	 */
+	wasShutdownIntentional: () => boolean;
+	/**
+	 * #1127: wall-clock time this client FIRST observed its own death
+	 * (connection close/error or process exit, whichever fires first), or
+	 * `undefined` if it hasn't died yet. A caller computing server lifetime
+	 * MUST use this, not the time it happened to notice the client was dead —
+	 * detection is lazy (the next file attach) and can trail the actual death
+	 * by minutes to hours (#1127's documented opengrep pattern), which would
+	 * make every early crash look like a long, healthy run.
+	 */
+	getExitedAt: () => number | undefined;
+	/** Last N lines of server stderr for diagnostics */
+	recentStderr: (lines?: number) => string;
+	/** Bounded operational pull failures; unsupported-method errors are omitted. */
+	getPullFailureHistory?: () => LSPPullFailure[];
+	/** Pre-request health check — returns error string if process is dead */
+	checkAlive: () => string | undefined;
+	/**
+	 * #1277: cheap request round-trip proving the server is actually
+	 * responding, not merely that the process/connection hasn't died.
+	 * `isAlive()`/`checkAlive()` can't tell a wedged server (accepted the
+	 * notify write, then stopped answering) from a healthy one — this sends a
+	 * bounded real request and reports whether anything came back in time.
+	 * Optional so existing test/mock clients (pre-#1277) that don't implement
+	 * it don't need updating; callers treat a missing implementation as alive
+	 * (`pingLiveness?.() ?? true`), matching the codebase's existing optional-
+	 * capability-accessor pattern (`getRawCapabilityKeys`, `getLaunchVariant`).
+	 */
+	pingLiveness?: (timeoutMs?: number) => Promise<boolean>;
+	/**
+	 * #2358: the OS pid of the server's live process tree (the direct child;
+	 * on Windows a `cmd`/`.cmd` shim's pid, whose real descendant does the
+	 * work). The notify-stall breaker's liveness discriminator samples this
+	 * pid's CPU to tell a busy server from a dead input path before tearing it
+	 * down. Optional because test/mock clients model no real process — a
+	 * client without it keeps the pre-#2358 demote-at-budget behavior.
+	 */
+	getProcessPid?: () => number | undefined;
+	notify: {
+		open(
+			filePath: string,
+			content: string,
+			languageId: string,
+			preserveDiagnostics?: boolean,
+			silent?: boolean,
+			/**
+			 * #3405: the pushed bytes are this file's saved on-disk state and the
+			 * caller wants it diagnosed now — follow the didOpen/didChange with
+			 * `textDocument/didSave` when the server declared `save`. Only the
+			 * post-write sync and the explicit `lsp_diagnostics` query set it; warm
+			 * reads, cascade neighbours, desync repairs and bulk sweeps do not.
+			 */
+			saved?: boolean,
+			/**
+			 * #3481: `performance.now()` taken before the caller read `content`.
+			 * The per-path queue then sends the latest READ, not the latest
+			 * enqueued, and resolves `false` when a later read superseded this one.
+			 */
+			readStamp?: number,
+		): Promise<boolean | void>;
+		change(filePath: string, content: string): Promise<boolean | void>;
+		/**
+		 * #1668: queue a `workspace/didChangeWatchedFiles` entry for a disk
+		 * change this client did not learn about through didOpen/didChange —
+		 * an external bash write/delete outside the open-document sync path.
+		 * `type` is the LSP `FileChangeType` (1 Created, 2 Changed, 3 Deleted).
+		 * Routes through the same #271 debounced queue as a first-time open, so
+		 * a burst of external changes still flushes as one notification.
+		 */
+		watchedFileChange(filePath: string, type: number): void;
+		/**
+		 * #4320: queue Created for each existing path that is new to this server
+		 * and not yet announced to it, then send any waiting Created now. A read
+		 * that follows is then answered by a server that has heard of the path.
+		 */
+		announceCreated(
+			entries: ReadonlyArray<{ filePath: string; stat: BirthStat }>,
+		): void;
+	};
+	getDiagnostics(filePath: string): LSPDiagnostic[];
+	/**
+	 * #1095: the stored content binding for the diagnostics currently tracked
+	 * for `filePath` — {version?, contentHash?} of the document version those
+	 * diagnostics were computed against. `undefined` when nothing is tracked or
+	 * the server never reported a version (a version-less server → caller treats
+	 * the binding as "unknown", i.e. pre-#1095 behavior).
+	 */
+	getDiagnosticBinding(filePath: string): StoredDiagnosticBinding | undefined;
+	/** Monotonic counter bumped when fresh diagnostics are stored for this client.
+	 *  Client-GLOBAL: any path's publication advances it, so it cannot answer
+	 *  "did this server report on file X?" — use `getDiagnosticsVersionForPath`. */
+	readonly diagnosticsVersion: number;
+	/**
+	 * #1531: the value `diagnosticsVersion` held when diagnostics were last stored
+	 * for `filePath` — 0 when this client has stored none. Compare a baseline read
+	 * before a notify against a later read to prove a publication landed for THAT
+	 * file, rather than for an unrelated one on the same client. REQUIRED: an
+	 * optional accessor let a double silently fall back to the global counter,
+	 * which is the very defect this closes — every client, real or test, answers
+	 * per path.
+	 */
+	getDiagnosticsVersionForPath(filePath: string): number;
+	/** #3482: see {@link publicationCountsForPath}. Optional so a client double
+	 *  that predates it only loses the late-auxiliary backlog binding. */
+	getPublicationCountsForPath?(filePath: string): {
+		sent: number;
+		published: number;
+	};
+	waitForDiagnostics(
+		filePath: string,
+		timeoutMs?: number,
+		options?: {
+			minVersion?: number;
+			pullOnly?: boolean;
+			/** #1639: distinguishes a genuine content-collecting settle from a
+			 *  warm-up-only touch (`ensureWarmForSweep`'s readiness probe, which
+			 *  runs a real pull round trip but never wants the diagnostics
+			 *  content). Both are legitimate `lsp_typescript_diagnostic_sequence`
+			 *  observations for the same file, often seconds or milliseconds
+			 *  apart — tagging the source keeps them distinguishable instead of
+			 *  reading as duplicates. Defaults to "pull". */
+			pullSettleSource?: "pull" | "pull-warmup";
+		},
+	): Promise<void>;
+	/** Get all tracked diagnostics with timestamps (for cascade checking). #1095:
+	 *  each entry also carries the stored content `binding` (absent when no
+	 *  version-bearing publish set it). */
+	getAllDiagnostics(): Map<
+		string,
+		{ diags: LSPDiagnostic[]; ts: number; binding?: StoredDiagnosticBinding }
+	>;
+	pruneDiagnostics(
+		predicate: (
+			filePath: string,
+			ts: number,
+			diags: LSPDiagnostic[],
+		) => boolean,
+	): number;
+	/**
+	 * Paths of every file with tracked diagnostics. Lets callers resolve
+	 * file existence asynchronously (off the event loop) and then prune with a
+	 * synchronous, in-memory predicate — instead of a blocking `existsSync` per
+	 * file inside `pruneDiagnostics`.
+	 */
+	getTrackedDiagnosticPaths(): string[];
+	/** Capability snapshot for workspace diagnostics support */
+	getWorkspaceDiagnosticsSupport(): LSPWorkspaceDiagnosticsSupport;
+	/**
+	 * Issue one project-wide `workspace/diagnostic` pull. Resolves per-file
+	 * reports, or `undefined` when unsupported/dead/timed-out/malformed.
+	 */
+	requestWorkspaceDiagnostics(budgetMs: number): Promise<
+		| Array<{
+				filePath: string;
+				diagnostics: LSPDiagnostic[];
+				/** #1104: sha256 of the file bytes active at the moment this pull's
+				 *  answer for `filePath` was resolved — present for a "full" report
+				 *  (fresh read) or inherited from the prior pull for an "unchanged"
+				 *  one; absent only when the file could not be read. */
+				contentHash?: string;
+		  }>
+		| undefined
+	>;
+	/** Capability snapshot for navigation/edit operations */
+	getOperationSupport(): LSPOperationSupport;
+	/** File-operation registrations rejected during initialize parsing. */
+	getMalformedFileOperationRegistrations(): ReadonlySet<
+		"willRename" | "didRename"
+	>;
+	/** Commands the server advertised for workspace/executeCommand (the allowlist) */
+	getAdvertisedCommands(): string[];
+	/** Top-level keys of the raw ServerCapabilities advertised at initialize —
+	 *  the full advertised surface (incl. providers pi-lens does not parse). */
+	getRawCapabilityKeys(): string[];
+	/** #3407: the `textDocumentSync.save` options negotiated at initialize, or
+	 *  `undefined` when the server declared none (see `negotiateSaveOptions`).
+	 *  Optional so hand-written client doubles need not implement it; the
+	 *  capability inventory reads it to answer "which servers get didSave". */
+	getSaveOptions?(): TextDocumentSaveOptions | undefined;
+	/** See `LSPServerInfo.spawn`'s `launchVariant` (server.ts) — which concrete
+	 *  binary/protocol variant this client instance is actually running.
+	 *  Undefined = single-variant server or not yet reported (fail-safe:
+	 *  consumers must treat that as classic/default behavior). */
+	getLaunchVariant(): "classic" | "native-ts7" | undefined;
+	/**
+	 * Run a server command via workspace/executeCommand. Hardened: the command
+	 * MUST be in the server's advertised list or this rejects without sending.
+	 * Any resulting server-initiated workspace/applyEdit is applied during the
+	 * call (and only then).
+	 */
+	executeCommand(
+		command: string,
+		args?: unknown[],
+		mutationContext?: LspMutationContext,
+	): Promise<{ executed: boolean; result?: unknown; reason?: string }>;
+	/**
+	 * #1412/#1640: read-only sibling of `executeCommand` for identity and
+	 * telemetry probes. Same allowlist-by-advertisement hardening, but it never
+	 * touches `serverEditsAllowed` / `activeMutationContext` — so a probe firing
+	 * mid-flight cannot wipe a concurrent real command's mutation context, and
+	 * cannot itself open the `workspace/applyEdit` acceptance window. Carries the
+	 * short probe timeout, not the generous mutation backstop.
+	 */
+	executeReadOnlyCommand(
+		command: string,
+		args?: unknown[],
+	): Promise<{ executed: boolean; result?: unknown; reason?: string }>;
+	/** Go to definition — returns Location[] */
+	definition(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPLocation[]>;
+	/** Go to the type definition of the symbol at a position */
+	typeDefinition(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPLocation[]>;
+	/** Go to the declaration of the symbol at a position */
+	declaration(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPLocation[]>;
+	/** Find all references */
+	references(
+		filePath: string,
+		line: number,
+		character: number,
+		includeDeclaration?: boolean,
+	): Promise<LSPLocation[]>;
+	/** Hover info at position */
+	hover(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPHover | null>;
+	/** Signature help at position */
+	signatureHelp(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPSignatureHelp | null>;
+	/** Symbols in a document */
+	documentSymbol(filePath: string): Promise<LSPSymbol[]>;
+	/** Whether this exact document has already been opened on the server. */
+	isDocumentOpen(filePath: string): boolean;
+	/**
+	 * Every document currently open on this server, as normalized path keys
+	 * (#2430). Read-only over state already held in memory — it opens nothing,
+	 * closes nothing, and stats nothing. Used by the observational mutation
+	 * net's tracked-file set, which must never walk the workspace.
+	 *
+	 * Optional for the same reason `isBusy` is: a test double or a future client
+	 * shape may not implement it, and the sweep it feeds is advisory — a client
+	 * that cannot enumerate simply contributes no paths.
+	 */
+	openDocumentPaths?(): string[];
+	/**
+	 * #3601: the fingerprint (`hashDiagnosticContent`) of the last didOpen or
+	 * didChange payload this client sent for an open document, and when a send
+	 * last changed those bytes, or `undefined` for a document it does not track
+	 * (never opened, or closed). It is the bytes the server answers from, read
+	 * from state already held in memory. Optional for the same reason
+	 * `openDocumentPaths` is.
+	 */
+	getSentContent?(filePath: string):
+		| {
+				hash: string;
+				changedAtMs?: number | undefined;
+				openedAtMs?: number | undefined;
+				openedHash?: string | undefined;
+				clientStartedAtMs?: number | undefined;
+		  }
+		| undefined;
+	/** Whether this client currently has an LSP request in flight. */
+	isBusy?(): boolean;
+	/** URI spelling used when this document was opened. */
+	getDocumentUri(filePath: string): string | undefined;
+	/** Close an open document, if present, without opening or spawning anything. */
+	closeDocument(filePath: string): Promise<void>;
+	/** Workspace-wide symbol search */
+	workspaceSymbol(query: string): Promise<LSPSymbol[]>;
+	/** Available code actions at a range */
+	codeAction(
+		filePath: string,
+		line: number,
+		character: number,
+		endLine: number,
+		endCharacter: number,
+	): Promise<LSPCodeAction[]>;
+	/** Rename symbol at position */
+	rename(
+		filePath: string,
+		line: number,
+		character: number,
+		newName: string,
+	): Promise<LSPWorkspaceEdit | null>;
+	/** Ask server for edits before a source file rename. */
+	willRenameFiles(
+		oldFilePath: string,
+		newFilePath: string,
+	): Promise<LSPWorkspaceEdit | null>;
+	/** Notify server after a source file rename. */
+	didRenameFiles(
+		oldFilePath: string,
+		newFilePath: string,
+		oldUri?: string,
+		newUri?: string,
+	): Promise<void>;
+	/** Go to implementation */
+	implementation(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPLocation[]>;
+	/** Prepare call hierarchy at position */
+	prepareCallHierarchy(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPCallHierarchyItem[]>;
+	/** Find incoming calls (callers) */
+	incomingCalls(
+		item: LSPCallHierarchyItem,
+	): Promise<LSPCallHierarchyIncomingCall[]>;
+	/** Find outgoing calls (callees) */
+	outgoingCalls(
+		item: LSPCallHierarchyItem,
+	): Promise<LSPCallHierarchyOutgoingCall[]>;
+	/** Lean 4: tactic proof goal inspection ($/lean/plainGoal) */
+	plainGoal(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPPlainGoal | null>;
+	/** Lean 4: expected term type inspection ($/lean/plainTermGoal) */
+	plainTermGoal(
+		filePath: string,
+		line: number,
+		character: number,
+	): Promise<LSPPlainTermGoal | null>;
+	/** Lean 4: prepare module hierarchy ($/lean/prepareModuleHierarchy) */
+	prepareModuleHierarchy(filePath: string): Promise<LSPLeanModule | null>;
+	/** Lean 4: module imports ($/lean/moduleHierarchy/imports) */
+	moduleHierarchyImports(
+		mod: LSPLeanModule,
+		filePath?: string,
+	): Promise<LSPLeanImport[]>;
+	/** Lean 4: module imported by ($/lean/moduleHierarchy/importedBy) */
+	moduleHierarchyImportedBy(
+		mod: LSPLeanModule,
+		filePath?: string,
+	): Promise<LSPLeanImport[]>;
 	shutdown(options?: LSPShutdownOptions): Promise<void>;
 }
 

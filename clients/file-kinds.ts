@@ -34,6 +34,97 @@ export type FileKind =
 	| "jsts" // JavaScript/TypeScript/frameworks
 	| "kotlin" // Kotlin
 	| "lean" // Lean 4
+	| "lua" // Lua
+	| "markdown" // Markdown
+	| "nix" // Nix
+	| "ocaml" // OCaml
+	| "php" // PHP
+	| "powershell" // PowerShell
+	| "prisma" // Prisma schema
+	| "python" // Python
+	| "ruby" // Ruby
+	| "rust" // Rust
+	| "shell" // Shell
+	| "sql" // SQL
+	| "swift" // Swift
+	| "terraform" // Terraform
+	| "terragrunt" // Terragrunt
+	| "toml" // TOML
+	| "yaml" // YAML
+	| "zig"; // Zig
+
+// --- Extension Maps ---
+
+export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
+	clojure: [".clj", ".cljc", ".cljs", ".edn"],
+	cmake: [".cmake"],
+	csharp: [".cs"],
+	css: [".css", ".less", ".sass", ".scss"],
+	cue: [".cue"],
+	// From llvm-project/clang/lib/Driver/Types.cpp clang::driver::types::lookupTypeForExtension:
+	cxx: [
+		// C
+		".c",
+		".h",
+		// C++
+		".c++",
+		".cc",
+		".cp",
+		".cpp",
+		".cxx",
+		".hh",
+		".hpp",
+		".hxx",
+		// C++ include files
+		".inl",
+		".ipp",
+		".tpp",
+		".txx",
+		// C++20 module interface files
+		".c++m",
+		".cppm",
+		".cxxm",
+		".ixx",
+		// CUDA
+		".cu",
+		// HIP
+		".hip",
+		// CUDA/HIP header convention; clang's driver table omits `.cuh`, but
+		// projects use it for C++ headers that must remain in the cxx kind (#2986).
+		".cuh",
+		// Objective-C
+		".m",
+		".mm",
+		// OpenCL
+		".cl",
+		".clcpp",
+	],
+	dart: [".dart"],
+	docker: [".dockerfile"],
+	elixir: [".ex", ".exs"],
+	fish: [".fish"],
+	fsharp: [".fs", ".fsi", ".fsx"],
+	gleam: [".gleam"],
+	go: [".go"],
+	haskell: [".hs", ".lhs"],
+	"helm-template": [".tpl"],
+	html: [".htm", ".html"],
+	java: [".java"],
+	json: [".json", ".json5", ".jsonc"],
+	jsts: [
+		".cjs",
+		".cts",
+		".js",
+		".jsx",
+		".mjs",
+		".mts",
+		".svelte",
+		".ts",
+		".tsx",
+		".vue",
+	],
+	kotlin: [".kt", ".kts"],
+	lean: [".lean"],
 	lua: [".lua"],
 	markdown: [".md", ".mdx"],
 	nix: [".nix"],
@@ -351,7 +442,6 @@ export function getFileKindLabel(kind: FileKind): string {
 		lean: "Lean 4",
 		swift: "Swift",
 		dart: "Dart",
-		lean4: "Lean 4",
 		lua: "Lua",
 		zig: "Zig",
 		haskell: "Haskell",
@@ -400,7 +490,6 @@ export function getLanguageId(kind: FileKind): string {
 		lean: "lean",
 		swift: "swift",
 		dart: "dart",
-		lean4: "lean4",
 		lua: "lua",
 		zig: "zig",
 		haskell: "haskell",
