@@ -20,12 +20,18 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { ADVISORY_ONLY_MARKER } from "../../scripts/lib/ci-failure-classifier.mjs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const WORKFLOW_PATH = ".github/workflows/ci-infra-kill-rerun.yml";
 
 type WorkflowStep = { run?: unknown };
-type WorkflowJob = { env?: unknown; if?: unknown; steps?: unknown };
+type WorkflowJob = {
+	env?: unknown;
+	if?: unknown;
+	steps?: unknown;
+	permissions?: unknown;
+};
 type ClassifyJob = { if?: unknown; steps?: unknown };
 type Workflow = {
 	on?: { pull_request?: { types?: unknown[] } };
@@ -51,10 +57,10 @@ function readClassifyIf(): string {
 // Review round 2, MUT J: the eligible-event set is duplicated in TWO places
 // -- the job's `if:` (which arms this job at all) and this step's own
 // `elif` (which decides whether to pass --allow-missing-pr) -- and only the
-// `if:` was under test. Dropping the `repository_dispatch` arm from the
-// `elif` leaves every other test green while a real dispatch run passes
-// neither --pr nor --allow-missing-pr, so the classifier throws and the
-// rerun never fires: #2668 again, with only a red classify job as signal.
+// `if:` was under test. Dropping the `push` arm from the `elif` leaves every
+// other test green while a real push run passes neither --pr nor
+// --allow-missing-pr, so the classifier throws and the rerun never fires:
+// #2668 again, with only a red classify job as signal.
 function readClassifyStepRun(): string {
 	const steps = loadWorkflow().jobs?.classify?.steps;
 	const classifyStep = Array.isArray(steps)
@@ -79,7 +85,10 @@ interface WorkflowRunContext {
 	headBranch: string;
 	conclusion: string;
 	runAttempt: number;
+	headSha: string;
 	pullRequestNumber: string;
+	pullRequestUrl: string;
+	pullRequestHeadSha: string;
 }
 
 // Textual substitution of every dotted context path this expression reads,
@@ -96,9 +105,18 @@ const CONTEXT_PATHS: Array<[string, (ctx: WorkflowRunContext) => unknown]> = [
 	["github.event.workflow_run.head_branch", (ctx) => ctx.headBranch],
 	["github.event.workflow_run.conclusion", (ctx) => ctx.conclusion],
 	["github.event.workflow_run.run_attempt", (ctx) => ctx.runAttempt],
+	["github.event.workflow_run.head_sha", (ctx) => ctx.headSha],
 	[
 		"github.event.workflow_run.pull_requests[0].number",
 		(ctx) => ctx.pullRequestNumber,
+	],
+	[
+		"github.event.workflow_run.pull_requests[0].url",
+		(ctx) => ctx.pullRequestUrl,
+	],
+	[
+		"github.event.workflow_run.pull_requests[0].head.sha",
+		(ctx) => ctx.pullRequestHeadSha,
 	],
 ];
 
@@ -114,7 +132,8 @@ function substitute(expr: string, ctx: WorkflowRunContext): string {
 		}
 		out = out.split(path).join(literal);
 	}
-	if (out.includes("github.")) {
+	// A literal like "api.github.com" is not a context reference (#4382).
+	if (/(^|[^\w./])github\.(event|repository)/.test(out)) {
 		throw new Error(
 			`unsubstituted github.* reference survived evaluation: ${out}`,
 		);
@@ -131,6 +150,22 @@ function evaluateIf(expr: string, ctx: WorkflowRunContext): boolean {
 	return Boolean(fn());
 }
 
+// The two GitHub expression functions the PR_NUMBER env uses (#4382), with
+// GitHub's semantics: startsWith is case-insensitive, format fills {n}.
+function evaluateValue(expr: string, context: WorkflowRunContext): unknown {
+	const fn = new Function(
+		"startsWith",
+		"format",
+		`"use strict"; return (${substitute(expr, context)});`,
+	);
+	return fn(
+		(value: string, prefix: string) =>
+			value.toLowerCase().startsWith(prefix.toLowerCase()),
+		(template: string, ...values: string[]) =>
+			template.replace(/\{(\d+)\}/g, (_m, i) => values[Number(i)]),
+	);
+}
+
 const SAME_REPO = "acme/repo";
 const FORK_REPO = "someone-else/repo";
 
@@ -142,7 +177,10 @@ function ctx(overrides: Partial<WorkflowRunContext>): WorkflowRunContext {
 		headBranch: "feature-x",
 		conclusion: "failure",
 		runAttempt: 1,
+		headSha: "aaa111",
 		pullRequestNumber: "123",
+		pullRequestUrl: `https://api.github.com/repos/${SAME_REPO}/pulls/123`,
+		pullRequestHeadSha: "aaa111",
 		...overrides,
 	};
 }
@@ -164,11 +202,6 @@ const ROWS: Array<[string, WorkflowRunContext, boolean]> = [
 		false,
 	],
 	[
-		"repository_dispatch (merge-train-post-merge) targeting master",
-		ctx({ event: "repository_dispatch", headBranch: "master" }),
-		true,
-	],
-	[
 		"workflow_dispatch (manual run)",
 		ctx({ event: "workflow_dispatch" }),
 		false,
@@ -185,11 +218,6 @@ const ROWS: Array<[string, WorkflowRunContext, boolean]> = [
 	[
 		"push-to-master run on its SECOND attempt (a second infra kill on one head)",
 		ctx({ event: "push", headBranch: "master", runAttempt: 2 }),
-		true,
-	],
-	[
-		"repository_dispatch run on its SECOND attempt (a second infra kill on one head)",
-		ctx({ event: "repository_dispatch", headBranch: "master", runAttempt: 2 }),
 		true,
 	],
 	// The bound: a rerun can only be issued FROM attempt 1 or 2, so at most
@@ -286,15 +314,168 @@ describe("ci-infra-kill-rerun.yml classify job gate (#2668 review F3)", () => {
 		expect(evaluateIf(unbounded, thirdAttempt)).toBe(true);
 	});
 
-	// Review round 2, MUT J: the `if:` truth table above cannot see this --
-	// it only pins whether the JOB runs, not what the STEP's own `elif` does
-	// once it has. Both `push` and `repository_dispatch` must appear in the
-	// --allow-missing-pr branch, or a dispatch run silently gets neither
-	// --pr nor --allow-missing-pr and the classifier throws (#2668 again).
-	it("the step's --allow-missing-pr branch names both push and repository_dispatch (review round 2, MUT J)", () => {
+	// Review round 2, MUT J (reshaped by #4382): the `if:` truth table above
+	// pins whether the JOB runs, not what the STEP does once it has. Every run
+	// that holds no PR of this repository (a push, or a PR run whose head moved
+	// on) must get --allow-missing-pr, or the classifier throws and the rerun
+	// never fires (#2668 again). The arm no longer names an event: the PR_NUMBER
+	// env decides.
+	it("the step's --allow-missing-pr branch is the empty-PR_NUMBER arm and no retired event returns (review round 2, MUT J; #4382)", () => {
 		const stepRun = readClassifyStepRun();
-		expect(stepRun).toContain('"$RUN_EVENT" == "push"');
-		expect(stepRun).toContain('"$RUN_EVENT" == "repository_dispatch"');
+		expect(stepRun).toMatch(
+			/if \[\[ -n "\$PR_NUMBER" \]\]; then\s+args\+=\(--pr "\$PR_NUMBER"\)\s+else[\s\S]*?args\+=\(--allow-missing-pr\)\s+fi/,
+		);
+		expect(stepRun).not.toContain("repository_dispatch");
+	});
+});
+
+// #4382 recurrence: run 38514228860 crashed with `POST .../issues/23/comments
+// -> HTTP 403` because a master PUSH run's `pull_requests` listed other
+// repositories' namesake PRs (brooksmcmillin/pi-lens#23, floatGray/pi-lens#2:
+// head branch `master`), and PR_NUMBER took `[0].number`. Issue 23 of this
+// repository is a closed issue, not a PR. Both jobs that read PR_NUMBER must
+// derive it with the same expression, which yields a number only for a
+// pull_request run, from an entry of this repository, at the run's own head.
+describe("ci-infra-kill-rerun.yml PR_NUMBER derivation (#4382)", () => {
+	const jobs = loadWorkflow().jobs as Record<string, WorkflowJob>;
+	const prNumberExpr = (job: string): string => {
+		const env = jobs[job]?.env as Record<string, unknown> | undefined;
+		const value = env?.PR_NUMBER;
+		if (typeof value !== "string") {
+			throw new Error(`${WORKFLOW_PATH}: jobs.${job}.env.PR_NUMBER missing`);
+		}
+		const inner = /^\$\{\{([\s\S]*)\}\}$/.exec(value.trim())?.[1];
+		if (inner === undefined) {
+			throw new Error(
+				`${WORKFLOW_PATH}: ${job} PR_NUMBER is not one expression`,
+			);
+		}
+		return inner.trim();
+	};
+
+	const OTHER_REPO_PR =
+		"https://api.github.com/repos/brooksmcmillin/pi-lens/pulls/23";
+	const rows: Array<[string, WorkflowRunContext, string]> = [
+		[
+			"master push listing another repository's PR #23 at the same sha (the 38514228860 payload)",
+			ctx({
+				event: "push",
+				headBranch: "master",
+				pullRequestNumber: "23",
+				pullRequestUrl: OTHER_REPO_PR,
+			}),
+			"",
+		],
+		[
+			"master push listing a PR of THIS repository at the run's own head",
+			ctx({ event: "push", headBranch: "master" }),
+			"",
+		],
+		[
+			"same-repo PR run at the run's own head",
+			ctx({ event: "pull_request" }),
+			"123",
+		],
+		[
+			"PR run whose listed PR head moved on (stale run)",
+			ctx({ event: "pull_request", pullRequestHeadSha: "bbb222" }),
+			"",
+		],
+		[
+			"PR run listing another repository's namesake PR at a matching sha",
+			ctx({
+				event: "pull_request",
+				pullRequestNumber: "23",
+				pullRequestUrl: OTHER_REPO_PR,
+			}),
+			"",
+		],
+	];
+
+	for (const job of ["classify", "finalize-rerun"]) {
+		it.each(rows)(`${job}: %s`, (_name, context, expected) => {
+			expect(String(evaluateValue(prNumberExpr(job), context))).toBe(expected);
+		});
+	}
+
+	it("both jobs derive PR_NUMBER with one expression", () => {
+		expect(prNumberExpr("classify")).toBe(prNumberExpr("finalize-rerun"));
+	});
+
+	// The write set of the classify job: rerun (actions), checkout (contents),
+	// PR comment + labels (pull-requests). No `issues` scope: a comment on a
+	// non-PR issue is refused by design, and the fix is to never target one.
+	it("classify grants exactly the scopes it writes with", () => {
+		const permissions = jobs.classify?.permissions;
+		expect(permissions).toEqual({
+			actions: "write",
+			contents: "read",
+			"pull-requests": "write",
+		});
+	});
+});
+
+// #3801 (verify r2 V3): a not-ready `Heavy advisory gate` exits 1, which fails
+// the CI run with every required check green. The classifier skips such a run
+// (no failed `Unit tests` job) and the label step used to read "skipped" as
+// "not infra" and put `ci:real` on the green PR. A run whose failed jobs are
+// all advisory (the classifier prints ADVISORY_ONLY_MARKER) must label nothing
+// and clear stale verdict labels; every other skip keeps `ci:real`.
+describe("ci-infra-kill-rerun.yml classify label step for an advisory-only failure (#3801)", () => {
+	const run = () => {
+		const job = (loadWorkflow().jobs as Record<string, WorkflowJob>).classify;
+		return String(
+			(job.steps as WorkflowStep[]).find((step) =>
+				String(step.run).includes("gh pr edit"),
+			)?.run,
+		);
+	};
+	it("greps the classifier's own advisory-only phrase and adds no label in that branch", () => {
+		const text = run();
+		expect(text).toContain(ADVISORY_ONLY_MARKER);
+		const branch =
+			/elif grep -q -- '[^']*only advisory jobs failed' <<<"\$output"; then([\s\S]*?)\n\s*else/.exec(
+				text,
+			)?.[1];
+		expect(branch).toBeDefined();
+		expect(branch).toContain("--remove-label 'ci:real'");
+		expect(branch).toContain("--remove-label 'ci:infra'");
+		expect(branch).not.toContain("--add-label");
+	});
+
+	// Recurrence (verify r3 V5): the grep read the WHOLE CLI stdout, which on the
+	// real-failure path carries log-derived text (the first failing assertion
+	// line). A genuine red `Unit tests` shard whose assertion text contained the
+	// phrase lost its `ci:real` label. The pattern is anchored to the CLI's own
+	// skip line, and this evaluates the pattern the workflow really uses.
+	it("anchors the phrase to the classifier's skip line, so log text cannot trigger it", () => {
+		const pattern =
+			/grep -q -- '([^']*only advisory jobs failed)' <<<"\$output"/.exec(
+				run(),
+			)?.[1];
+		expect(pattern).toBeDefined();
+		const regex = new RegExp(pattern as string, "m");
+		const skipLine = `CI failure classifier skipped: run 9 has no failed job named "Unit tests"; ${ADVISORY_ONLY_MARKER} (Heavy advisory gate (advisory))`;
+		expect(regex.test(skipLine)).toBe(true);
+		// a real failure: the CLI's result line, then the sticky comment body
+		// carrying the failing assertion line verbatim
+		const realFailure = [
+			"PR #42 sha=abc job=Unit tests (shard 2/4) -> real",
+			"<!-- ci-classifier -->",
+			`AssertionError: expected "${ADVISORY_ONLY_MARKER}" to be logged`,
+			`  ${skipLine}`,
+		].join("\n");
+		expect(regex.test(realFailure)).toBe(false);
+	});
+
+	it("keeps ci:infra first and ci:real as the fall-through", () => {
+		const text = run();
+		const infra = text.indexOf("-> infra-");
+		const advisory = text.indexOf(ADVISORY_ONLY_MARKER);
+		const real = text.indexOf("--add-label 'ci:real'");
+		expect(infra).toBeGreaterThan(-1);
+		expect(infra).toBeLessThan(advisory);
+		expect(advisory).toBeLessThan(real);
 	});
 });
 
@@ -393,46 +574,6 @@ describe("ci-infra-kill-rerun.yml terminal rerun path (#2806 F3)", () => {
 			"push failure attempt 3 (terminal)",
 			ctx({
 				event: "push",
-				headBranch: "master",
-				conclusion: "failure",
-				runAttempt: 3,
-			}),
-			true,
-		],
-		[
-			"repository_dispatch success attempt 2",
-			ctx({
-				event: "repository_dispatch",
-				headBranch: "master",
-				conclusion: "success",
-				runAttempt: 2,
-			}),
-			true,
-		],
-		[
-			"repository_dispatch failure attempt 2 (intermediate)",
-			ctx({
-				event: "repository_dispatch",
-				headBranch: "master",
-				conclusion: "failure",
-				runAttempt: 2,
-			}),
-			false,
-		],
-		[
-			"repository_dispatch success attempt 3 (terminal)",
-			ctx({
-				event: "repository_dispatch",
-				headBranch: "master",
-				conclusion: "success",
-				runAttempt: 3,
-			}),
-			true,
-		],
-		[
-			"repository_dispatch failure attempt 3 (terminal)",
-			ctx({
-				event: "repository_dispatch",
 				headBranch: "master",
 				conclusion: "failure",
 				runAttempt: 3,

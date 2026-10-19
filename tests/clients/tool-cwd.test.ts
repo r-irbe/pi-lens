@@ -9,6 +9,7 @@ import {
 	type LSPServerInfo,
 } from "../../clients/lsp/server.js";
 import { LSPService } from "../../clients/lsp/index.js";
+import { withPlatform } from "../support/platform-stub.js";
 import { setupTestEnvironment, useTrackedTempDirs } from "./test-utils.js";
 
 let home: string;
@@ -46,12 +47,7 @@ describe("resolveToolCwd (#2777)", () => {
 	it("folds Win32 case and separator variants into one ephemeral key", () => {
 		// #2782 win-shape review: divergent Win32 spellings must not duplicate
 		// the marker-walk memo or once-per-session resolution log record.
-		const originalPlatform = process.platform;
-		Object.defineProperty(process, "platform", {
-			configurable: true,
-			value: "win32",
-		});
-		try {
+		withPlatform("win32", () => {
 			const fileKey = toolCwd._toolCwdEphemeralKey([
 				path.win32.resolve("C:\\proj\\src\\a.ts"),
 			]);
@@ -76,12 +72,7 @@ describe("resolveToolCwd (#2777)", () => {
 			expect(fileKey).toBe(
 				pathUtils.normalizeEphemeralMapKey("C:\\proj\\src\\a.ts"),
 			);
-		} finally {
-			Object.defineProperty(process, "platform", {
-				configurable: true,
-				value: originalPlatform,
-			});
-		}
+		});
 	});
 
 	it("selects a nearer marker through the real synchronous seam", () => {
@@ -288,11 +279,12 @@ describe("resolveToolCwd (#2777)", () => {
 		const server = LSP_SERVERS.find((entry) => entry.id === "python");
 		if (!server) throw new Error("python server missing from registry");
 		const service = new LSPService(undefined, project);
-		const resolveRoot = (
-			service as unknown as {
+		const { clientRegistry } = service as unknown as {
+			clientRegistry: {
 				resolveServerRoot(server: LSPServerInfo, file: string): Promise<string>;
-			}
-		).resolveServerRoot.bind(service);
+			};
+		};
+		const resolveRoot = clientRegistry.resolveServerRoot.bind(clientRegistry);
 		expect(await resolveRoot(server, file)).toBe(path.dirname(file));
 	});
 
@@ -305,6 +297,8 @@ describe("resolveToolCwd (#2777)", () => {
 			id: "markerless-test-server",
 			name: "Markerless test server",
 			extensions: [".ts"],
+			idleEviction: "unmeasured",
+			role: "language",
 			root: async () => computedRoot,
 			spawn: vi.fn(),
 		};
@@ -327,6 +321,8 @@ describe("resolveToolCwd (#2777)", () => {
 			id: "failing-root-test-server",
 			name: "Failing root test server",
 			extensions: [".ts"],
+			idleEviction: "unmeasured",
+			role: "language",
 			root: async () => {
 				calls++;
 				if (calls === 1) throw new Error("root probe failed");
@@ -346,6 +342,203 @@ describe("resolveToolCwd (#2777)", () => {
 			.getDegradationSummary()
 			.find((entry) => entry.kind === "tool-cwd-resolution");
 		expect(group?.count).toBe(1);
+	});
+
+	it("tells its caller about a root fallback on every call, not once per file (#3750)", async () => {
+		// Recurrence guarded: the verdict in tools/lsp-diagnostics.ts is derived
+		// from this callback while the degradation row is once-only; a signal
+		// gated by the row would confirm the file clean on the second check.
+		const project = path.join(home, "repo");
+		const file = path.join(project, "src", "main.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const failing = vi.fn(async () => {
+			throw new Error("root probe failed");
+		});
+		const server: LSPServerInfo = {
+			id: "fallback-callback-test-server",
+			name: "Fallback callback test server",
+			extensions: [".ts"],
+			idleEviction: "unmeasured",
+			role: "language",
+			root: failing,
+			rootMarkers: ["missing.marker"],
+			requiresProjectRoot: true,
+			spawn: vi.fn(),
+		};
+		const seen: unknown[] = [];
+
+		await resolveLspServerCwd(server, file, project, undefined, (fallback) =>
+			seen.push(fallback),
+		);
+		await resolveLspServerCwd(server, file, project, undefined, (fallback) =>
+			seen.push(fallback),
+		);
+		const expected = {
+			serverId: "fallback-callback-test-server",
+			serverName: "Fallback callback test server",
+			rootMarkers: ["missing.marker"],
+			requiresProjectRoot: true,
+			cause: "failed",
+		};
+		expect(seen).toEqual([expected, expected]);
+	});
+
+	it("tells a server that needs no project apart from one that does, and a marker the root policy refused from none (#3750)", async () => {
+		const project = path.join(home, "repo");
+		const fixtureRoot = path.join(project, "__fixtures__", "crate");
+		const fixtureFile = path.join(fixtureRoot, "src", "lib.rs");
+		const bareFile = path.join(project, "bare", "main.rs");
+		fs.mkdirSync(path.dirname(fixtureFile), { recursive: true });
+		fs.mkdirSync(path.dirname(bareFile), { recursive: true });
+		fs.writeFileSync(path.join(fixtureRoot, "Cargo.toml"), "[package]\n");
+		const server = (requires: boolean | undefined): LSPServerInfo => ({
+			id: "flag-test-server",
+			name: "Flag test server",
+			extensions: [".rs"],
+			idleEviction: "unmeasured",
+			role: "language",
+			root: async () => undefined,
+			rootMarkers: ["Cargo.toml"],
+			...(requires === undefined ? {} : { requiresProjectRoot: requires }),
+			spawn: vi.fn(),
+		});
+		const seen: Array<{
+			requiresProjectRoot: boolean;
+			cause: string;
+			marker?: string;
+		}> = [];
+		const collect = (fallback: (typeof seen)[number]) => seen.push(fallback);
+
+		await resolveLspServerCwd(
+			server(true),
+			bareFile,
+			project,
+			undefined,
+			collect,
+		);
+		await resolveLspServerCwd(
+			server(false),
+			bareFile,
+			project,
+			undefined,
+			collect,
+		);
+		await resolveLspServerCwd(
+			server(undefined),
+			bareFile,
+			project,
+			undefined,
+			collect,
+		);
+		await resolveLspServerCwd(
+			server(true),
+			fixtureFile,
+			project,
+			undefined,
+			collect,
+		);
+
+		expect(seen.map((s) => [s.requiresProjectRoot, s.cause, s.marker])).toEqual(
+			[
+				[true, "none", undefined],
+				[false, "none", undefined],
+				[false, "none", undefined],
+				[true, "unselected", "Cargo.toml"],
+			],
+		);
+	});
+
+	// Recurrence guarded: #3750 round 1 flagged every undefined-root server; the
+	// decision (rust measured, .NET documented, everything else unflagged until
+	// measured) is pinned on the REAL registry entries, bare directory, real root
+	// functions.
+	it("flags exactly the servers that need a project, on the real registry (#3750)", async () => {
+		const bare = path.join(home, "bare");
+		fs.mkdirSync(bare, { recursive: true });
+		const byId = new Map(LSP_SERVERS.map((server) => [server.id, server]));
+		const verdicts: Record<string, boolean | undefined> = {};
+
+		for (const id of [
+			"rust",
+			"csharp",
+			"omnisharp",
+			"fsharp",
+			"lua",
+			"nix",
+			"deno",
+			"ocaml",
+		]) {
+			const server = byId.get(id);
+			const extension = server?.extensions[0] ?? ".x";
+			let seen: boolean | undefined;
+			await resolveLspServerCwd(
+				server as LSPServerInfo,
+				path.join(bare, `f${extension}`),
+				bare,
+				undefined,
+				(fallback) => {
+					seen = fallback.requiresProjectRoot;
+				},
+			);
+			verdicts[id] = seen;
+		}
+
+		expect(verdicts).toEqual({
+			rust: true,
+			csharp: true,
+			omnisharp: true,
+			fsharp: true,
+			lua: false,
+			nix: false,
+			deno: false,
+			ocaml: false,
+		});
+	});
+
+	it("words each cause of a root fallback without claiming a marker is missing when one exists (#3750)", async () => {
+		const { describeRootFallback } =
+			await import("../../clients/lsp/server.js");
+		const base = {
+			serverId: "x",
+			serverName: "Some LS",
+			rootMarkers: ["a.toml", "b.lock"],
+			requiresProjectRoot: true,
+		} as const;
+
+		expect(describeRootFallback({ ...base, cause: "none" })).toContain(
+			"Some LS: no project root found for this file (looked for a.toml / b.lock)",
+		);
+		expect(
+			describeRootFallback({ ...base, cause: "unselected", marker: "a.toml" }),
+		).toContain(
+			"Some LS: found a.toml for this file but pi-lens did not select it as the project root",
+		);
+		const failed = describeRootFallback({ ...base, cause: "failed" });
+		expect(failed).toContain(
+			"Some LS: resolving the project root for this file failed",
+		);
+		expect(failed).not.toContain("no project root found");
+	});
+
+	it("does not report a fallback when the server resolved its own root (#3750)", async () => {
+		const project = path.join(home, "repo");
+		const file = path.join(project, "src", "main.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const server: LSPServerInfo = {
+			id: "resolved-root-test-server",
+			name: "Resolved root test server",
+			extensions: [".ts"],
+			idleEviction: "unmeasured",
+			role: "language",
+			root: async () => project,
+			rootMarkers: ["missing.marker"],
+			spawn: vi.fn(),
+		};
+		const onFallback = vi.fn();
+
+		await resolveLspServerCwd(server, file, project, undefined, onFallback);
+
+		expect(onFallback).not.toHaveBeenCalled();
 	});
 
 	it("matches glob root markers against files in the directory", () => {

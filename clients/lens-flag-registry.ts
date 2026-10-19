@@ -53,6 +53,27 @@ export interface LensFlagSpec {
 	readGlobal?: (config: Record<string, unknown>) => boolean | undefined;
 }
 
+/**
+ * The `ui.*` opt-in family shares these three invariants — `negated: false`,
+ * `default: false`, `scope: "global"` — so declare them once here instead of
+ * restating a six-field object literal per entry (Sonar CPD's duplicate-block
+ * source: it normalizes string literals, so per-entry rewording cannot help).
+ */
+function globalOptInFlag(
+	name: string,
+	description: string,
+	configKey: string,
+): LensFlagSpec {
+	return {
+		name,
+		description,
+		configKey,
+		negated: false,
+		default: false,
+		scope: "global",
+	};
+}
+
 export const LENS_FLAGS: readonly LensFlagSpec[] = [
 	{
 		name: "no-lens",
@@ -215,33 +236,26 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		default: false,
 		scope: "global",
 	},
-	{
-		name: "lens-compact-tool-line",
-		description:
-			"Opt-in (#1327): collapse a pi-lens tool's call+result rows into ONE theme-aware line (status glyph + name + summary) instead of two. Preserves expand-to-view-full-output. Default off. Also via ui.compactToolLine=true in ~/.pi-lens/config.json.",
-		configKey: "ui.compactToolLine",
-		negated: false,
-		default: false,
-		scope: "global",
-	},
-	{
-		name: "lens-compact-lsp-status",
-		description:
-			"Opt-in (#3099): collapse the footer LSP status to one state glyph per group (LSP ✓ green, LSP ✗ red, dim LSP ✗ when nothing is warm) instead of listing the active server names. Default off. Also via ui.compactLspStatus=true in ~/.pi-lens/config.json.",
-		configKey: "ui.compactLspStatus",
-		negated: false,
-		default: false,
-		scope: "global",
-	},
-	{
-		name: "lens-hide-lsp-status",
-		description:
-			"Opt-in (#3099): publish no pi-lens-lsp footer status at all, so a host that renders extension statuses stops showing the key. Outranks lens-compact-lsp-status when both are set. Default off. Also via ui.hideLspStatus=true in ~/.pi-lens/config.json.",
-		configKey: "ui.hideLspStatus",
-		negated: false,
-		default: false,
-		scope: "global",
-	},
+	globalOptInFlag(
+		"lens-compact-tool-line",
+		"Opt-in (#1327): collapse a pi-lens tool's call+result rows into ONE theme-aware line (status glyph + name + summary) instead of two. Preserves expand-to-view-full-output. Default off. Also via ui.compactToolLine=true in ~/.pi-lens/config.json.",
+		"ui.compactToolLine",
+	),
+	globalOptInFlag(
+		"lens-compact-lsp-status",
+		"Opt-in (#3099): collapse the footer LSP status to one state glyph per group (LSP ✓ green, LSP ✗ red, dim LSP ✗ when nothing is warm) instead of listing the active server names. Default off. Also via ui.compactLspStatus=true in ~/.pi-lens/config.json.",
+		"ui.compactLspStatus",
+	),
+	globalOptInFlag(
+		"lens-hide-lsp-status",
+		"Opt-in (#3099): publish no pi-lens-lsp footer status at all, so a host that renders extension statuses stops showing the key. Outranks lens-compact-lsp-status when both are set. Default off. Also via ui.hideLspStatus=true in ~/.pi-lens/config.json.",
+		"ui.hideLspStatus",
+	),
+	globalOptInFlag(
+		"lens-compact-widget",
+		"Opt-in (#3959): render the pi-lens widget as ONE summary line (languages + error/warning totals) instead of also stacking file rows, the suppressed count and blocker details below it. Default off. Also via ui.compactWidget=true in ~/.pi-lens/config.json.",
+		"ui.compactWidget",
+	),
 	{
 		name: "no-lazy-tools",
 		description:

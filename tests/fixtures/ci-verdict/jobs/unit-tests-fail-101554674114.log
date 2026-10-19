@@ -1,0 +1,48 @@
+2026-09-06T20:36:16.3898755Z 
+2026-09-06T20:36:16.3898920Z Or undo this operation with:
+2026-09-06T20:36:16.3899160Z 
+2026-09-06T20:36:16.3903234Z   git switch -
+2026-09-06T20:36:16.3903596Z 
+2026-09-06T20:36:16.3904142Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-09-06T20:36:16.3904803Z 
+2026-09-06T20:36:16.3905472Z HEAD is now at 2654a88 Merge fe70011e19d3c4a96af40ecf5826465e5bf2be4e into 01442e987f8c2f88b68d08878027d7148b1b7038
+2026-09-06T20:36:16.3907703Z ##[endgroup]
+2026-09-06T20:36:16.3958771Z [command]/usr/bin/git log -1 --format=%H
+2026-09-06T20:36:16.3989815Z 2654a88a10e74e65263816f084308a70c08468ff
+[... 3250 lines of passing test output elided from this recorded log ...]
+2026-09-06T20:44:09.6632450Z      [33m[2m✓[22m[39m the real `npm pack` tarball's package.json has no devDependencies, and the working manifest is restored [33m 7870[2mms[22m[39m
+2026-09-06T20:44:09.9243292Z  [32m✓[39m [30m[46m wall-clock-budget [49m[39m tests/scripts/supply-host-provided-deps.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 81[2mms[22m[39m
+2026-09-06T20:44:09.9608191Z 
+2026-09-06T20:44:09.9609461Z [31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+2026-09-06T20:44:09.9609994Z 
+2026-09-06T20:44:09.9614238Z [41m[1m FAIL [22m[49m [30m[42m default [49m[39m tests/clients/instance-reaper-backstop.test.ts[2m > [22m#1864 review F2: a grace-spared candidate is re-examined[2m > [22marms one follow-up sweep when the grace spared a candidate
+2026-09-06T20:44:09.9620280Z [31m[1mAssertionError[22m: expected undefined to be 5 // Object.is equality[39m
+2026-09-06T20:44:09.9621422Z 
+2026-09-06T20:44:09.9621705Z [32m- Expected:[39m
+2026-09-06T20:44:09.9622075Z 5
+2026-09-06T20:44:09.9622236Z 
+2026-09-06T20:44:09.9622440Z [31m+ Received:[39m
+2026-09-06T20:44:09.9622783Z undefined
+2026-09-06T20:44:09.9622957Z 
+2026-09-06T20:44:09.9623623Z [36m [2m❯[22m tests/clients/instance-reaper-backstop.test.ts:[2m419:45[22m[39m
+2026-09-06T20:44:09.9737461Z     [90m417|[39m   [34mexpect[39m(outcome)[33m.[39m[34mtoBe[39m([32m"clean"[39m)[33m;[39m
+2026-09-06T20:44:09.9739702Z     [90m418|[39m   [34mexpect[39m([34mbackstopMetadata[39m()[33m.[39mtooFresh)[33m.[39m[34mtoBe[39m([34m1[39m)[33m;[39m
+2026-09-06T20:44:09.9742682Z     [90m419|[39m   [34mexpect[39m([34mbackstopMetadata[39m()[33m.[39mgraceRetryInMs)[33m.[39m[34mtoBe[39m([34m5[39m)[33m;[39m
+2026-09-06T20:44:09.9745068Z     [90m   |[39m                                             [31m^[39m
+2026-09-06T20:44:09.9746073Z     [90m420|[39m
+2026-09-06T20:44:09.9747342Z     [90m421|[39m   // The retry actually runs, and it is NOT blocked by the stamp the f…
+2026-09-06T20:44:09.9748082Z 
+2026-09-06T20:44:09.9748300Z 
+2026-09-06T20:44:09.9748997Z [31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+2026-09-06T20:44:09.9749632Z 
+2026-09-06T20:44:09.9848016Z [2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m985 passed[39m[22m[2m | [22m[33m13 skipped[39m[90m (999)[39m
+2026-09-06T20:44:09.9999525Z [2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m13035 passed[39m[22m[2m | [22m[33m67 skipped[39m[90m (13103)[39m
+2026-09-06T20:44:10.0001053Z [2m   Start at [22m 20:36:37
+2026-09-06T20:44:10.0017602Z [2m   Duration [22m 452.02s[2m (transform 36.17s, setup 16.99s, import 278.83s, tests 627.35s, environment 139ms)[22m
+2026-09-06T20:44:10.0020100Z 
+2026-09-06T20:44:10.0178319Z 
+2026-09-06T20:44:10.0211610Z ##[error]AssertionError: expected undefined to be 5 // Object.is equality
+
+- Expected:
+5
+

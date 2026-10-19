@@ -1,0 +1,7 @@
+on:
+  push:
+    branches: [master]
+jobs:
+  build:
+    steps:
+      - run: echo ok

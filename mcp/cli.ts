@@ -8,16 +8,21 @@
 // place for flushReviewGraphPersist to claim.
 process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "3600000";
 
+import { setProjectTrustState } from "../clients/project-trust.js";
+import { logExtension } from "../clients/extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { FactStore } from "../clients/dispatch/fact-store.js";
 import {
 	buildOrUpdateGraph,
 	flushReviewGraphPersist,
+	getGraphBuildInfoForGraph,
 	getLastGraphBuildInfo,
 	getLastReviewGraphBuildAttempt,
+	graphWasmTrapDetail,
 	reviewGraphCachePath,
 } from "../clients/review-graph/builder.js";
+import { isTreeSitterWasmAborted } from "../clients/tree-sitter-shared.js";
 
 function cwdArg(): string {
 	const equals = process.argv.find((arg) => arg.startsWith("--cwd="));
@@ -95,6 +100,35 @@ async function buildGraph(): Promise<void> {
 
 	const durationMs = Date.now() - startedAt;
 	const coverage = persisted.coverage;
+	const wasmTrappedFiles =
+		getGraphBuildInfoForGraph(graph).wasmTrappedFiles ?? 0;
+	// #3678: the build persisted, but tree-sitter lost symbols — either a
+	// per-file web-tree-sitter trap (#3605) or the process-wide runtime abort
+	// that follows a 4th trap or an abort-class error. Both are
+	// honest-but-successful, matching the over-cap PARTIAL persist (#960): exit
+	// 0 so a scheduled nightly build is not failed, but never print the clean
+	// line. An abort is process-lifetime, so only a restart recovers it.
+	const wasmAborted = isTreeSitterWasmAborted();
+	if (wasmAborted || wasmTrappedFiles > 0) {
+		const degraded = wasmAborted
+			? "review graph degraded — tree-sitter disabled for this process until restart"
+			: graphWasmTrapDetail(wasmTrappedFiles);
+		const recovery = wasmAborted
+			? ""
+			: "those files were skipped and are re-extracted on the next build; ";
+		process.stdout.write(
+			`pi-lens build-graph: ${degraded}; ${recovery}` +
+				(coverage?.partial
+					? `PARTIAL persist (cap=${coverage.cap} exceeded) ` +
+						`persistedNodes=${coverage.persistedNodes}/${coverage.totalNodes} ` +
+						`persistedEdges=${coverage.persistedEdges}/${coverage.totalEdges} `
+					: "") +
+				`files=${graph.fileNodes.size} nodes=${graph.nodes.size} ` +
+				`edges=${graph.edges.length} elements=${persisted.elements} ` +
+				`jsonBytes=${persisted.bytes} durationMs=${durationMs}\n`,
+		);
+		return;
+	}
 	if (coverage?.partial) {
 		// #533/#936 honesty: an over-cap build DID succeed and DID persist, but
 		// only a subgraph — say so plainly instead of printing the same line a
@@ -117,6 +151,15 @@ async function buildGraph(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+	// #4300: this process runs outside pi; its caller owns workspace trust.
+	setProjectTrustState("trusted");
+	logExtension({
+		subsystem: "project-trust",
+		level: "debug",
+		message:
+			"build-graph: workspace trust belongs to the calling client; pi trust not consulted",
+	});
+
 	const command = process.argv[2];
 	if (command !== "build-graph") {
 		fail("usage: pi-lens build-graph [--cwd <dir>]");

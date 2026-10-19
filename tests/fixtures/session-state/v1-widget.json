@@ -1,0 +1,45 @@
+{
+	"version": 1,
+	"sessionId": "v1-widget",
+	"savedAt": 1759250000000,
+	"widget": {
+		"version": 3,
+		"sessionLanguages": [],
+		"files": [
+			{
+				"filePath": "/proj/example/a.ts",
+				"runners": [],
+				"formatters": [],
+				"diagnostics": [
+					{
+						"severity": "error",
+						"semantic": "blocking",
+						"message": "boom",
+						"line": 5,
+						"tool": "tsc",
+						"uri": "file:///proj/example/a.ts#L5",
+						"observedAt": 1790789610444
+					}
+				],
+				"allDiagnostics": [
+					{
+						"severity": "error",
+						"semantic": "blocking",
+						"message": "boom",
+						"line": 5,
+						"tool": "tsc",
+						"uri": "file:///proj/example/a.ts#L5",
+						"observedAt": 1790789610444
+					}
+				],
+				"diagnosticCounts": {
+					"blocking": 1,
+					"errors": 1,
+					"warnings": 0
+				},
+				"hasFinalDiagnosticsSnapshot": true,
+				"touchedAt": 1790789610444
+			}
+		]
+	}
+}

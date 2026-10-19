@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
 	applyPartiallyApplicableEdits,
@@ -10,6 +11,7 @@ import {
 	PartialApplyRecordStore,
 	type PartiallyApplicableEdit,
 } from "../../clients/partial-edit-apply.js";
+import { pathBirthtimeMs } from "../../clients/path-birth.js";
 import { createReadGuardEditBatchSummary } from "../../clients/read-guard-logger.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -79,6 +81,40 @@ describe("applyPartiallyApplicableEdits", () => {
 				postEditOutput: "pipeline output",
 				postEditStatus: "succeeded",
 			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4320 r2 (F3): the atomic write installs a new inode, born now. Round 1
+	// announced that edited file to the language server as Created, which also
+	// dropped every cached finding in the process.
+	it("keeps the edited path's birth across its atomic replace (#4320)", async (ctx) => {
+		const env = setupTestEnvironment("partial-apply-birth-");
+		try {
+			// A hard link shares this test file's inode, born when the repo was
+			// checked out; the rename below replaces only the link's name.
+			const filePath = path.join(env.tmpDir, "linked.ts");
+			try {
+				fs.linkSync(fileURLToPath(import.meta.url), filePath);
+			} catch {
+				ctx.skip("cannot hard-link across filesystems here");
+			}
+			const before = fs.statSync(filePath);
+			if (!(before.birthtimeMs > 0)) ctx.skip("no birth time");
+			const raw = fs.readFileSync(filePath, "utf-8");
+			const oldText = raw.split("\n")[0];
+
+			const result = await applyPartiallyApplicableEdits({
+				filePath,
+				edits: [spanEdit({ rawContent: raw, oldText, newText: "// edited" })],
+			});
+
+			expect(result.appliedCount).toBe(1);
+			const after = fs.statSync(filePath);
+			expect(after.ino).not.toBe(before.ino);
+			expect(after.birthtimeMs).not.toBe(before.birthtimeMs);
+			expect(pathBirthtimeMs(after)).toBe(before.birthtimeMs);
 		} finally {
 			env.cleanup();
 		}

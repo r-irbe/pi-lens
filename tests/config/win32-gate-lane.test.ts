@@ -143,7 +143,7 @@ describe("win32 gate lane governance (#2536)", () => {
 	// One tests/-tree walk for the whole table, not one per admission: the walk
 	// is the expensive part (the sibling above measured 22.8 s under Stryker's
 	// dry run), and #3278 made this the SECOND admission — two walks blew
-	// vitest's 5 s default in CI's advisory mutation job. Same 60 s budget and
+	// vitest's 5 s default in the nightly Stryker job. Same 60 s budget and
 	// the same reason as the sibling: walk time, not wall-clock waiting.
 	it("keeps every explicit Windows admission live and reasoned (#3277)", () => {
 		const population = getWin32LaneFiles(ROOT);

@@ -527,8 +527,11 @@ export class ComplexityClient {
 		}
 
 		try {
-			const parsed = await withTreeSitterRoot(absolutePath, content, (root) =>
-				this.computeMetrics(absolutePath, content, root, nodes),
+			const parsed = await withTreeSitterRoot(
+				absolutePath,
+				content,
+				(root) => this.computeMetrics(absolutePath, content, root, nodes),
+				"complexity",
 			);
 			return parsed.parsed ? parsed.value : null;
 		} catch (err) {

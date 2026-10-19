@@ -34,6 +34,7 @@ function makeServer(id: string) {
 		id,
 		name: id,
 		extensions: [".py"],
+		idleEviction: "resident",
 		root: async () => "C:/repo",
 		spawn: vi.fn(async () => ({
 			process: makeFakeProcess(),
@@ -122,7 +123,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			getOperationSupport: () => ({}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => ["diagnosticProvider"],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 			getDiagnostics: vi.fn(() => []),
 		};
@@ -186,6 +190,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			}),
 			getOperationSupport: () => ({}),
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn().mockResolvedValue(undefined),
 			},
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
@@ -235,6 +240,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			}),
 			getOperationSupport: () => ({}),
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn().mockResolvedValue(undefined),
 			},
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
@@ -288,7 +294,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 				diagnosticProviderKind: "none",
 			}),
 			getOperationSupport: () => ({}),
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 			getDiagnostics: vi.fn(() => []),
 		};
@@ -336,7 +345,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 				diagnosticProviderKind: "none",
 			}),
 			getOperationSupport: () => ({}),
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 			getDiagnostics: vi.fn(() => []),
 		};
@@ -678,7 +690,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 				// notify.open never resolves = a server whose stdin backpressures
 				// (wedged/CPU-bound). Unbounded, this parked the dispatch LSP runner
 				// until its 30s dispatcher timeout. It must now bail at the budget.
-				notify: { open: vi.fn(() => new Promise(() => {})) },
+				notify: {
+					announceCreated: () => undefined,
+					open: vi.fn(() => new Promise(() => {})),
+				},
 				waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 				getDiagnostics: vi.fn(() => []),
 			};
@@ -720,7 +735,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 					diagnosticProviderKind: "none",
 				}),
 				getOperationSupport: () => ({}),
-				notify: { open: vi.fn().mockResolvedValue(undefined) },
+				notify: {
+					announceCreated: () => undefined,
+					open: vi.fn().mockResolvedValue(undefined),
+				},
 				waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 				getDiagnostics: vi.fn(() => []),
 			};
@@ -771,7 +789,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 					diagnosticProviderKind: "none",
 				}),
 				getOperationSupport: () => ({}),
-				notify: { open: vi.fn().mockResolvedValue(undefined) },
+				notify: {
+					announceCreated: () => undefined,
+					open: vi.fn().mockResolvedValue(undefined),
+				},
 				waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 				getDiagnostics: vi.fn(() => diagnosticsToReturn),
 			};
@@ -842,7 +863,10 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 					diagnosticProviderKind: "none",
 				}),
 				getOperationSupport: () => ({}),
-				notify: { open: vi.fn().mockResolvedValue(undefined) },
+				notify: {
+					announceCreated: () => undefined,
+					open: vi.fn().mockResolvedValue(undefined),
+				},
 				waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 				getDiagnostics: vi.fn(() => diagnosticsToReturn),
 			};

@@ -38,7 +38,7 @@ const cliPath = join(repoRoot, "scripts", "classify-ci-failure.mjs");
 const stubPath = join(here, "fixtures", "classify-ci-failure-fetch-stub.mjs");
 
 // The exact argv .github/workflows/ci-infra-kill-rerun.yml builds when a
-// push or repository_dispatch run resolves no PR number (#2668).
+// push run resolves no PR number (#2668).
 // The PR-run argv the same workflow builds when a PR number IS resolved:
 // `--pr <n>` in place of `--allow-missing-pr` (ci-infra-kill-rerun.yml's
 // classify step, the `if [[ -n "$PR_NUMBER" ]]` arm).
@@ -90,10 +90,16 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 			rerunStatus = "201",
 			runAttempt = "1",
 			priorComment,
+			runEvent,
+			listedPrs,
+			commentDeny,
 		}: {
 			rerunStatus?: string;
 			runAttempt?: string;
 			priorComment?: string;
+			runEvent?: string;
+			listedPrs?: unknown[];
+			commentDeny?: "read" | "write";
 		} = {},
 	) {
 		try {
@@ -112,6 +118,15 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 						...(priorComment === undefined
 							? {}
 							: { CLASSIFY_CLI_TEST_PR_COMMENT: priorComment }),
+						...(runEvent === undefined
+							? {}
+							: { CLASSIFY_CLI_TEST_RUN_EVENT: runEvent }),
+						...(listedPrs === undefined
+							? {}
+							: { CLASSIFY_CLI_TEST_LISTED_PRS: JSON.stringify(listedPrs) }),
+						...(commentDeny === undefined
+							? {}
+							: { CLASSIFY_CLI_TEST_COMMENT_DENY: commentDeny }),
 						PI_LENS_HOME: piLensHome,
 						PILENS_DATA_DIR: piLensHome,
 					},
@@ -222,6 +237,135 @@ describe("classify-ci-failure.mjs CLI (#2668 review F2 -- real child process, re
 			true,
 		);
 	});
+
+	// #4382 recurrence: run 38514228860, a master push whose payload listed other
+	// repositories' namesake PRs (head branch `master`). The workflow passes no
+	// --pr for it; the classifier took `pull_requests[0].number` itself and
+	// POSTed to issue 23 of this repository -> HTTP 403, exit 1, no rerun.
+	const FOREIGN_NAMESAKE_PRS = [
+		{
+			number: 23,
+			url: "https://api.github.com/repos/brooksmcmillin/acme-repo/pulls/23",
+			head: { ref: "master", sha: "deadbeef" },
+		},
+		{
+			number: 2,
+			url: "https://api.github.com/repos/floatGray/acme-repo/pulls/2",
+			head: { ref: "master", sha: "deadbeef" },
+		},
+	];
+
+	it("#4382: a push run never takes a PR number from pull_requests: it reruns and touches no comment", () => {
+		const result = runCli(PRODUCTION_PUSH_ARGV, {
+			runEvent: "push",
+			listedPrs: FOREIGN_NAMESAKE_PRS,
+			commentDeny: "write",
+		});
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("no PR (push/dispatch)");
+		expect(result.stdout).toContain("-> infra-kill (rerun triggered)");
+		const calls = readCalls();
+		expect(calls.find((c) => c.url.includes("rerun-failed-jobs"))?.method).toBe(
+			"POST",
+		);
+		expect(calls.filter((c) => c.url.includes("/comments"))).toEqual([]);
+	});
+
+	// The push guard is its own rule, not a by-product of the url/head checks:
+	// even an entry that names this repository at the run's own head is not a
+	// push run's PR (acceptance 1 of #4382).
+	it("#4382: a push run ignores even an entry of this repository at the run's own head", () => {
+		const result = runCli(PRODUCTION_PUSH_ARGV, {
+			runEvent: "push",
+			listedPrs: [
+				{
+					number: 7,
+					url: "https://api.github.com/repos/acme/repo/pulls/7",
+					head: { ref: "master", sha: "deadbeef" },
+				},
+			],
+		});
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("no PR (push/dispatch)");
+		expect(readCalls().filter((c) => c.url.includes("/comments"))).toEqual([]);
+	});
+
+	it("#4382: a non-push run takes no number from another repository's PR or from a PR whose head is not the run's", () => {
+		for (const listedPrs of [
+			FOREIGN_NAMESAKE_PRS,
+			[
+				{
+					number: 7,
+					url: "https://api.github.com/repos/acme/repo/pulls/7",
+					head: { ref: "feat", sha: "cafef00d" },
+				},
+			],
+		]) {
+			writeFileSync(callLogPath, "");
+			const result = runCli(PRODUCTION_PUSH_ARGV, {
+				runEvent: "pull_request",
+				listedPrs,
+				commentDeny: "write",
+			});
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("no PR (push/dispatch)");
+			expect(readCalls().filter((c) => c.url.includes("/comments"))).toEqual(
+				[],
+			);
+		}
+	});
+
+	it("#4382: a PR of this repository at the run's own head is still resolved and commented on", () => {
+		const result = runCli(PRODUCTION_PUSH_ARGV, {
+			runEvent: "pull_request",
+			listedPrs: [
+				...FOREIGN_NAMESAKE_PRS,
+				{
+					number: 7,
+					url: "https://api.github.com/repos/acme/repo/pulls/7",
+					head: { ref: "feat", sha: "deadbeef" },
+				},
+			],
+		});
+
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("PR #7 ");
+		const comments = readCalls().filter((c) => c.url.includes("/comments"));
+		expect(comments.length).toBeGreaterThan(0);
+		expect(comments.every((c) => c.url.includes("/issues/7/comments"))).toBe(
+			true,
+		);
+	});
+
+	// #4382 acceptance 2: whatever refuses the comment, the rerun still happens
+	// and the failure is ONE annotation line. `read` refuses the first comments
+	// call (before classification); `write` refuses the upsert after the rerun.
+	it.each(["read", "write"] as const)(
+		"#4382: a 403 on the comment %s warns once and the rerun still runs",
+		(commentDeny) => {
+			const result = runCli(PRODUCTION_PR_ARGV, { commentDeny });
+
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("-> infra-kill (rerun triggered)");
+			const warnings = result.stdout
+				.split("\n")
+				.filter((line) => line.startsWith("::warning::"));
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("HTTP 403");
+			const calls = readCalls();
+			expect(
+				calls.find((c) => c.url.includes("rerun-failed-jobs"))?.method,
+			).toBe("POST");
+			// One refused call ends the comment lane: no retry storm per step.
+			expect(
+				calls.filter(
+					(c) => c.url.includes("/comments") && c.method !== "PATCHED_BODY",
+				),
+			).toHaveLength(commentDeny === "read" ? 1 : 2);
+		},
+	);
 
 	it("rejects an unknown flag with exit code 4 instead of silently ignoring it", () => {
 		const result = runCli([

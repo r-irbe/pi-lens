@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Corpus</title>
+    <style>
+      body { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <!-- a comment -->
+    <nav class="menu" data-open="false">
+      <a href="/home" aria-label="Home">Home</a>
+    </nav>
+    <form action="/submit" method="post">
+      <input type="text" name="q" required />
+      <button type="submit" disabled>Send</button>
+    </form>
+    <script>
+      const open = document.querySelector(".menu").dataset.open === "true";
+    </script>
+  </body>
+</html>

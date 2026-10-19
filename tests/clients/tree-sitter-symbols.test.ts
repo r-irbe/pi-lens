@@ -280,3 +280,30 @@ describe("tree-sitter symbol extraction (#251) — per supported grammar", () =>
 		});
 	}
 });
+
+describe("decorator walk stops at a named sibling (#4368 r2 L2)", () => {
+	// Recurrence: #4368 r2 L2 (mutant S9: the decorator walk never stops at a
+	// named sibling). `#[outer]` decorates `first`, and the named `first` item
+	// sits between it and `target`; the walk must stop at `first`, so `target`
+	// gets no decorator. A walk that runs past `first` would attach `#[outer]`
+	// to `target`. The positive control proves the fixture is decorated.
+	it("does not collect a decorator above a named non-decorator sibling", async () => {
+		const env = setupTestEnvironment("pi-lens-4368-deco-walk-");
+		try {
+			const src = "#[outer]\nfn first() {}\nfn target() {}\n";
+			const fp = createTempFile(env.tmpDir, "walk.rs", src);
+			const tree = await client.parseFile(fp, "rust");
+			const extractor = new TreeSitterSymbolExtractor("rust", client);
+			await extractor.init();
+			const symbols = extractor.extract(tree!, fp, src).symbols;
+			expect(symbols.find((s) => s.name === "first")?.decorators).toEqual([
+				"#[outer]",
+			]);
+			expect(
+				symbols.find((s) => s.name === "target")?.decorators,
+			).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+});

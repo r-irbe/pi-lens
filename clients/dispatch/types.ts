@@ -11,11 +11,15 @@
  * The dispatcher must handle these semantics consistently.
  */
 
+import type { GenerationHandle } from "../generation-guard.js";
+import type { AnalysisRootMode } from "../analysis-root.js";
 import type { ExtensionLogLevel } from "../extension-log.js";
 import type { FileKind } from "../file-kinds.js";
 import type { FileRole } from "../file-role.js";
 import type { GeneratedArtifactEvidence } from "../generated-artifacts.js";
 import type { PiLensProjectConfig } from "../project-lens-config.js";
+import type { RulePolicyMap } from "./rule-policy.js";
+import type { DispatchLatencyReport } from "./dispatcher.js";
 
 export type DefectClass =
 	| "silent-error"
@@ -101,9 +105,19 @@ export interface Diagnostic {
 	 * diagnostics.
 	 */
 	scanOrigin?: string;
+	/**
+	 * #3218: the one-line rationale for a finding the delta-mode promotion seam
+	 * (`promoteDeltaUnusedToBlockers`) raised from hint/advisory to `blocking`.
+	 * Set only by that seam; the STOP renderers emit each distinct note once
+	 * beneath the banner so the agent is told WHY a hint-severity finding
+	 * blocks. Absent on every other diagnostic.
+	 */
+	promotionNote?: string;
 }
 
 export interface DispatchResult {
+	/** The latency report this dispatch appended for its own file, when one was captured. Carries identity so a caller never has to infer it from the ring (clients/dispatch/dispatcher.ts). */
+	latencyReport?: DispatchLatencyReport;
 	/** All diagnostics found (delta-filtered for this run) */
 	diagnostics: Diagnostic[];
 	/** Blockers that must be fixed (delta-filtered) */
@@ -142,16 +156,39 @@ export interface RunnerDefinition {
 	run(ctx: DispatchContext): Promise<RunnerResult>;
 }
 
-/** Closed telemetry taxonomy for expected runner skips. */
+/** Closed telemetry taxonomy for expected runner skips (#3968 added the two
+ * ownership reasons: a runner may skip because its capability is policy-
+ * deferred to a lane that owns it, or because its tool categorically cannot
+ * serve the file's dialect — both are policy decisions named at the delivery
+ * surface, never an empty output read as clean). */
 export const RUNNER_SKIP_REASONS = [
 	"no-files-matched",
 	"configured-non-biome-linter",
+	"dialect-unsupported",
+	"covered-by-primary",
 ] as const;
 export type RunnerSkipReason = (typeof RUNNER_SKIP_REASONS)[number];
 
 /** Runtime guard for untyped/plugin-provided runner results. */
 export function isRunnerSkipReason(value: unknown): value is RunnerSkipReason {
 	return RUNNER_SKIP_REASONS.some((reason) => reason === value);
+}
+
+/**
+ * Closed taxonomy for WHO supplied a `covered-by-primary` claim (#3968 F2):
+ * `"declared"` — the server row's own `covers` (config channel); `"builtin-fact"`
+ * — the builtin facts table (`clients/lsp/server-covers.ts`). Admitted into
+ * durable latency metadata through {@link isRunnerClaimSource}'s guard, the
+ * same gate {@link isRunnerSkipReason} runs, so free text cannot enter.
+ */
+export const RUNNER_CLAIM_SOURCES = ["declared", "builtin-fact"] as const;
+export type RunnerClaimSource = (typeof RUNNER_CLAIM_SOURCES)[number];
+
+/** Runtime guard for untyped/plugin-provided runner results. */
+export function isRunnerClaimSource(
+	value: unknown,
+): value is RunnerClaimSource {
+	return RUNNER_CLAIM_SOURCES.some((source) => source === value);
 }
 
 export interface RunnerResult {
@@ -166,15 +203,33 @@ export interface RunnerResult {
 	 * When status==="failed", a short machine-readable reason that separates a
 	 * genuine runner breakage from "the check ran and found blocking issues".
 	 * Conventional values: "timeout", "exception" (thrown/aborted), "server_error"
-	 * (LSP/tool process failed), "blocking_diagnostics" (the file has blocking
-	 * findings — not a runner fault). Consumers (e.g. the log-smell analyzer)
-	 * use this to avoid counting found-errors as crashes.
+	 * (LSP/tool process failed), "parser_error" (the tool exited nonzero and its
+	 * output could not be parsed), "unconfirmed_output" (the tool printed output
+	 * the runner could not confirm as findings for this file), "unavailable",
+	 * "blocking_diagnostics" (the check completed and
+	 * its findings, by the runner's own threshold, failed it — not a runner
+	 * fault). A fault arm may carry a synthetic diagnostic so the inline path is
+	 * never silent; its kind, not the diagnostic, says it is a fault (#3796).
+	 * Every `failed` built from findings carries "blocking_diagnostics"
+	 * through `findingsResult` (#3781), so a `failed` without it means the runner
+	 * produced no usable result. A runner may also report findings, blocking ones
+	 * included, as `succeeded`; `status` is not a severity channel, and severity
+	 * lives in `semantic` and the diagnostics. Consumers (the log-smell
+	 * analyzer, latency.log, the MCP analyze row) use this to avoid counting
+	 * found-errors as crashes.
 	 */
 	failureKind?: string;
 	/** Optional short human-readable detail for the failure (truncated). */
 	failureMessage?: string;
 	/** Bounded machine-readable reason when status is an expected skip. */
 	skipReason?: RunnerSkipReason;
+	/**
+	 * When the skip is `covered-by-primary`: which fact source supplied the
+	 * claim (`declared` — the row's own `covers`; `builtin-fact` — the facts
+	 * table). The dispatcher admits it into latency metadata only on actual
+	 * skips and only through the closed-taxonomy guard (#3968 F2).
+	 */
+	claimSource?: RunnerClaimSource;
 	/** Correlated scanner ids whose findings are absent from this result. */
 	unconfirmedServerIds?: readonly string[];
 	/**
@@ -183,6 +238,65 @@ export interface RunnerResult {
 	 * the rest of that set has no delivery path and reads as silent.
 	 */
 	deferredServerIds?: readonly string[];
+}
+
+/**
+ * The `failureKind` that says a `failed` run completed its check and its own
+ * findings failed it — not a runner fault (#3781). `findingsResult` stamps it,
+ * and {@link hasUsableResult} is the one reader of the coverage rule.
+ */
+export const BLOCKING_DIAGNOSTICS_FAILURE_KIND = "blocking_diagnostics";
+
+/**
+ * The result of a run that COMPLETED with findings (#3781).
+ *
+ * A runner reports `failed` for findings when its own threshold says they fail
+ * the check. The threshold differs per tool: a blocking diagnostic, an error
+ * severity, any finding at all, or a nonzero exit. `status` is left as the
+ * runner decided, because a multi-member fallback group continues past a
+ * `failed` member (dispatcher.ts runGroup). The `failureKind` is what tells a
+ * consumer (the log analyzer, latency.log, the MCP analyze row) that this
+ * `failed` is findings and not a runner that broke. A broken run never comes
+ * through here: its arm returns `failed` with its own kind, or with none.
+ */
+export function findingsResult(
+	diagnostics: Diagnostic[],
+	verdict: Pick<RunnerResult, "status" | "semantic">,
+): RunnerResult {
+	if (verdict.status === "failed") {
+		return {
+			...verdict,
+			diagnostics,
+			failureKind: BLOCKING_DIAGNOSTICS_FAILURE_KIND,
+		};
+	}
+	return { ...verdict, diagnostics };
+}
+
+/**
+ * Whether a runner result is usable coverage of the bytes it ran on (#3867).
+ *
+ * A `succeeded` run reached a verdict about the file. A `failed` run reached
+ * one only when `failureKind` is `"blocking_diagnostics"` — the check
+ * completed and its own findings failed it, per the `RunnerResult.failureKind`
+ * contract above. Any other `failureKind`, or none, means the runner broke or
+ * never ran (timeout, spawn failure, server error) and covered nothing, so a
+ * caller must not read it as "the file was analysed".
+ *
+ * The parameter accepts the wider latency-row status set (`when_skipped`,
+ * `pending`, and `deferred`) so the dispatcher's coverage notice and turn end's
+ * deferred delivery (#3796) ask this one owner instead of comparing
+ * `status`/`failureKind` themselves.
+ */
+export function hasUsableResult(result: {
+	status: string;
+	failureKind?: string;
+}): boolean {
+	return (
+		result.status === "succeeded" ||
+		(result.status === "failed" &&
+			result.failureKind === BLOCKING_DIAGNOSTICS_FAILURE_KIND)
+	);
 }
 
 // --- Dispatch Context ---
@@ -204,6 +318,8 @@ export interface RunnerResult {
  * re-normalizes.
  */
 export interface DispatchContext {
+	/** Root ownership selected by the shared analysis-root seam. */
+	readonly analysisRootMode?: AnalysisRootMode;
 	/** Normalized. See the #2016 invariant above. */
 	readonly filePath: string;
 	/**
@@ -234,11 +350,21 @@ export interface DispatchContext {
 	readonly facts: import("./fact-store.js").FactStore;
 	/** Project-local .pi-lens.json config captured for this dispatch. */
 	readonly projectConfig?: PiLensProjectConfig;
+	/** Shared global+project rule policy, including path-scoped denials. */
+	readonly rulePolicy?: RulePolicyMap;
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];
 	/** Ordered per-file pipeline token used by widget reconciliation (#1198). */
 	readonly writeIndex?: number;
+	/**
+	 * #3568: the session a post-write dispatch belongs to. A collect-later
+	 * runner deferred after that session was replaced is not handed to the
+	 * next session's turn end.
+	 */
+	readonly sessionGeneration?: GenerationHandle;
+	/** Stable session identity for per-session turn-end runner delivery. */
+	readonly sessionId?: string;
 	/** Model/provider active for this dispatch, when the runtime knows it
 	 * (#1448) — threaded to the worklog append so repair history can be
 	 * attributed. Blank/absent outside a live agent turn (e.g. project scans). */
@@ -254,8 +380,18 @@ export interface DispatchContext {
 
 // --- Tool Plan ---
 
+export type CapabilityDimension =
+	| "types"
+	| "security"
+	| "smells"
+	| "format"
+	| "lint"
+	| "docs";
+
 export interface ToolPlan {
 	name: string;
+	/** Capabilities required for a complete verdict on this file kind. */
+	capabilities: readonly CapabilityDimension[];
 	groups: RunnerGroup[];
 }
 

@@ -115,6 +115,126 @@ describe("writeGzipStageFile", () => {
 });
 
 /**
+ * #3913: the worker slices the serialized string into 256 KiB chunks and gzip
+ * encodes each chunk on its own, so a surrogate pair split across two chunks
+ * was stored as two U+FFFD. Each case below puts astral characters (a high
+ * surrogate then a low one) so a chunk would end between them, and compares the
+ * stored body to `JSON.stringify` of the same value.
+ */
+describe("writeGzipStageFile never splits a surrogate pair (#3913)", () => {
+	const CHUNK = 256 * 1024;
+	// `{"s":"` precedes the string value: its first unit is body index 6.
+	const PREFIX = 6;
+
+	/** A `{ s }` value whose JSON has an emoji's high surrogate at each of
+	 * `highAt` (JSON indices) and is `total` units long. */
+	function valueWithEmojiAt(highAt: number[], total: number): { s: string } {
+		const units = Array.from({ length: total - PREFIX - 2 }, () => "a");
+		for (const at of highAt) {
+			units[at - PREFIX] = "\uD83D";
+			units[at - PREFIX + 1] = "\uDE00";
+		}
+		return { s: units.join("") };
+	}
+
+	async function storedBody(value: unknown, name: string): Promise<string> {
+		const stagePath = path.join(dir, name);
+		await writeGzipStageFile(value, stagePath);
+		return gunzipSync(fs.readFileSync(stagePath)).toString("utf-8");
+	}
+
+	it("keeps a pair whose high half is the last unit of the first chunk", async () => {
+		const value = valueWithEmojiAt([CHUNK - 1], CHUNK + 1000);
+		const json = JSON.stringify(value);
+		expect(json.charCodeAt(CHUNK - 1)).toBe(0xd83d);
+
+		const stored = await storedBody(value, "one.json.gz.stage-1-0");
+		expect(stored).not.toContain("�");
+		expect(stored).toBe(json);
+	});
+
+	it("keeps every pair when several chunk boundaries straddle", async () => {
+		// Each trimmed chunk is one unit short, so the next boundary sits at
+		// 2 * CHUNK - 1, then 3 * CHUNK - 2.
+		const value = valueWithEmojiAt(
+			[CHUNK - 1, 2 * CHUNK - 2, 3 * CHUNK - 3],
+			3 * CHUNK + 5000,
+		);
+		const json = JSON.stringify(value);
+		expect(json.charCodeAt(CHUNK - 1)).toBe(0xd83d);
+		expect(json.charCodeAt(2 * CHUNK - 2)).toBe(0xd83d);
+		expect(json.charCodeAt(3 * CHUNK - 3)).toBe(0xd83d);
+
+		const stored = await storedBody(value, "several.json.gz.stage-1-0");
+		expect(stored).not.toContain("�");
+		expect(stored).toBe(json);
+	});
+
+	it("leaves a body with a pair inside a chunk byte for byte unchanged", async () => {
+		const value = valueWithEmojiAt([1000], CHUNK + 1000);
+		const json = JSON.stringify(value);
+
+		const stored = await storedBody(value, "inside.json.gz.stage-1-0");
+		expect(stored).toBe(json);
+	});
+});
+
+/**
+ * #3789: the project-snapshot dispatcher serializes once and transfers UTF-8
+ * bytes, so the worker core must accept bytes (and still the object form the
+ * review graph sends). Recurrence: a core that re-stringified bytes, or that
+ * chunked a view by its whole backing buffer, would publish a corrupt stage
+ * file the load path then rejects.
+ */
+describe("writeGzipStageFile with pre-serialized bytes (#3789)", () => {
+	// Non-ASCII so byte length and string length differ, over several 256 KiB
+	// chunks so a chunk-boundary slip corrupts the stream.
+	const value = {
+		generatedAt: "2026-09-21T14:13:20.000Z",
+		text: "é日本語\u2028".repeat(120_000),
+	};
+	const json = JSON.stringify(value);
+
+	function viewOf(bytes: Uint8Array): Uint8Array {
+		// A view at a non-zero offset of a larger buffer: gzipping `view.buffer`
+		// instead of the view would include the padding.
+		const backing = new Uint8Array(bytes.byteLength + 64).fill(0x20);
+		backing.set(bytes, 32);
+		return backing.subarray(32, 32 + bytes.byteLength);
+	}
+
+	it("gzips exactly the bytes it was given across chunk boundaries", async () => {
+		const stagePath = path.join(dir, "snapshot.json.gz.stage-1-0");
+		const bytes = viewOf(new TextEncoder().encode(json));
+		const metrics = await writeGzipStageFile(bytes, stagePath);
+
+		expect(Buffer.byteLength(json)).toBeGreaterThan(256 * 1024 * 2);
+		expect(gunzipSync(fs.readFileSync(stagePath)).toString("utf-8")).toBe(json);
+		expect(metrics.rawBytes).toBe(Buffer.byteLength(json));
+		expect(metrics.gzBytes).toBe(fs.statSync(stagePath).size);
+	});
+
+	it("hands the semantic fingerprint the bytes and skips gzip on a match", async () => {
+		const stagePath = path.join(dir, "snapshot.json.gz.stage-1-0");
+		const bytes = viewOf(new TextEncoder().encode(json));
+		const seen: unknown[] = [];
+		const metrics = await writeGzipStageFile(bytes, stagePath, undefined, {
+			semanticFingerprint: (body) => {
+				seen.push(body);
+				return "same-body";
+			},
+			skipIfFingerprints: ["same-body"],
+		});
+
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toBeInstanceOf(Uint8Array);
+		expect(Buffer.from(seen[0] as Uint8Array).toString("utf-8")).toBe(json);
+		expect(metrics.skippedUnchanged).toBe(true);
+		expect(fs.existsSync(stagePath)).toBe(false);
+	});
+});
+
+/**
  * The #1217 acceptance case: two concurrent calls on the SAME `stagePath`.
  * Pre-fix both staged into one `${stagePath}.tmp-${pid}` inode — the first
  * rename published it while the second was still streaming gzip into it, so

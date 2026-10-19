@@ -5,7 +5,7 @@
  * Serializes full-suite test runs across a machine: multiple concurrent
  * `npm test` invocations (several agents on parallel worktrees, plus an
  * interactive run) spawn independently-sized fork pools
- * (`maxWorkers: "50%"`, 4GB/fork — vitest.config.ts) that assume a
+ * (half the cores up to 8, 4GB/fork — vitest.config.ts) that assume a
  * dedicated machine. Run more than one at once and they fight over CPU/RAM,
  * producing vitest worker-crash cascades and timing-budget flakes that look
  * like real bugs but aren't (see AGENTS.md's testing-discipline section).
@@ -306,38 +306,38 @@ async function main() {
 	}
 }
 
-// Only run the CLI when this file is the entry point — not when a test
-// imports it to exercise `quoteForWindowsCmd`/`resolveVitestEntry` directly.
-// A silent MISMATCH here is a silent-success failure mode: `npm test` would
-// exit 0 having run zero tests, with nothing printed to say why. A plain
-// case-sensitive compare is wrong on win32, whose default filesystems are
-// case-insensitive (a differently-cased invocation path, or an 8.3 short
-// name, both resolve to the same file but wouldn't string-equal it).
-function isEntryPoint() {
-	if (!process.argv[1]) return false;
-	const invoked = path.resolve(process.argv[1]);
-	const self = fileURLToPath(import.meta.url);
-	if (invoked === self) return true;
-	if (process.platform !== "win32") return false;
-	if (invoked.toLowerCase() === self.toLowerCase()) return true;
-	// Casing-fold still misses an 8.3 short-name invocation (e.g.
-	// `WITH-T~1.MJS`), which mangles more than just case. Rather than
-	// silently no-op, fall back to a basename match and warn loudly — a
-	// false positive here (running when we technically shouldn't) is far
-	// safer than the alternative (silently not running at all).
-	if (
-		path.basename(invoked).toLowerCase() === path.basename(self).toLowerCase()
-	) {
-		console.error(
-			"[with-test-lock] warning: argv[1] did not exactly match this file's " +
-				"resolved path (possible Windows 8.3 short-name or casing mismatch) " +
-				"— running anyway based on a basename match",
-		);
-		return true;
+// Whether `selfUrl` (a module's `import.meta.url`) is the process entry
+// point. Not a lexical compare: a silent MISMATCH is a silent-success failure
+// mode (`npm test` exits 0 having run zero tests, nothing printed), and a
+// lexical compare mismatches whenever `scripts/` is reached through a symlink
+// (#4086). Both sides go through `realpath`, so `fs.realpathSync.native` also
+// canonicalises the win32 casing and 8.3 short-name spellings the old
+// lexical/basename fallback handled.
+//  - argv[1] that is not a real path (`node -e`, stdin, a removed file): not
+//    the entry point, so importing a script never throws (#4086 review F2).
+//  - `selfUrl` that cannot be resolved: throw. Returning false would silently
+//    skip the CLI, the failure mode above. The `realpath` of `selfUrl` is
+//    load-bearing only under `--preserve-symlinks-main`, where the main
+//    module's URL keeps its symlinked spelling.
+export function isEntryPoint(
+	selfUrl,
+	{ argv1 = process.argv[1], realpath = fs.realpathSync.native } = {},
+) {
+	let invoked;
+	try {
+		invoked = realpath(argv1);
+	} catch {
+		return false;
 	}
-	return false;
+	try {
+		return invoked === realpath(fileURLToPath(selfUrl));
+	} catch (error) {
+		throw new Error(
+			`[with-test-lock] cannot resolve the entry-point path of ${selfUrl}: ${error instanceof Error ? error.message : error}`,
+		);
+	}
 }
-const isMain = isEntryPoint();
+const isMain = isEntryPoint(import.meta.url);
 if (isMain) {
 	main().catch((error) => {
 		console.error(`[with-test-lock] ${error.message}`);

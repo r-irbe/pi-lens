@@ -24,6 +24,19 @@ describe("rule-id-normalize", () => {
 		expect(normalizeRuleId("ast-grep:no-eval")).toBe("no-eval");
 	});
 
+	it("strips the shuck: source prefix (shuck LSP diagnostics carry native C/S/P/X/K codes, #3968)", () => {
+		// The shuck LSP renders `rule` as `shuck:C001`
+		// (clients/dispatch/utils/lsp-diagnostics.ts); a user suppressing the
+		// native code (`rules.<id>.disable: ["C001"]` or `pi-lens-ignore:
+		// C001`) must reach it.
+		expect(normalizeRuleId("shuck:C001")).toBe("C001");
+		expect(normalizeRuleId("shuck:K006")).toBe("K006");
+	});
+
+	it("keeps a code that merely contains a source token (anchored strip)", () => {
+		expect(normalizeRuleId("notshuck:C001")).toBe("notshuck:C001");
+	});
+
 	it("strips the -js suffix", () => {
 		expect(normalizeRuleId("no-eval-js")).toBe("no-eval");
 	});

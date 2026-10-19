@@ -146,11 +146,24 @@ function needlePattern(needle: string): RegExp {
  * Lex executable shell text. Single-quoted prose and quoted heredocs are
  * opaque. Exported for the #2940 pinned-npm gate, which needs the same
  * "comments and string bodies are not commands" lexing over the release
- * workflow's runs.
+ * workflow's runs. Line continuations are joined; `lexShellAligned` is the
+ * same lexing without the join, so its offsets are the source's.
  */
 export function lexShell(source: string): string {
+	return lexShellAligned(source).replace(/\\\r?\n[ \t]*/g, "");
+}
+
+/**
+ * `lexShell` with every character kept in place: blanked characters become
+ * spaces and newlines stay, so an offset into the result is an offset into
+ * `source` (#4339). A backslash escapes the next character outside single
+ * quotes, so `it\'s`, `"a \" b"` and `$'a\'b'` do not open or close a string;
+ * the escaped character is literal data and is blanked. A comment ends at its
+ * newline even when it ends in a backslash, as in bash.
+ */
+export function lexShellAligned(source: string): string {
 	const chars = source.split("");
-	let quote: "'" | '"' | undefined;
+	let quote: "'" | '"' | "$'" | undefined;
 	let comment = false;
 	let quotedHeredoc: string | undefined;
 	let heredocPending: string | undefined;
@@ -183,15 +196,20 @@ export function lexShell(source: string): string {
 			chars[index] = " ";
 			continue;
 		}
-		if (quote === "'") {
+		if (quote === "'" || quote === "$'") {
 			chars[index] = " ";
-			if (char === "'") quote = undefined;
+			if (quote === "$'" && char === "\\" && !isLineEnd(chars[index + 1]))
+				chars[++index] = " ";
+			else if (char === "'") quote = undefined;
 			continue;
 		}
 		if (quote === '"') {
 			if (char === '"') {
 				quote = undefined;
 				chars[index] = " ";
+			} else if (char === "\\") {
+				chars[index] = " ";
+				if (!isLineEnd(chars[index + 1])) chars[++index] = " ";
 			} else if (char === "$" && chars[index + 1] === "{")
 				index = preserveExpansion(chars, index);
 			else if (char === "$" && chars[index + 1] === "(")
@@ -199,9 +217,18 @@ export function lexShell(source: string): string {
 			else chars[index] = " ";
 			continue;
 		}
-		if (char === "#" && (index === 0 || /[\s;]/.test(chars[index - 1]))) {
+		if (char === "\\") {
+			if (!isLineEnd(chars[index + 1])) chars[++index] = " ";
+		} else if (
+			char === "#" &&
+			(index === 0 || /[\s;]/.test(source[index - 1]))
+		) {
 			comment = true;
 			chars[index] = " ";
+		} else if (char === "$" && chars[index + 1] === "'") {
+			quote = "$'";
+			chars[index] = " ";
+			chars[++index] = " ";
 		} else if (char === "'" || char === '"') {
 			quote = char;
 			chars[index] = " ";
@@ -213,11 +240,52 @@ export function lexShell(source: string): string {
 				heredocPending = match[2] ?? match[3];
 		}
 	}
-	return chars.join("").replace(/\\\r?\n[ \t]*/g, "");
+	return chars.join("");
+}
+
+/**
+ * The one right-hand side that binds a variable to the exact npm pin: the
+ * `packageManager` read every pinned workflow step makes (#2940, #4339).
+ */
+const NPM_PIN_SOURCE = `"$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"`;
+
+/**
+ * Whether `variable` holds the exact npm pin at `offset` of one `run:` script.
+ * Each step is its own shell, so the bind is per script (#4339 review F1). The
+ * last assignment to `variable` before `offset` in the lexed script must be a
+ * whole statement, `<variable>=` at command position, then exactly
+ * `NPM_PIN_SOURCE`, then the end of the statement. So a comment or string
+ * that mentions `packageManager`, a later `<variable>=latest`, an `echo`
+ * argument, and a prefix that only sets the variable for one command all
+ * leave it unbound (review F2). Control flow and subshells are not modelled.
+ */
+export function npmPinBoundAt(
+	run: string,
+	variable: string,
+	offset: number,
+): boolean {
+	const lexed = lexShellAligned(run);
+	const assignments = [
+		...lexed
+			.slice(0, offset)
+			.matchAll(new RegExp(`(?<![\\w$])${variable}\\+?=`, "g")),
+	];
+	const last = assignments.at(-1)?.index;
+	if (last === undefined) return false;
+	const value = last + variable.length + 1;
+	return (
+		/(?:^|\n|;|&&|\|\|)[ \t]*$/.test(lexed.slice(0, last)) &&
+		run.startsWith(NPM_PIN_SOURCE, value) &&
+		/^[ \t]*(?:$|\n|;|&&|\|\|)/.test(lexed.slice(value + NPM_PIN_SOURCE.length))
+	);
+}
+
+function isLineEnd(char: string | undefined): boolean {
+	return char === undefined || char === "\n" || char === "\r";
 }
 
 function preserveCommandSubstitution(chars: string[], start: number): number {
-	let quote: "'" | '"' | undefined;
+	let quote: "'" | '"' | "$'" | undefined;
 	let comment = false;
 	let depth = 1;
 	let end = start + 1;
@@ -228,8 +296,9 @@ function preserveCommandSubstitution(chars: string[], start: number): number {
 			if (char === "\n") comment = false;
 			continue;
 		}
-		if (quote === "'") {
-			if (char === "'") quote = undefined;
+		if (quote === "'" || quote === "$'") {
+			if (quote === "$'" && char === "\\") end++;
+			else if (char === "'") quote = undefined;
 			continue;
 		}
 		if (quote === '"') {
@@ -248,14 +317,17 @@ function preserveCommandSubstitution(chars: string[], start: number): number {
 			comment = true;
 			continue;
 		}
-		if (char === "'") quote = char;
+		if (char === "$" && next === "'") {
+			quote = "$'";
+			end++;
+		} else if (char === "'") quote = char;
 		else if (char === '"') quote = char;
 		else if (char === "$" && next === "(") {
 			depth++;
 			end++;
 		} else if (char === ")" && --depth === 0) {
-			const body = chars.slice(start + 2, end).join("");
-			const lexed = lexShell(body);
+			// Aligned, so the lexed body fills exactly the span it replaces.
+			const lexed = lexShellAligned(chars.slice(start + 2, end).join(""));
 			for (let offset = 0; offset < lexed.length; offset++)
 				chars[start + 2 + offset] = lexed[offset];
 			return end;

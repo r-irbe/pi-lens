@@ -15,49 +15,54 @@ import { writeFileAtomicAsync } from "./atomic-write.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { readJsonCacheAsync } from "./json-cache-read.js";
 import type { PersistedReadGuardState } from "./read-guard.js";
+import { type SessionScope, snapshotSessionStores } from "./session-scope.js";
 import type { PersistedWidgetState } from "./widget-state.js";
 
-export const STATE_VERSION = 1;
+/**
+ * 2 since #3612: one envelope for every session store, each payload under its
+ * store's name. This build still reads version 1 and never writes it.
+ */
+export const STATE_VERSION = 2;
 
 export interface PersistedSessionState {
 	version: number;
 	sessionId: string;
 	savedAt: number;
-	widget: PersistedWidgetState;
-	/**
-	 * Read-before-edit guard read-set (#1041). Optional and additive: sessions
-	 * persisted before this field existed simply omit it, and load cleanly as
-	 * "no prior reads" — so STATE_VERSION is deliberately NOT bumped (a bump
-	 * would reject those older files entirely and lose their widget rehydration
-	 * too). Rehydrated with disk-staleness reconciliation by ReadGuard.importState.
-	 */
-	readGuard?: PersistedReadGuardState;
+	/** Each declared session store's snapshot, by store name (`session-scope.ts`). */
+	stores: Record<string, unknown>;
+	/** Set by {@link fromDisk} on a migrated file only; never written (#3873). */
+	migratedFrom?: 1;
 }
 
 /**
- * What `session_start` should do with the widget state, decided from the
- * lifecycle reason (#190). Extracted + pure so the reason→action mapping is
- * unit-tested — the original Phase 1 gated rehydration on `reason === "resume"`
- * and so missed the common case: a `pi --session <id>` LAUNCH fires
- * `reason: "startup"` (not "resume" — that's only an in-process `switchSession`).
- *
- * - `fork`   — adopt the in-memory fork stash (only when one is pending).
- * - `keep`   — `reload` keeps the live in-memory state.
- * - `clean`  — an explicit `new` session starts empty.
- * - `maybe-rehydrate` — `resume`/`startup`/anything else: rehydrate IFF a
- *   persisted snapshot exists for the stable id (a brand-new session has a fresh
- *   id with no file → clean; a resumed/launched one has its prior file → load).
+ * Version 1 (#190, #1041): the widget snapshot and an optional read-set,
+ * which version 2 keeps as the `widget` and `read-guard` stores.
  */
-export type SessionStartMode = "fork" | "keep" | "clean" | "maybe-rehydrate";
+interface PersistedSessionStateV1 {
+	version: 1;
+	sessionId: string;
+	savedAt: number;
+	widget: PersistedWidgetState;
+	readGuard?: PersistedReadGuardState;
+}
 
-export function sessionStartMode(
-	reason: string | undefined,
-	hasPendingForkSnapshot: boolean,
-): SessionStartMode {
-	if (reason === "fork" && hasPendingForkSnapshot) return "fork";
-	if (reason === "reload") return "keep";
-	if (reason === "new") return "clean";
-	return "maybe-rehydrate";
+function fromDisk(parsed: unknown): PersistedSessionState | undefined {
+	const state = parsed as Partial<PersistedSessionState> | null;
+	if (
+		state?.version === STATE_VERSION &&
+		typeof state.stores === "object" &&
+		state.stores !== null
+	)
+		return state as PersistedSessionState;
+	const v1 = parsed as Partial<PersistedSessionStateV1> | null;
+	if (v1?.version !== 1 || !v1.widget) return undefined;
+	return {
+		version: STATE_VERSION,
+		sessionId: String(v1.sessionId),
+		savedAt: Number(v1.savedAt),
+		stores: { widget: v1.widget, "read-guard": v1.readGuard },
+		migratedFrom: 1,
+	};
 }
 
 function sessionsDir(cwd: string): string {
@@ -71,14 +76,13 @@ function sessionFilePath(cwd: string, sessionId: string): string {
 }
 
 /**
- * Persist the widget snapshot for `sessionId` (atomic write via tmp+rename).
- * No-op on a missing id or any I/O error — persistence must never break a turn.
+ * Persist `stores` for `sessionId` (atomic write via tmp+rename). No-op on a
+ * missing id or any I/O error: persistence must never break a turn.
  */
 export async function saveSessionState(
 	cwd: string,
 	sessionId: string | undefined,
-	widget: PersistedWidgetState,
-	readGuard?: PersistedReadGuardState,
+	stores: Record<string, unknown>,
 ): Promise<void> {
 	if (!sessionId || !sessionId.trim()) return;
 	try {
@@ -88,21 +92,29 @@ export async function saveSessionState(
 			version: STATE_VERSION,
 			sessionId,
 			savedAt: Date.now(),
-			widget,
-			...(readGuard ? { readGuard } : {}),
+			stores,
 		};
-		const file = sessionFilePath(cwd, sessionId);
 		// bestEffort (default): a failed write/rename just means this snapshot is
-		// lost, matching this store's documented "start clean" fallback — never
-		// throw for the caller. (Tmp naming is now the shared
-		// `${target}.tmp-${pid}-${seq}` shape (unique per call, not just per process,
-		// since #1205) rather than this site's former
-		// `${file}.${pid}.tmp` — no behavioral difference: nothing reads the
-		// intermediate tmp filename.)
-		await writeFileAtomicAsync(file, JSON.stringify(payload));
+		// lost, matching this store's documented "start clean" fallback.
+		await writeFileAtomicAsync(
+			sessionFilePath(cwd, sessionId),
+			JSON.stringify(payload),
+		);
 	} catch {
 		/* best-effort */
 	}
+}
+
+/**
+ * The one sidecar writer (#3612): every declared store's snapshot of
+ * `scope`, saved fire-and-forget under `sessionId`.
+ */
+export function persistScope(
+	cwd: string,
+	sessionId: string | undefined,
+	scope: SessionScope,
+): void {
+	void saveSessionState(cwd, sessionId, snapshotSessionStores(scope));
 }
 
 /**
@@ -136,8 +148,9 @@ export async function dropStaleFiles(
 }
 
 /**
- * Load the persisted widget snapshot for `sessionId`, or undefined if none /
- * unreadable / version mismatch.
+ * Load the persisted stores for `sessionId`, or undefined if none,
+ * unreadable, or of an unknown version. A version-1 file loads as its
+ * `widget` and `read-guard` stores.
  */
 export async function loadSessionState(
 	cwd: string,
@@ -146,10 +159,6 @@ export async function loadSessionState(
 	if (!sessionId || !sessionId.trim()) return undefined;
 	return readJsonCacheAsync<PersistedSessionState>(
 		sessionFilePath(cwd, sessionId),
-		(parsed) => {
-			const state = parsed as PersistedSessionState;
-			if (state?.version !== STATE_VERSION || !state.widget) return undefined;
-			return state;
-		},
+		fromDisk,
 	);
 }

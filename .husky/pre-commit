@@ -3,12 +3,19 @@ if [ -n "$PI_LENS_SKIP_HOOKS" ]; then
   exit 0
 fi
 
-# Handoff files never enter history (pi-lens #2807; 2026-09-10: four lanes
-# committed PR_BODY.md and redded gitignore-tracked-shadow in CI).
-if git diff --cached --name-only | grep -qE '(^|/)(PR_BODY\.md|COMMIT_MSG\.txt|REVIEW\.md|INVESTIGATION\.md|MONITOR\.md)$'; then
-  echo "[pre-commit] refusing to commit a handoff file (PR_BODY.md / COMMIT_MSG.txt / REVIEW.md / INVESTIGATION.md / MONITOR.md); git rm --cached it." >&2
-  exit 1
-fi
+# Handoff files never enter history (pi-lens #2807, #4034). Root handbacks
+# use a prefix so each lane can name its own artifact without weakening the
+# refusal for the durable handoff names.
+while IFS= read -r file; do
+  case "$file" in
+    HANDBACK_*|REVIEW_*|VERIFY_*|INVESTIGATION_*|REVIEW.md|INVESTIGATION.md|MONITOR.md|PR_BODY.md|COMMIT_MSG.txt)
+      echo "[pre-commit] refusing rule handoff-file: $file is a staged root handoff; git rm --cached it." >&2
+      exit 1
+      ;;
+  esac
+done <<EOF
+$(git diff --cached --name-only)
+EOF
 
 # --no-error-on-unmatched-pattern (#3451): a staged set of only
 # formatter-ignored files (a release roll: CHANGELOG.md, package.json,

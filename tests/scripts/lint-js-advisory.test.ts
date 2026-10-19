@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,6 +6,12 @@ import {
 	runAdvisory,
 	validateTypeAwareDependency,
 } from "../../scripts/lint-js-advisory.mjs";
+import {
+	setupTestEnvironment,
+	useTrackedTempDirs,
+} from "../clients/test-utils.js";
+
+useTrackedTempDirs("pi-lens-tsgolint-");
 
 const packageFiles = {
 	"oxlint/package.json": {
@@ -50,8 +56,7 @@ function writePackage(
 }
 
 function realTree(tsgolintVersion: string | null, withPlatformBinary = true) {
-	mkdirSync(join(process.cwd(), ".probe-home"), { recursive: true });
-	const root = mkdtempSync(join(process.cwd(), ".probe-home", "tsgolint-"));
+	const root = setupTestEnvironment("pi-lens-tsgolint-").tmpDir;
 	writePackage(root, "oxlint", {
 		name: "oxlint",
 		version: "1.81.0",

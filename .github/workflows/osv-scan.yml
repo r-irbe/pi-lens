@@ -106,16 +106,15 @@ jobs:
           echo "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be  osv-scanner_linux_amd64" | sha256sum -c -
           chmod +x osv-scanner_linux_amd64
 
-      # Markdown-format output is written straight to the job summary so a
-      # finding is visible from the PR's checks tab without opening logs
-      # (#1917 review F2). The scan itself still exits non-zero on a real
-      # finding -- captured via $? (not piped, so no PIPESTATUS needed) and
-      # re-raised after the summary write so the job reports red.
+      # Markdown-format output is written to both the step log and the job
+      # summary so a finding is visible in either place (#1917 review F2).
+      # Preserve the scanner's exit status through tee so a real finding still
+      # makes the job red.
       - name: Scan package-lock.json
         run: |
           set +e
-          ./osv-scanner_linux_amd64 --format=markdown --lockfile=./package-lock.json > osv-scan-result.md
-          status=$?
+          ./osv-scanner_linux_amd64 --format=markdown --lockfile=./package-lock.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          status=${PIPESTATUS[0]}
           set -e
-          cat osv-scan-result.md >> "$GITHUB_STEP_SUMMARY"
           exit "$status"

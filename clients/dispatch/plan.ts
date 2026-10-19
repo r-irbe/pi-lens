@@ -1,14 +1,6 @@
 import type { FileKind } from "../file-kinds.js";
 import { getPrimaryDispatchGroup } from "../language-policy.js";
-import type { RunnerGroup, ToolPlan } from "./types.js";
-
-type CapabilityDimension =
-	| "types"
-	| "security"
-	| "smells"
-	| "format"
-	| "lint"
-	| "docs";
+import type { CapabilityDimension, RunnerGroup, ToolPlan } from "./types.js";
 
 interface CapabilityMatrixEntry {
 	name: string;
@@ -213,6 +205,11 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 			{ mode: "fallback", runnerIds: ["detekt"], filterKinds: ["kotlin"] },
 		],
 	},
+	lean: {
+		name: "Lean 4 Diagnostics",
+		capabilities: ["types", "lint"],
+		writeGroups: [primary("lean")],
+	},
 	swift: {
 		name: "Swift Linting",
 		capabilities: ["types", "lint"],
@@ -222,11 +219,6 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 		name: "Dart Linting",
 		capabilities: ["types", "lint"],
 		writeGroups: [primary("dart")],
-	},
-	lean4: {
-		name: "Lean 4 Linting",
-		capabilities: ["types", "lint"],
-		writeGroups: [primary("lean4")],
 	},
 	lua: {
 		name: "Lua Linting",
@@ -293,6 +285,7 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 function toWritePlan(entry: CapabilityMatrixEntry): ToolPlan {
 	return {
 		name: entry.name,
+		capabilities: entry.capabilities,
 		groups: [...entry.writeGroups],
 	};
 }

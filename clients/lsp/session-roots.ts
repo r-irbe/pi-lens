@@ -105,7 +105,7 @@ function noteEvictedRoots(
 		incrementDegradationCount({
 			kind: "lsp-session-root-evicted",
 			subject: `cap=${SESSION_ROOT_CAP}`,
-			reason: `session root registry at capacity; dropped ${roots[0]} and will load it again on the next session start or tool call naming that root`,
+			reason: `session root registry at capacity; will load the dropped root again on the next session start or tool call naming it (dropped: ${roots[0]})`,
 		});
 	}
 	return roots;

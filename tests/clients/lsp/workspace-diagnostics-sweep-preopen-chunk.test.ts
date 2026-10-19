@@ -45,6 +45,7 @@ function makeServer(id: string, ext: string) {
 		id,
 		name: id,
 		extensions: [ext],
+		idleEviction: "resident",
 		root: async () => "C:/repo",
 		spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 	};
@@ -109,6 +110,7 @@ describe("runWorkspaceDiagnostics — pre-open is chunked, not whole-group (#621
 			getOperationSupport: () => ({}),
 			serverId: "typescript",
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn(async (filePath: string) => {
 					if (openDocuments.has(filePath)) return;
 					openDocuments.add(filePath);
@@ -181,6 +183,7 @@ describe("runWorkspaceDiagnostics — pre-open is chunked, not whole-group (#621
 			getOperationSupport: () => ({}),
 			serverId: "typescript",
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn(async (filePath: string) => {
 					if (openDocuments.has(filePath)) return;
 					openDocuments.add(filePath);

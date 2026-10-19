@@ -8,12 +8,14 @@ describe("LSP circuit-breaker health (#927)", () => {
 		const key = "typescript:c:/work/project";
 		const internal = service as unknown as {
 			state: { broken: Map<string, number> };
-			failureCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				failureCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 		internal.state.broken.set(key, Date.now() + 60_000);
-		internal.failureCounts.set(key, 5);
-		internal.permanentlyBroken.add(key);
+		internal.clientRegistry.failureCounts.set(key, 5);
+		internal.clientRegistry.permanentlyBroken.add(key);
 
 		expect(service.getStatus()).toEqual([]);
 		const broken = service.getBrokenStatus();
@@ -37,11 +39,13 @@ describe("LSP circuit-breaker health (#927)", () => {
 		const key = "ruff:/work/project";
 		const internal = service as unknown as {
 			state: { broken: Map<string, number> };
-			failureCounts: Map<string, number>;
-			permanentlyBroken: Set<string>;
+			clientRegistry: {
+				failureCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
 		};
 		internal.state.broken.set(key, until);
-		internal.failureCounts.set(key, 2);
+		internal.clientRegistry.failureCounts.set(key, 2);
 
 		const line = renderLspBrokenStatusLines(service.getBrokenStatus())[0];
 		expect(line).toContain("ruff — cooling down after 2 failure(s)");

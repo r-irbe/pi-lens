@@ -9,6 +9,7 @@ import type {
 import { setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import { writeOrderToken } from "../../clients/write-ordering-guard.js";
 
 type ImpactHitMock = {
 	symbol: string;
@@ -43,7 +44,7 @@ vi.mock("../../clients/review-graph/service.js", () => ({
 	formatImpactCascade: mocks.formatImpactCascade,
 }));
 
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: mocks.getLSPService,
 }));
 
@@ -2104,6 +2105,55 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	// Recurrence (#3780, #3673/#3679 survivors): the "persisted graph coverage
+	// is incomplete" advisory was replaced by "" with every test green, because
+	// the only partial-coverage case set `sourceFilesTruncated` and so never
+	// reached the arm. Coverage that is partial for any OTHER reason (a
+	// persisted-entry cap) must still say why, not hand the turn-end seam an
+	// empty advisory.
+	it("names incomplete persisted coverage when the graph is partial without a truncated source walk", async () => {
+		const env = setupTestEnvironment("cascade-persist-partial-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			mocks.buildOrUpdateGraph.mockResolvedValue({
+				...emptyGraph(),
+				persistCoverage: {
+					partial: true,
+					cap: 500_000,
+					totalNodes: 10,
+					totalEdges: 10,
+					persistedNodes: 5,
+					persistedEdges: 5,
+					totalFiles: 2,
+					persistedFiles: 1,
+				},
+			});
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+			mocks.getLSPService.mockReturnValue({
+				...makeLspServiceDouble(),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(run.result).toBeUndefined();
+			expect(run.skipReason).toBe("indeterminate");
+			expect(run.indeterminate?.reason).toBe("graph_degraded");
+			expect(run.indeterminate?.detail).toBe(
+				"review graph partial — persisted graph coverage is incomplete",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1023: a SIZE-SKIPPED graph (getLastGraphBuildInfo().mode === "skipped",
 	// too_many_files) — the ALREADY-KNOWN degraded state is threaded onto the
 	// result at the compute site. Every edit computes zero neighbors against the
@@ -2143,6 +2193,100 @@ describe("computeCascadeForFile", () => {
 			expect(run.skipReason).toBe("indeterminate");
 			expect(run.indeterminate?.reason).toBe("graph_degraded");
 			expect(run.indeterminate?.detail).toContain("5000");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #3605 review F3: a web-tree-sitter trap cost a file in the graph its
+	// symbols and imports, and the build completed. The dependents of that file
+	// are missing from every cascade, so a clean verdict would be a silent
+	// all-clear; only the build's count says so.
+	it("returns indeterminate when a wasm trap cost a file in the graph its extraction", async () => {
+		const env = setupTestEnvironment("cascade-wasm-trap-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.py");
+			fs.writeFileSync(primary, "x = 1\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+			mocks.getLSPService.mockReturnValue({
+				...makeLspServiceDouble(),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } =
+				await import("../../clients/dispatch/integration.js");
+			const { _setLastGraphBuildInfoForTests } =
+				await import("../../clients/review-graph/builder.js");
+			_setLastGraphBuildInfoForTests({
+				reused: true,
+				mode: "cached",
+				graphChanged: false,
+				wasmTrappedFiles: 2,
+			});
+
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(run.skipReason).toBe("indeterminate");
+			expect(run.indeterminate).toMatchObject({
+				reason: "graph_degraded",
+				detail:
+					"review graph degraded — tree-sitter wasm runtime failure in 2 file(s)",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #3678 F-B: after the process-wide WASM abort, later builds have no
+	// tree-sitter symbols and may have no per-file trap count. Keep that state
+	// from becoming a silent `no_neighbors` all-clear.
+	it("returns indeterminate after the process-wide tree-sitter abort", async () => {
+		const env = setupTestEnvironment("cascade-wasm-aborted-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.py");
+			fs.writeFileSync(primary, "x = 1\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+			mocks.getLSPService.mockReturnValue({
+				...makeLspServiceDouble(),
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const {
+				_resetSharedTreeSitterClientForTests,
+				getSharedTreeSitterClient,
+			} = await import("../../clients/tree-sitter-shared.js");
+			const client = getSharedTreeSitterClient();
+			expect(client).not.toBeNull();
+			for (let i = 0; i < 4; i++) {
+				expect(
+					client!.reportWasmAbort(new Error("table index is out of bounds"), {
+						languageId: "python",
+						source: `def trap_${i}():\\n    return ${i}\\n`,
+					} as never),
+				).toBe(i === 3);
+			}
+			try {
+				const { computeCascadeForFile } =
+					await import("../../clients/dispatch/integration.js");
+				const run = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+				expect(run.skipReason).toBe("indeterminate");
+				expect(run.indeterminate).toEqual({
+					reason: "graph_degraded",
+					detail:
+						"review graph degraded — tree-sitter is disabled for this process until restart",
+				});
+			} finally {
+				_resetSharedTreeSitterClientForTests();
+			}
 		} finally {
 			env.cleanup();
 		}
@@ -2252,6 +2396,87 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 
+		// #3573: the active touch's row is stamped before the neighbor's read.
+		// Stamped at reconcile time, a dependency written while the touch was
+		// still waiting on the language server had an older mtime than the row,
+		// and the widget's dependency gate never demoted it. (The own-file axis
+		// is the #1095 binding's: a rewritten neighbor's touch is bound-false and
+		// never reconciled.)
+		for (const [label, depWrittenDuringTouch] of [
+			[
+				"a dependency written while the active touch runs demotes the neighbor's reconciled row (#3573)",
+				true,
+			],
+			[
+				"a dependency written before the neighbor's read leaves its reconciled row authoritative (#3573)",
+				false,
+			],
+		] as const) {
+			it(label, async () => {
+				const env = setupTestEnvironment("cascade-reconcile-read-stamp-");
+				const T_READ = 1_900_000_000_000;
+				const T_EDIT = T_READ + 400;
+				const T_REC = T_READ + 1500;
+				const setMtime = (file: string, ms: number) =>
+					fs.utimesSync(file, ms / 1000, ms / 1000);
+				try {
+					const primary = path.join(env.tmpDir, "primary.ts");
+					const neighbor = path.join(env.tmpDir, "neighbor.ts");
+					fs.writeFileSync(primary, "export const x = 1;\n");
+					fs.writeFileSync(
+						neighbor,
+						'import { x } from "./primary.js";\nexport const y = x;\n',
+					);
+					setMtime(neighbor, T_READ - 1000);
+					// The primary edit that started this cascade: before the read.
+					// Its mtime leads the clock by 40 ms, the #1710 skew.
+					setMtime(primary, T_READ + 40);
+					mocks.computeImpactCascade.mockReturnValue(
+						impact(primary, [neighbor]),
+					);
+					mocks.getLSPService.mockReturnValue({
+						...makeLspServiceDouble(),
+						getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+						touchFile: vi.fn(async () => {
+							vi.setSystemTime(T_EDIT);
+							if (depWrittenDuringTouch) {
+								fs.writeFileSync(primary, "export const x = 2;\n");
+								setMtime(primary, T_EDIT);
+							}
+							vi.setSystemTime(T_REC);
+							return { diags: [lspError("cross-file error")] };
+						}),
+						getDiagnostics: vi.fn(),
+					});
+					vi.useFakeTimers({ toFake: ["Date"] });
+					vi.setSystemTime(T_READ);
+
+					const { computeCascadeForFile } =
+						await import("../../clients/dispatch/integration.js");
+					const { getFileDiagnostics, reconcileStaleWidgetDependencyBlockers } =
+						await import("../../clients/widget-state.js");
+					await computeCascadeForFile(primary, env.tmpDir, {
+						turnSeq: 1,
+						writeSeq: 1,
+					});
+
+					const { demoted } = await reconcileStaleWidgetDependencyBlockers(
+						env.tmpDir,
+					);
+					expect(demoted).toBe(depWrittenDuringTouch ? 1 : 0);
+					expect(
+						(getFileDiagnostics(neighbor) ?? []).map((d) => ({
+							observedAt: d.observedAt,
+							stale: d.stale ?? false,
+						})),
+					).toEqual([{ observedAt: T_READ, stale: depWrittenDuringTouch }]);
+				} finally {
+					vi.useRealTimers();
+					env.cleanup();
+				}
+			});
+		}
+
 		it("an INCONCLUSIVE neighbor result (rejected touch → passive fallback) does NOT overwrite an existing footer entry", async () => {
 			const env = setupTestEnvironment("cascade-reconcile-inconclusive-");
 			try {
@@ -2319,7 +2544,11 @@ describe("computeCascadeForFile", () => {
 				const { recordDiagnostics, getFileDiagnostics } =
 					await import("../../clients/widget-state.js");
 
-				// A NEWER per-edit LSP-error record for the neighbor (writeIndex 10).
+				// A NEWER per-edit LSP-error record for the neighbor (order turn 7,
+				// writeIndex 10), in the pipeline's turn-first widget order (#3540).
+				// #3540 r2: the order turn is not the session's turn (`turnSeq`,
+				// which restarts at a session reset); the cascade orders by the one
+				// its primary edit carried.
 				recordDiagnostics(
 					neighbor,
 					[
@@ -2330,13 +2559,14 @@ describe("computeCascadeForFile", () => {
 							message: "newer per-edit result",
 						},
 					],
-					10,
+					writeOrderToken(7, 10),
 				);
 
 				// Cascade launched from an OLDER primary edit (writeSeq 3) lands late —
 				// its reconcile must be dropped by the WriteOrderingGuard.
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
+					orderTurn: 7,
 					writeSeq: 3,
 				});
 				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(
@@ -2349,6 +2579,7 @@ describe("computeCascadeForFile", () => {
 				resetDispatchBaselines();
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
+					orderTurn: 7,
 					writeSeq: 20,
 				});
 				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(

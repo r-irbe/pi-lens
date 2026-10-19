@@ -1,0 +1,177 @@
+{
+  "source": "GitHub REST API GET repos/apmantza/pi-lens/commits/d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812/check-suites?per_page=100 (PR #3679 head, the retargeted stacked PR), fetched 2026-09-30 via gh api; fields trimmed to those ci-verdict reads plus identity",
+  "sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+  "checkSuites": {
+    "total_count": 14,
+    "check_suites": [
+      {
+        "id": 99394337392,
+        "app": {
+          "slug": "railway-app"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-09-30T10:17:14Z",
+        "updated_at": "2026-09-30T10:17:14Z"
+      },
+      {
+        "id": 99394337820,
+        "app": {
+          "slug": "render"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-09-30T10:17:15Z",
+        "updated_at": "2026-09-30T10:17:15Z"
+      },
+      {
+        "id": 99394338227,
+        "app": {
+          "slug": "claude"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-09-30T10:17:15Z",
+        "updated_at": "2026-09-30T10:17:15Z"
+      },
+      {
+        "id": 99394338786,
+        "app": {
+          "slug": "sonarqubecloud"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:15Z",
+        "updated_at": "2026-09-30T10:18:59Z"
+      },
+      {
+        "id": 99394339124,
+        "app": {
+          "slug": "sentry"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "queued",
+        "conclusion": null,
+        "created_at": "2026-09-30T10:17:15Z",
+        "updated_at": "2026-09-30T10:17:15Z"
+      },
+      {
+        "id": 99394342250,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "refs/pull/3679/head",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:15Z",
+        "updated_at": "2026-09-30T10:19:25Z"
+      },
+      {
+        "id": 99394354234,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:18Z",
+        "updated_at": "2026-09-30T10:17:33Z"
+      },
+      {
+        "id": 99394354286,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:18Z",
+        "updated_at": "2026-09-30T10:21:41Z"
+      },
+      {
+        "id": 99394354465,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:18Z",
+        "updated_at": "2026-09-30T10:17:24Z"
+      },
+      {
+        "id": 99394354726,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:18Z",
+        "updated_at": "2026-09-30T10:18:41Z"
+      },
+      {
+        "id": 99394354892,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:18Z",
+        "updated_at": "2026-09-30T10:17:37Z"
+      },
+      {
+        "id": 99394354951,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:18Z",
+        "updated_at": "2026-09-30T10:37:32Z"
+      },
+      {
+        "id": 99394539252,
+        "app": {
+          "slug": "github-advanced-security"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:17:58Z",
+        "updated_at": "2026-09-30T10:19:18Z"
+      },
+      {
+        "id": 99400047253,
+        "app": {
+          "slug": "github-actions"
+        },
+        "head_branch": "fix/3678-wasm-abort-cascade",
+        "head_sha": "d92a1a0d8636a7eec72b3d4ffbe7c7ab5efbb812",
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-09-30T10:37:39Z",
+        "updated_at": "2026-09-30T10:38:20Z"
+      }
+    ]
+  }
+}

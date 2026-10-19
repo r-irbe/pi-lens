@@ -32,6 +32,12 @@ const OWN_IMPLEMENTATION_FILES = [
 // alias config all have to apply).
 const NOT_A_FIXTURE = [
 	"scripts/pre-push-targeted-tests.mjs",
+	// #3215 lane 3: the pre-push selector's history pass, which reads past
+	// heads' paths and the data-branch summary out of THIS clone
+	// (`git cat-file`/`git log`/`git show`) -- the same "drives the real repo"
+	// shape as the hook that calls it; its tests run it against a throwaway
+	// repo through gitFixtureEnv.
+	"scripts/lib/test-history-selection.mjs",
 	"scripts/prune-agent-worktrees.mjs",
 	// #2698: reads THIS checkout's own `git ls-files` state (untracked+
 	// ignored .js siblings, tracked .ts sources) before `knip` runs — same
@@ -40,9 +46,22 @@ const NOT_A_FIXTURE = [
 	// #2758: runs `git diff` on the real CI checkout to find changed files
 	// for Stryker mutation testing — drives the real checkout, not a fixture.
 	"scripts/stryker-diff.mjs",
+	// #3674: asks the real clone for its main worktree and writes the real
+	// clone's core.hooksPath -- the fixture env pins GIT_CONFIG_GLOBAL at
+	// `<cwd>/gitconfig` and would hide the config this script must honour.
+	"scripts/setup-git-hooks.mjs",
+	// #3723: opens and closes worktrees of THIS clone (`git worktree add/list/
+	// remove`, `git config branch.*`) -- the fixture env would pin
+	// GIT_CONFIG_GLOBAL at `<cwd>/gitconfig` and hide the safe.directory and
+	// alias config a real checkout needs. Its tests drive it against a
+	// throwaway repo through gitFixtureEnv, so the fixture side is covered.
+	"scripts/pr-worktree.mjs",
 ] as const;
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
+// These scans read every TypeScript test source; allow the tree-wide work to
+// grow beyond Vitest's default timeout on Windows.
+const REPOSITORY_SCAN_TEST_TIMEOUT_MS = 30_000;
 
 /**
  * Every callee that can put a `git` process on the end of an argument list:
@@ -94,10 +113,18 @@ const HISTORY_SUBCOMMANDS = new Set([
 
 /**
  * Global git options that consume a SEPARATE following token, so the
- * subcommand search steps over their value -- the same two
+ * subcommand search steps over their value -- the same seven
  * `scripts/hooks/guard-bash.mjs`'s `classifyGit` walks past.
  */
-const GIT_TWO_TOKEN_FLAGS = new Set(["-C", "-c"]);
+const GIT_TWO_TOKEN_FLAGS = new Set([
+	"-C",
+	"-c",
+	"--git-dir",
+	"--work-tree",
+	"--namespace",
+	"--config-env",
+	"--attr-source",
+]);
 
 const QUOTED_ITEM = /^(["'`])((?:\\.|(?!\1)[\s\S])*)\1$/;
 
@@ -441,15 +468,19 @@ function scriptFiles(root: string): Array<{ file: string; source: string }> {
 }
 
 describe("real Git fixture governance", () => {
-	it("routes every direct Git spawn through git-fixture-env", () => {
-		const offenders = findGitSpawnOffenders(
-			testFiles(path.resolve(__dirname, "..")),
-		);
-		expect(
-			offenders,
-			`Bare Git spawns found:\n${offenders.join("\n")}`,
-		).toEqual([]);
-	});
+	it(
+		"routes every direct Git spawn through git-fixture-env",
+		() => {
+			const offenders = findGitSpawnOffenders(
+				testFiles(path.resolve(__dirname, "..")),
+			);
+			expect(
+				offenders,
+				`Bare Git spawns found:\n${offenders.join("\n")}`,
+			).toEqual([]);
+		},
+		REPOSITORY_SCAN_TEST_TIMEOUT_MS,
+	);
 
 	it("routes every direct Git spawn in scripts/**/*.mjs through git-fixture-env", () => {
 		const offenders = findGitSpawnOffenders(
@@ -572,21 +603,25 @@ describe("real Git fixture governance", () => {
 		).toEqual(["synthetic.test.ts"]);
 	});
 
-	it("pins no historical commit-ish in any tests/ Git spawn", () => {
-		const offenders = findHistoricalCommitIshOffenders(
-			testTypeScriptFiles(path.resolve(__dirname, "..")),
-		);
-		expect(
-			offenders,
-			"A tests/ Git spawn names a commit from this repository's history.\n" +
-				"CI checks out at depth 1 (.github/workflows/ci.yml's test job sets no\n" +
-				"fetch-depth), so the object is unreachable there: at module scope the\n" +
-				"call throws during collection and the file yields ZERO tests (#3066\n" +
-				"round 1, ca26395). Commit the content as a fixture under tests/fixtures/\n" +
-				"and read it back instead:\n" +
-				offenders.join("\n"),
-		).toEqual([]);
-	});
+	it(
+		"pins no historical commit-ish in any tests/ Git spawn",
+		() => {
+			const offenders = findHistoricalCommitIshOffenders(
+				testTypeScriptFiles(path.resolve(__dirname, "..")),
+			);
+			expect(
+				offenders,
+				"A tests/ Git spawn names a commit from this repository's history.\n" +
+					"CI checks out at depth 1 (.github/workflows/ci.yml's test job sets no\n" +
+					"fetch-depth), so the object is unreachable there: at module scope the\n" +
+					"call throws during collection and the file yields ZERO tests (#3066\n" +
+					"round 1, ca26395). Commit the content as a fixture under tests/fixtures/\n" +
+					"and read it back instead:\n" +
+					offenders.join("\n"),
+			).toEqual([]);
+		},
+		REPOSITORY_SCAN_TEST_TIMEOUT_MS,
+	);
 
 	it("detects the #3066 round 1 shape: git show <sha>:<path> through the fixture wrapper", () => {
 		expect(
@@ -754,16 +789,31 @@ describe("real Git fixture governance", () => {
 		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
 	});
 
-	it("steps over git global options to find the subcommand", () => {
+	it("steps over every separate-value git global to find the subcommand", () => {
 		expect(
 			findHistoricalCommitIshOffenders([
 				{
 					file: "tests/clients/synthetic.test.ts",
-					source:
+					source: [
 						'execFileSync("git", ["-C", dir, "show", "ca2639524:clients/x.ts"]);',
+						'execFileSync("git", ["-c", config, "show", "20896a56b:clients/y.ts"]);',
+						'execFileSync("git", ["--git-dir", dir, "show", "deadbeef1:clients/z.ts"]);',
+						'execFileSync("git", ["--work-tree", dir, "show", "abcdef12:clients/a.ts"]);',
+						'execFileSync("git", ["--namespace", namespace, "show", "1234567:clients/b.ts"]);',
+						'execFileSync("git", ["--config-env", key, "show", "fedcba98:clients/c.ts"]);',
+						'execFileSync("git", ["--attr-source", source, "show", "7654321:clients/d.ts"]);',
+					].join("\\n"),
 				},
 			]),
-		).toEqual(["tests/clients/synthetic.test.ts:1 ca2639524"]);
+		).toEqual([
+			"tests/clients/synthetic.test.ts:1 ca2639524",
+			"tests/clients/synthetic.test.ts:1 20896a56b",
+			"tests/clients/synthetic.test.ts:1 deadbeef1",
+			"tests/clients/synthetic.test.ts:1 abcdef12",
+			"tests/clients/synthetic.test.ts:1 1234567",
+			"tests/clients/synthetic.test.ts:1 fedcba98",
+			"tests/clients/synthetic.test.ts:1 7654321",
+		]);
 	});
 
 	it("steps over --git-dir=<path> and --work-tree=<path> to find the subcommand", () => {

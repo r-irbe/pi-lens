@@ -16,7 +16,7 @@ const T = "\t";
 const ROWS: Array<{
 	id: string;
 	content: string;
-	expected: { style: string; width: number } | undefined;
+	expected: { style: "tab" } | { style: "space"; width: number } | undefined;
 }> = [
 	{
 		id: "R1 2-space file, no comments",
@@ -57,7 +57,7 @@ const ROWS: Array<{
 	{
 		id: "R6 tab file, no comments",
 		content: `function a() {\n${T}const x = 1;\n${T}if (x) {\n${T}${T}return x;\n${T}}\n}\n`,
-		expected: { style: "tab", width: 1 },
+		expected: { style: "tab" },
 	},
 	{
 		// Recurrence this pins (#3039 F2): a top-level JSDoc has more 1-space
@@ -67,7 +67,7 @@ const ROWS: Array<{
 		content:
 			"/**\n * Adds two numbers.\n * @param a first\n * @param b second\n * @returns the sum\n */\n" +
 			`function add(a, b) {\n${T}const sum = a + b;\n${T}if (sum) {\n${T}${T}return sum;\n${T}}\n${T}return 0;\n}\n`,
-		expected: { style: "tab", width: 1 },
+		expected: { style: "tab" },
 	},
 	{
 		// Recurrence this pins (#3038): the shallowest run is continuation
@@ -103,7 +103,7 @@ const ROWS: Array<{
 	{
 		id: "R10b mixed tabs and spaces, tab majority",
 		content: `top\n${T}one\n${T}${T}two\n${T}three\n  four\n`,
-		expected: { style: "tab", width: 1 },
+		expected: { style: "tab" },
 	},
 	{
 		id: "R11 minimum above the plausible-unit cap, nested-only",
@@ -229,7 +229,7 @@ const ROWS: Array<{
 	{
 		id: "R22 shell tabs with # comments",
 		content: `#!/bin/sh\n# a script\nf() {\n${T}echo hi\n${T}if true; then\n${T}${T}echo deep\n${T}fi\n}\n`,
-		expected: { style: "tab", width: 1 },
+		expected: { style: "tab" },
 	},
 	{
 		// Recurrence this pins (#3059, AGENTS.md defect 49's fourth member): a
@@ -281,7 +281,7 @@ const ROWS: Array<{
 		content:
 			`/**\n * Handles \`template literals in strings.\n */\nfunction main() {\n${T}doStuff();\n${T}if (ok) {\n${T}${T}run();\n${T}}\n}\n` +
 			'const s = "closes ` here";\n',
-		expected: { style: "tab", width: 1 },
+		expected: { style: "tab" },
 	},
 ];
 

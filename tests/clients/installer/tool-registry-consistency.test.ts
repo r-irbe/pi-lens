@@ -5,6 +5,7 @@ import {
 	getRefreshableManagedTools,
 	getToolVerificationTimeout,
 	resolveArchiveKind,
+	resolveArchiveUrl,
 } from "../../../clients/installer/index.js";
 
 // Use the real installer module, not any mock another test file registered.
@@ -268,6 +269,43 @@ describe("TOOLS registry consistency", () => {
 				).toBeUndefined();
 			}
 		});
+	});
+
+	// #3400: an archive has no `--version`, so its pinned sha256 is the only
+	// integrity evidence. Recurrence this names: a URL bumped without its pin
+	// (install refuses at runtime, caught only by the nightly) or a pin left
+	// behind for a URL no platform resolves any more (dead, misleading evidence).
+	it("every resolvable archive URL has a sha256 pin, and every pin names a resolvable URL", () => {
+		const PLATFORMS = ["linux", "darwin", "win32", "freebsd"];
+		const ARCHES = ["x64", "arm64", "ia32"];
+		for (const t of TOOLS.filter((x) => x.installStrategy === "archive")) {
+			const spec = t.archive!;
+			const resolved = new Set<string>();
+			for (const p of PLATFORMS)
+				for (const a of ARCHES) {
+					const url = resolveArchiveUrl(spec, p, a);
+					if (url) resolved.add(url);
+				}
+			for (const url of resolved) {
+				expect(
+					spec.sha256?.[url],
+					`${t.id} has no sha256 pin for ${url}`,
+				).toMatch(/^[0-9a-f]{64}$/);
+			}
+			for (const url of Object.keys(spec.sha256 ?? {})) {
+				expect(
+					resolved.has(url),
+					`${t.id} pins ${url}, which no platform/arch resolves`,
+				).toBe(true);
+			}
+		}
+	});
+
+	it("a tree-manifest entry is an archive launcher tool", () => {
+		for (const t of TOOLS.filter((x) => x.verification === "tree-manifest")) {
+			expect(t.installStrategy, `${t.id} strategy`).toBe("archive");
+			expect(t.archive?.launcher, `${t.id} launcher`).toBeTruthy();
+		}
 	});
 
 	describe("github asset selection is total and safe", () => {

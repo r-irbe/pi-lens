@@ -80,6 +80,7 @@ export function worktreePathFromHookPayload(
 ): string | null;
 
 export function worktreeActivityMs(worktreePath: string, nowMs: number): number;
+export function liveProcessCwds(procRoot?: string): Set<string> | null;
 
 export function getHygieneLogPath(): string;
 

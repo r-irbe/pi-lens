@@ -162,15 +162,9 @@ export const CAPTURES = [
 		tool: "shellcheck",
 		workspace: smoke("shell"),
 		file: "bad.sh",
-		argv: [
-			"--format",
-			"json",
-			"--shell",
-			"bash",
-			"--severity",
-			"info",
-			"bad.sh",
-		],
+		// #3968: bad.sh is shebang'd, so the runner passes NO --shell override —
+		// ShellCheck parses the shebang itself (bash-lsp@5.8.1 mirror).
+		argv: ["--format", "json", "--severity", "info", "bad.sh"],
 	},
 	{
 		runner: "shfmt",

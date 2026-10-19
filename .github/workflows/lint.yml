@@ -9,55 +9,24 @@ name: Lint
 on:
   push:
     branches: [master]
-  repository_dispatch:
-    types: [merge-train-post-merge]
   pull_request:
     branches: [master]
-    # Default types omit "edited". Without it, retitling a PR to fix a
-    # PR-title-lint failure replays the STALE payload from the original
-    # "opened" event instead of re-running against the new title (#1917
-    # review F3).
-    types: [opened, synchronize, reopened, edited]
+    # No "edited" (#3838): a retitle or body edit re-runs only the PR metadata
+    # checks in pr-metadata.yml, not this workflow's whole job graph.
+    types: [opened, synchronize, reopened]
+  # #3754: the merge queue needs knip and oxfmt on its own merge commit.
+  merge_group:
+    types: [checks_requested]
 
-# A merge made with GITHUB_TOKEN suppresses its push event. Replayed
-# repository_dispatch runs validate the exact merge commit, and duplicate
-# events for that commit must not run concurrently.
 concurrency:
-  group: lint-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
-  cancel-in-progress: true
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
 jobs:
-  validate-merge-train-dispatch:
-    name: Validate merge-train dispatch
-    runs-on: ubuntu-latest
-    # refs #3123: bounds a hang against GitHub's 360-min default.
-    # Measured max over last 10 successful master runs: 5s; timeout = floor of
-    # 10 min.
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: github.event_name == 'repository_dispatch'
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Validate merge-train dispatch ancestry
-        if: github.event_name == 'repository_dispatch'
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ github.token }}
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-          PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
-        run: node scripts/lib/merge-train-dispatch-validation.mjs
-
   actionlint:
     name: actionlint
-    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 8s; timeout = floor of
@@ -68,30 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
-
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
 
       # Pinned release + checksum verification rather than piping a
       # third-party install script or trusting an unpinned marketplace
@@ -110,106 +57,8 @@ jobs:
       - name: Lint workflows
         run: ./actionlint -color
 
-  pr-title-lint:
-    name: PR title
-    needs: validate-merge-train-dispatch
-    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
-          persist-credentials: false
-
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: "22"
-
-      - name: Validate PR title (conventional prefix + issue ref)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/check-pr-title.mjs
-
-  pr-body-lint:
-    name: PR body (advisory)
-    needs: validate-merge-train-dispatch
-    if: github.event_name == 'pull_request' && github.event.action != 'synchronize' && github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    timeout-minutes: 5
-    # Advisory to start: this job is not in required-checks branch protection.
-    # A finding stays visible as a red check without blocking a merge.
-    # Promotion bound (#2904): it stays advisory until it has been green on ten
-    # consecutive merged PRs; only then is it a candidate for required checks.
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
-          fetch-depth: 0
-          persist-credentials: false
-
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: "22"
-
-      - name: Validate PR body structure
-        run: node scripts/check-pr-body.mjs
-
   oxfmt:
     name: oxfmt format check
-    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 32s; timeout = floor of
@@ -221,32 +70,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
 
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -276,8 +103,7 @@ jobs:
         run: npm run fmt:check
 
   knip:
-    name: knip (advisory)
-    needs: validate-merge-train-dispatch
+    name: knip
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 27s; timeout = floor of
@@ -285,56 +111,20 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    # Advisory: not in required-checks branch protection, so a finding never
-    # blocks a merge on its own -- same posture as vale/osv-scan below.
-    # No continue-on-error, for the same reason those give (#2698 review
-    # round 2, F4): a job-level continue-on-error does NOT turn THIS CHECK
-    # green in the PR checks list when its own steps fail (verified live on
-    # PR #2704 -- the job reported `completed`/`failure` with continue-on-
-    # error set, and branch protection reads exactly that per-job check-run,
-    # not the workflow run's own conclusion). What it DOES do (round 1): (a)
-    # lets a DOWNSTREAM job that `needs:` this one proceed past a failure --
-    # nothing in this workflow needs `knip`, so moot here -- and (b) greens
-    # the overall lint.yml WORKFLOW RUN's own conclusion even though this
-    # job's check-run stays red, which is not the same signal branch
-    # protection consumes and buys nothing for merge tolerance. The actual
-    # merge tolerance comes entirely from the "(advisory)" name suffix via
-    # `isAdvisoryCheck` (scripts/lib/ci-checks.mjs). This first landing
-    # carries known, pre-existing "Unused exports"/"Unused exported types"
-    # debt (#2698's PR body has the count) that is out of this PR's scope to
-    # clean up, so the underlying `knip` exit code is non-zero on a clean
-    # tree today -- the check-run WILL show red, which is correct: a real
-    # finding must show as a red advisory check a reviewer can see, not a
-    # silently-green one.
+    # Gating (#2837 step 3): `npm run preflight` runs the same
+    # scripts/run-knip.mjs locally before a PR is pushed, and master is clean.
+    # The job name carries no `(advisory)` suffix and is not in
+    # ADVISORY_CHECKS (scripts/lib/ci-checks.mjs), so ci-verdict blocks
+    # on it. A rerun after the PR merged fails in
+    # the checkout step (`refs/pull/N/merge` is gone); ci-verdict excuses that
+    # by reading the job log (#3700), so this job needs no `if:` guard.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
 
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -358,7 +148,6 @@ jobs:
 
   markdownlint:
     name: markdownlint
-    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 26s; timeout = floor of
@@ -369,32 +158,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
 
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -410,59 +177,8 @@ jobs:
       - name: Lint markdown
         run: ./node_modules/.bin/markdownlint-cli2
 
-  record-post-merge-validation:
-    name: Record post-merge validation
-    if: always() && github.event_name == 'repository_dispatch' && needs.validate-merge-train-dispatch.result == 'success'
-    needs: [validate-merge-train-dispatch, actionlint, oxfmt, markdownlint, vale, jscpd, yamllint, typos, taplo]
-    runs-on: ubuntu-latest
-    # refs #3123: bounds a hang against GitHub's 360-min default.
-    # No successful run found (job requires github.event_name ==
-    # 'repository_dispatch'; 0 repository_dispatch-triggered runs of this
-    # workflow exist in the visible history) -- defaulted to the floor of 10 min
-    # for this single-step job.
-    timeout-minutes: 10
-    permissions:
-      # #3151: the comment target is a pull request; `issues: write` alone
-      # was refused with 403 "Resource not accessible by integration".
-      pull-requests: write
-    steps:
-      - name: Record exact-SHA terminal state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-          PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
-          ACTIONLINT_RESULT: ${{ needs.actionlint.result }}
-          OXFMT_RESULT: ${{ needs.oxfmt.result }}
-          MARKDOWN_RESULT: ${{ needs.markdownlint.result }}
-          VALE_RESULT: ${{ needs.vale.result }}
-          JSCPD_RESULT: ${{ needs.jscpd.result }}
-          YAMLLINT_RESULT: ${{ needs.yamllint.result }}
-          TYPOS_RESULT: ${{ needs.typos.result }}
-          TAPLO_RESULT: ${{ needs.taplo.result }}
-        run: |
-          set -euo pipefail
-          state=succeeded
-          unknown=0
-          for result in "$ACTIONLINT_RESULT" "$OXFMT_RESULT" "$MARKDOWN_RESULT" "$VALE_RESULT" "$JSCPD_RESULT" "$YAMLLINT_RESULT" "$TYPOS_RESULT" "$TAPLO_RESULT"; do
-            case "$result" in
-              success) ;;
-              failure) state=failed ;;
-              *) unknown=1 ;;
-            esac
-          done
-          if [[ "$state" != failed && "$unknown" == 1 ]]; then exit 0; fi
-          marker="<!-- merge-train-post-merge:sha=$PAYLOAD_SHA:workflow=lint.yml:state=$state -->"
-          body="Post-merge validation $state for $PAYLOAD_SHA.\n\n$marker"
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PAYLOAD_PR_NUMBER/comments" \
-            --data "$(jq -n --arg body "$body" '{body:$body}')"
-
   vale:
     name: Vale prose lint (advisory)
-    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 13s; timeout = floor of
@@ -478,30 +194,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
 
       # Pinned release + checksum verification, matching the actionlint job
       # above. The style package itself (.vale/styles/Google/) is vendored
@@ -522,7 +215,6 @@ jobs:
 
   oxlint-advisory:
     name: oxlint (advisory)
-    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 49s; timeout = floor of
@@ -548,32 +240,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
 
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -629,7 +298,6 @@ jobs:
 
   jscpd:
     name: jscpd (advisory)
-    needs: validate-merge-train-dispatch
     continue-on-error: true
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
@@ -641,9 +309,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
       - name: Install dependencies
@@ -653,7 +320,6 @@ jobs:
 
   complexity:
     name: complexity (advisory)
-    needs: validate-merge-train-dispatch
     continue-on-error: true
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
@@ -665,9 +331,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
           cache: npm
@@ -681,7 +346,7 @@ jobs:
       - name: Publish complexity report
         if: always()
         run: cat complexity-report.txt >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: complexity-report
@@ -690,7 +355,6 @@ jobs:
 
   strictness:
     name: strictness (advisory)
-    needs: validate-merge-train-dispatch
     continue-on-error: true
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
@@ -702,9 +366,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
           cache: npm
@@ -718,7 +381,6 @@ jobs:
 
   yamllint:
     name: yamllint (advisory)
-    needs: validate-merge-train-dispatch
     continue-on-error: true
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
@@ -730,9 +392,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
       - name: Install yamllint
@@ -744,7 +405,6 @@ jobs:
 
   typos:
     name: typos (advisory)
-    needs: validate-merge-train-dispatch
     continue-on-error: true
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
@@ -756,15 +416,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-      - uses: crate-ci/typos@512fc24f32f44ab01972217aaaf3dc86ec234d53 # v1.50.2
+      - uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
         with:
           args: --force-exclude
 
   taplo:
     name: taplo (advisory)
-    needs: validate-merge-train-dispatch
     continue-on-error: true
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
@@ -776,9 +434,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
       - name: Install dependencies

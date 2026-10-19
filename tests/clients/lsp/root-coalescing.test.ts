@@ -30,10 +30,12 @@ type RootPolicyHarness = {
 		clients: Map<string, LSPClientInfo>;
 		inFlight: Map<string, Promise<unknown>>;
 	};
-	resolveServerRoot(
-		server: LSPServerInfo,
-		filePath: string,
-	): Promise<string | undefined>;
+	clientRegistry: {
+		resolveServerRoot(
+			server: LSPServerInfo,
+			filePath: string,
+		): Promise<string | undefined>;
+	};
 };
 
 const dirs: string[] = [];
@@ -72,6 +74,8 @@ function markerServer(id: string): LSPServerInfo {
 		id,
 		name: id,
 		extensions: [".md"],
+		idleEviction: "unmeasured",
+		role: "language",
 		root: async (file) => path.dirname(file),
 		spawn: async () => undefined,
 	};
@@ -93,7 +97,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		);
 
 		await expect(
-			service.resolveServerRoot(server, path.join(nested, "ci.yml")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(nested, "ci.yml"),
+			),
 		).resolves.toBe(project);
 		expect(service.state.clients.size).toBe(1);
 		cwdSpy.mockRestore();
@@ -115,7 +122,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		);
 
 		await expect(
-			service.resolveServerRoot(server, path.join(nested, "README.md")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(nested, "README.md"),
+			),
 		).resolves.toBe(nested);
 		cwdSpy.mockRestore();
 	});
@@ -133,7 +143,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		};
 
 		await expect(
-			service.resolveServerRoot(server, path.join(foreign, "app.ts")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(foreign, "app.ts"),
+			),
 		).resolves.toBeUndefined();
 	});
 
@@ -157,7 +170,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 
 		// projectA initialized FIRST and projectB LAST; projectA must still serve.
 		await expect(
-			service.resolveServerRoot(server, path.join(projectA, "a.ts")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(projectA, "a.ts"),
+			),
 		).resolves.toBe(projectA);
 	});
 
@@ -278,7 +294,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		};
 
 		await expect(
-			service.resolveServerRoot(server, path.join(foreign, "app.ts")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(foreign, "app.ts"),
+			),
 		).resolves.toBe(foreign);
 	});
 
@@ -299,7 +318,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 			fakeClient(project),
 		);
 		await expect(
-			service.resolveServerRoot(server, path.join(nested, "app.ts")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(nested, "app.ts"),
+			),
 		).resolves.toBe(project);
 	});
 
@@ -325,7 +347,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 			fakeClient("C:\\Repo"),
 		);
 		await expect(
-			service.resolveServerRoot(server, "c:\\repo\\nested\\app.ts"),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				"c:\\repo\\nested\\app.ts",
+			),
 		).resolves.toBe("C:\\Repo");
 	});
 
@@ -346,7 +371,10 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		);
 
 		await expect(
-			service.resolveServerRoot(server, path.join(nested, "README.md")),
+			service.clientRegistry.resolveServerRoot(
+				server,
+				path.join(nested, "README.md"),
+			),
 		).resolves.toBe(nested);
 		cwdSpy.mockRestore();
 	});
@@ -377,7 +405,7 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 			service.state.clients.set(projectKey, fakeClient(project));
 			roots.add(projectKey);
 			for (const relative of shapes) {
-				const root = await service.resolveServerRoot(
+				const root = await service.clientRegistry.resolveServerRoot(
 					server,
 					path.join(
 						project,

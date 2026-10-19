@@ -26,11 +26,14 @@
  * argv wins: when `--file` or `--turn-end` is present stdin is never read at
  * all, so an open-but-idle pipe cannot hang the hook (#1271).
  * Output: a concise report on stdout; with `--hook`, a PostToolUse JSON
- * envelope that injects the report as context. Exit 0 always (advisory — never
- * blocks the edit, never blocks the stop).
+ * envelope that injects the report as context. Hooks exit 0 (advisory); plain
+ * CLI failures exit 2. Clean scans and findings still exit 0.
  */
 
+import { setProjectTrustState } from "../clients/project-trust.js";
 import * as path from "node:path";
+import { flushExtensionLog, logExtension } from "../clients/extension-log.js";
+import { redactSecrets } from "../clients/redact/secrets.js";
 import type { McpAnalyzeResult } from "../clients/mcp/analyze.js";
 import {
 	recordTurnEndOutcome,
@@ -256,65 +259,94 @@ function writeStdout(text: string): Promise<void> {
 	});
 }
 
+function writeReport(report: string, hookMode: boolean): Promise<void> {
+	return writeStdout(
+		hookMode
+			? JSON.stringify({
+					hookSpecificOutput: {
+						hookEventName: "PostToolUse",
+						additionalContext: report,
+					},
+				})
+			: report,
+	);
+}
+
 async function main(): Promise<void> {
+	// #4300: this process runs outside pi; its caller owns workspace trust.
+	setProjectTrustState("trusted");
+	logExtension({
+		subsystem: "project-trust",
+		level: "debug",
+		message:
+			"analyze-cli: workspace trust belongs to the calling client; pi trust not consulted",
+	});
+
 	const hookMode = process.argv.includes("--hook");
 	const withLsp = process.argv.includes("--lsp");
 	const fileArg = argVal("file");
 	const turnEndFlag = process.argv.includes("--turn-end");
-	// #1271: the stdin payload is the fallback way to learn WHAT to do. When
-	// argv already says so, reading stdin buys nothing and costs everything —
-	// an open pipe (`stdio: 'pipe'` with no `end()`) used to hang here forever,
-	// which as a Stop hook means Claude Code waits out its full 60 s timeout on
-	// every single turn. Only dial stdin when argv left the question open.
-	const payload =
-		fileArg === undefined && !turnEndFlag ? await readHookPayload() : undefined;
-	const cwd = argVal("cwd") ?? payload?.cwd ?? process.cwd();
+	let cwd = argVal("cwd") ?? process.cwd();
+	let hookInvocation = hookMode;
+	let operation: "analyze" | "turn-end" = "analyze";
+	try {
+		// #1271: argv identifies work without waiting on an open stdin pipe.
+		const payload =
+			fileArg === undefined && !turnEndFlag
+				? await readHookPayload()
+				: undefined;
+		cwd = argVal("cwd") ?? payload?.cwd ?? cwd;
+		const event = payload?.hook_event_name;
+		const payloadFile =
+			payload?.tool_input?.file_path ?? payload?.tool_input?.path;
+		hookInvocation ||= Boolean(payloadFile);
+		if (turnEndFlag || event === "Stop" || event === "SubagentStop") {
+			hookInvocation = true;
+			operation = "turn-end";
+			await runTurnEndMode(cwd, payload);
+			return;
+		}
 
-	const event = payload?.hook_event_name;
-	if (turnEndFlag || event === "Stop" || event === "SubagentStop") {
-		return runTurnEndMode(cwd, payload);
-	}
+		const file = fileArg ?? payloadFile;
+		if (!file) process.exit(0); // nothing to analyze — stay silent
 
-	const file =
-		fileArg ?? payload?.tool_input?.file_path ?? payload?.tool_input?.path;
-	if (!file) process.exit(0); // nothing to analyze — stay silent
+		// Warm path first; a cold fallback avoids loading the graph until needed.
+		let result = await requestWarmAnalyze(cwd, file);
+		if (!result) {
+			const { analyzeFile } = await import("../clients/mcp/analyze.js");
+			result = await analyzeFile(file, cwd, {
+				flags: withLsp ? {} : { "no-lsp": true },
+				record: false,
+				registerTurnState: true,
+			});
+		}
+		// One-shot consumers cannot rely on the installer's unref'd debounce.
+		const { flushProbeCache } = await import("../clients/installer/index.js");
+		await flushProbeCache();
 
-	// Warm path first: if the MCP server is up for this workspace, it analyzes in
-	// its warm process (LSP-COMPLETE) and we never load the dispatch graph here.
-	// Falls back to a cold, no-LSP local run when no server is reachable.
-	let result = await requestWarmAnalyze(cwd, file);
-	if (!result) {
-		const { analyzeFile } = await import("../clients/mcp/analyze.js");
-		result = await analyzeFile(file, cwd, {
-			flags: withLsp ? {} : { "no-lsp": true },
-			record: false,
-			// Edit-detection path (PostToolUse) — mark the file for pilens_turn_end.
-			registerTurnState: true,
+		if (result.counts.diagnostics === 0) process.exit(0); // clean → no noise
+		await writeReport(formatReport(result, cwd), hookMode);
+		process.exit(0);
+	} catch (err) {
+		const detail = redactSecrets(
+			stripControlSequences(err instanceof Error ? err.message : String(err)),
+		).replace(/\s+/g, " ");
+		const reason =
+			detail.length > 1000
+				? `${capCodeUnits(detail, 1000)}… (truncated)`
+				: detail;
+		const message = `pi-lens-analyze failed: ${reason}`;
+		recordTurnEndOutcome(cwd, { failed: true, operation, reason });
+		logExtension({
+			subsystem: "analyze-cli",
+			message: "analyze-cli-failed",
+			metadata: { cwd, operation, reason },
 		});
+		process.stderr.write(`${message}\n`);
+		await writeReport(message, hookMode && operation === "analyze");
+		await flushExtensionLog();
+		process.exit(hookInvocation ? 0 : 2);
 	}
-	// One-shot consumers cannot rely on the installer's unref'd debounce.
-	const { flushProbeCache } = await import("../clients/installer/index.js");
-	await flushProbeCache();
-
-	if (result.counts.diagnostics === 0) process.exit(0); // clean → no noise
-
-	const report = formatReport(result, cwd);
-	if (hookMode) {
-		process.stdout.write(
-			JSON.stringify({
-				hookSpecificOutput: {
-					hookEventName: "PostToolUse",
-					additionalContext: report,
-				},
-			}),
-		);
-	} else {
-		process.stdout.write(`${report}\n`);
-	}
-	process.exit(0);
 }
 
-main().catch((err) => {
-	process.stderr.write(`pi-lens-analyze failed: ${(err as Error).message}\n`);
-	process.exit(0); // advisory — never break the edit flow
-});
+void main();

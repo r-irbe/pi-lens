@@ -18,7 +18,7 @@ const DEFAULT_SCRATCH_MAX_AGE_MS = 60 * 60 * 1000;
  */
 export const SWEEP_ANY_AGE = Number.NEGATIVE_INFINITY;
 
-function ownerAlive(entryDir) {
+export function ownerAlive(entryDir) {
 	let pidText;
 	try {
 		pidText = fs.readFileSync(path.join(entryDir, SCRATCH_OWNER_FILE), "utf8");

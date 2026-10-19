@@ -10,12 +10,22 @@
  * Falls back safely when LSP is unavailable.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { BoundedSet } from "./bounded-cache.js";
 import { incrementDegradationCount } from "./degradation-ledger.js";
 import { createFileTime, type FileTime } from "./file-time.js";
 import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
-import { normalizeEphemeralMapKey, normalizeFilePath } from "./path-utils.js";
-import { logReadGuardEvent } from "./read-guard-logger.js";
+import {
+	normalizeEphemeralMapKey,
+	normalizeFilePath,
+	realpathOrResolve,
+} from "./path-utils.js";
+import {
+	logReadGuardEvent,
+	sanitizeCorrelationId,
+} from "./read-guard-logger.js";
+import { beginScope, moveBranch, type SessionScope } from "./session-scope.js";
 
 // --- Types ---
 
@@ -54,6 +64,14 @@ export interface ReadRecord {
 	source?: string;
 	/** A requested native-read range that has not been confirmed as delivered. */
 	provisional?: boolean;
+	/**
+	 * The host tool call whose result carried this evidence into the
+	 * conversation (#3521), in `resolveToolCallCorrelationId` form. After a
+	 * conversation move (`/tree`, `/fork`, `/clone`, resume) a record is kept
+	 * only when this call's `toolResult` is on the new branch; a record without
+	 * one (a bridge read, a host that sends no id) is dropped there.
+	 */
+	toolCallId?: string;
 }
 
 /**
@@ -166,7 +184,53 @@ export interface PersistedReadGuardState {
 	reads: Array<[string, ReadRecord[]]>;
 }
 
-export const READ_GUARD_STATE_VERSION = 1;
+/**
+ * A session's authorship ({@link ReadGuard.exportAuthorship}), keys in
+ * `normalizeFilePath` form. `written` is the released (#3612) shape and is
+ * still written, so an older reader keeps parsing it. `entries` (#4131,
+ * #3603) carries each file's content identity and the transcript id of the
+ * write it came from; a `written` path with no entry has neither, so no
+ * branch can be shown to hold it and it is not imported.
+ */
+export interface PersistedReadGuardAuthorship {
+	written: string[];
+	entries?: Array<{ filePath: string } & AuthoredBytes>;
+}
+
+/**
+ * The content identity of the bytes the conversation last wrote to a file
+ * (#4131; maintainer decision F5 on #4187). `stat` is the cheap pre-filter:
+ * unchanged, the bytes are taken as unchanged; changed, the hash decides, so
+ * `touch`, `chmod` or a checkout of identical bytes keeps authorship.
+ */
+interface AuthoredBytes {
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	/** sha256 of the bytes; absent past READ_BINDING_MAX_BYTES, where any stat change ends authorship. */
+	hash?: string;
+	/** The write's transcript entry (#3603): a branch move keeps the authorship iff it is on the branch. */
+	toolCallId?: string;
+	/**
+	 * Another writer changed the bytes (#4131): the authorship has ended and
+	 * no later write resumes it. A bash write, the agent_end drain or a
+	 * process bridge would vouch for the other writer's bytes it rewrote
+	 * around; the agent's own edit or write of an existing file needs a read
+	 * here first, after which the reads judge its edits. It goes with the
+	 * entry: idle eviction, an external delete, or a move off its branch.
+	 */
+	retired?: true;
+	/** Lines a partial first credit actually produced. */
+	authoredRanges?: Array<[number, number]>;
+	/** Line count when authoredRanges was observed; used to fail closed on shifts. */
+	authoredLineCount?: number;
+}
+
+/**
+ * 2 since #3521: records carry `toolCallId`. A version-1 sidecar has no ids
+ * to match against the branch, so it loads as no reads (one re-read).
+ */
+export const READ_GUARD_STATE_VERSION = 2;
 
 // --- Constants ---
 
@@ -180,14 +244,6 @@ const DEFAULT_CONFIG: ReadGuardConfig = {
 		{ pattern: "*.log", mode: "allow" },
 	],
 };
-
-const OWN_EDIT_STALE_GRACE_MS = Math.max(
-	0,
-	Number.parseInt(
-		process.env.PI_LENS_READ_GUARD_OWN_EDIT_GRACE_MS ?? "120000",
-		10,
-	) || 120000,
-);
 
 /** Avoid hashing very large reads in the hot path. */
 const READ_HASH_MAX_LINES = Math.max(
@@ -203,6 +259,134 @@ const READ_HASH_MAX_LINES = Math.max(
  * synchronous disk read so bridge registration never hashes an unbounded file.
  */
 const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
+
+function hashFileBytes(filePath: string): string {
+	return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+/** `size` of an authorship credited while the file could not be read. */
+const ABSENT_SIZE = -1;
+
+/**
+ * The disk's identity now. `knownHash` is the sha256 of the bytes the caller
+ * already read for this write (`getFileStateHash`), so the hot path reads
+ * them once (#2499). A file that cannot be read is the identity "absent".
+ */
+function observeAuthoredBytes(
+	filePath: string,
+	knownHash: string | undefined,
+	authoredRanges?: Array<[number, number]>,
+): AuthoredBytes {
+	try {
+		const stat = fs.statSync(filePath);
+		const hash =
+			knownHash !== undefined
+				? knownHash
+				: stat.size <= READ_BINDING_MAX_BYTES
+					? hashFileBytes(filePath)
+					: undefined;
+		return {
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			ctimeMs: stat.ctimeMs,
+			...(hash !== undefined && { hash }),
+			...(authoredRanges !== undefined && { authoredRanges }),
+			...(authoredRanges !== undefined && {
+				authoredLineCount: splitLines(fs.readFileSync(filePath, "utf-8"))
+					.length,
+			}),
+		};
+	} catch {
+		return { size: ABSENT_SIZE, mtimeMs: 0, ctimeMs: 0 };
+	}
+}
+
+function composeAuthoredRanges(
+	previous: AuthoredBytes,
+	next: Array<[number, number]>,
+	nextLineCount: number | undefined,
+): Array<[number, number]> {
+	// AuthoredBytes has no read-time line hashes, so a line-count change cannot
+	// safely remap the old range. Retire that scope and keep only the bytes the
+	// later write explicitly produced (#4210 F-4210-1).
+	const ranges =
+		previous.authoredLineCount !== undefined &&
+		nextLineCount === previous.authoredLineCount
+			? [...(previous.authoredRanges ?? []), ...next]
+			: next;
+	const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+	const merged: Array<[number, number]> = [];
+	for (const [start, end] of sorted) {
+		const last = merged.at(-1);
+		if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+		else merged.push([start, end]);
+	}
+	return merged;
+}
+
+function authoredRangeCovers(
+	authored: AuthoredBytes,
+	touchedLines?: [number, number],
+	editRanges?: [number, number][],
+): boolean {
+	if (authored.authoredRanges === undefined) return true;
+	const requested = editRanges ?? (touchedLines ? [touchedLines] : undefined);
+	return (
+		requested !== undefined &&
+		requested.every(([start, end]) =>
+			authored.authoredRanges!.some(
+				([authoredStart, authoredEnd]) =>
+					start >= authoredStart && end <= authoredEnd,
+			),
+		)
+	);
+}
+
+function isValidAuthoredRanges(
+	value: unknown,
+): value is Array<[number, number]> {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			(range) =>
+				Array.isArray(range) &&
+				range.length === 2 &&
+				Number.isFinite(range[0]) &&
+				Number.isFinite(range[1]),
+		)
+	);
+}
+
+/**
+ * Whether the disk still holds the authored bytes. An unchanged stat skips the
+ * hash; a hash match refreshes the stat so the next check is cheap again.
+ */
+function authoredBytesIntact(
+	filePath: string,
+	authored: AuthoredBytes,
+): boolean {
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(filePath);
+	} catch {
+		return authored.size === ABSENT_SIZE;
+	}
+	if (
+		stat.size === authored.size &&
+		stat.mtimeMs === authored.mtimeMs &&
+		stat.ctimeMs === authored.ctimeMs
+	)
+		return true;
+	if (authored.hash === undefined || stat.size !== authored.size) return false;
+	try {
+		if (hashFileBytes(filePath) !== authored.hash) return false;
+	} catch {
+		return false;
+	}
+	authored.mtimeMs = stat.mtimeMs;
+	authored.ctimeMs = stat.ctimeMs;
+	return true;
+}
 const READ_GUARD_MAX_FILES = 256;
 /**
  * #1904 item 3: `enforceFileCap` bounds how many FILES the store holds, not how
@@ -301,8 +485,7 @@ function enforceRecordCapForFile(records: ReadRecord[]): RecordCapTrimResult {
 /**
  * #1904 class sweep: `this.edits` is the same shape as `this.reads` — a
  * per-file array that only ever grows. Its cap sits far above every consumer's
- * reach, so trimming is inert: `canTreatStalenessAsOwnPriorEdit` reads only the
- * last record, and `findRelocation`'s window saturates at
+ * reach, so trimming is inert: `findRelocation`'s window saturates at
  * RELOCATION_WINDOW_MAX / RELOCATION_WINDOW_PER_EDIT (20) applied edits. Only
  * `getStats`, a debug surface, sees the older records at all.
  */
@@ -310,6 +493,26 @@ const READ_GUARD_MAX_EDITS_PER_FILE = 256;
 // Unconsumed reads remain valid until edit or session end, but this high
 // sanity cap prevents a read-only session from growing without bound.
 const READ_GUARD_MAX_UNCONSUMED_FILES = 4096;
+/**
+ * #4187 R2-6: the authorship store's bound, the unconsumed-read cap above (an
+ * authorship is a zero-read edit's only evidence, as an unconsumed read is a
+ * read edit's). Every adopting start re-exports what it imported, so the
+ * store grows with each start otherwise. Retired entries go first, then the
+ * least recently credited.
+ */
+const READ_GUARD_MAX_AUTHORED_FILES = READ_GUARD_MAX_UNCONSUMED_FILES;
+/**
+ * #4187 R4-1: bounds on the per-call checked-path license
+ * ({@link ReadGuard.noteCheckedPaths}). One call's set is the paths its own
+ * `tool_call` pre-write check ran on: the widest producer is the observed net's
+ * directory universe (`OBSERVED_TARGET_DIR_MAX_ENTRIES`, 64 entries), and an
+ * LSP rename or an ast-grep apply names a handful of files. Calls are bounded
+ * too, oldest first: a license no record claimed while 16 later calls checked
+ * their own paths belongs to a call whose write never landed. Both caps fail
+ * closed — an unlicensed path ends an authorship instead of re-baselining it.
+ */
+const READ_GUARD_MAX_CHECKED_CALLS = 16;
+const READ_GUARD_MAX_CHECKED_PATHS_PER_CALL = 128;
 const READ_GUARD_IDLE_EVICT_MS_DEFAULT = 30 * 60_000;
 
 export function captureReadContentBinding(
@@ -444,13 +647,38 @@ function readRangeCoversLine(read: ReadRecord, lineNo: number): boolean {
 	);
 }
 
-function readEffectiveRangeCoversRange(
-	read: ReadRecord,
-	[startLine, endLine]: [number, number],
-): boolean {
-	return (
-		readRangeCoversLine(read, startLine) && readRangeCoversLine(read, endLine)
-	);
+/**
+ * The newest non-provisional read that DELIVERED `lineNo` (its effective
+ * range, never the `contextLines` zone): the agent's latest view of that line
+ * (#3522). A provisional record was never delivered, and a context-only read
+ * never showed the line again, so neither can stand for it. `reads` is in
+ * arrival order.
+ */
+function newestViewOfLine(
+	reads: readonly ReadRecord[],
+	lineNo: number,
+): ReadRecord | undefined {
+	for (let i = reads.length - 1; i >= 0; i -= 1) {
+		if (
+			reads[i].provisional !== true &&
+			readRangeCoversLine(reads[i], lineNo)
+		) {
+			return reads[i];
+		}
+	}
+	return undefined;
+}
+
+/** Hash `lines` as file lines `firstLine`, `firstLine + 1`, ... */
+function hashLines(
+	lines: readonly string[],
+	firstLine: number,
+): Record<number, string> | undefined {
+	const hashes: Record<number, string> = {};
+	lines.forEach((line, i) => {
+		hashes[firstLine + i] = lineContentHash(line);
+	});
+	return lines.length > 0 ? hashes : undefined;
 }
 
 function captureLineHashes(
@@ -461,15 +689,33 @@ function captureLineHashes(
 	if (limit <= 0 || limit > READ_HASH_MAX_LINES) return undefined;
 	try {
 		const lines = splitLines(fs.readFileSync(filePath, "utf-8"));
-		const hashes: Record<number, string> = {};
+		const start = Math.max(1, offset);
 		const end = Math.min(lines.length, offset + limit - 1);
-		for (let lineNo = Math.max(1, offset); lineNo <= end; lineNo++) {
-			hashes[lineNo] = lineContentHash(lines[lineNo - 1] ?? "");
-		}
-		return Object.keys(hashes).length > 0 ? hashes : undefined;
+		return hashLines(lines.slice(start - 1, end), start);
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * A read's evidence taken from text the conversation showed the agent (an
+ * attached autofix, the agent's own `newText`, a delivered read), not from
+ * the disk at record time (#3519, #3523, #3524). `text` starts at file line
+ * `offset`. `lineHashes` is undefined past the same READ_HASH_MAX_LINES bound
+ * a disk capture has.
+ */
+export function deliveredLineEvidence(
+	text: string,
+	offset: number,
+): { lineCount: number; lineHashes: Record<number, string> | undefined } {
+	const lines = splitLines(text);
+	return {
+		lineCount: lines.length,
+		lineHashes:
+			lines.length <= READ_HASH_MAX_LINES
+				? hashLines(lines, offset)
+				: undefined,
+	};
 }
 
 export function currentLinesMatchReadSnapshot(
@@ -543,14 +789,31 @@ export class ReadGuard {
 	private readonly exemptions = new Set<string>(); // One-time exemptions via /lens-allow-edit
 	private readonly pendingCreations = new Map<
 		string,
-		{ turnIndex: number; writeIndex: number }
+		{ turnIndex: number; writeIndex: number; toolCallId?: string }
 	>();
-	// Files that recordWritten() has fired on this session. Lets
-	// wasWrittenThisSession() return a deterministic answer for files the
-	// pi Write tool authored, independent of filesystem mtime granularity
-	// or clock skew (NFS, FAT32, etc.).
-	private readonly writtenThisSession = new Set<string>();
-	private readonly unchangedThisSession = new Set<string>();
+	// Files that recordWritten() has fired on this session: the only evidence
+	// of session authorship, independent of filesystem mtime granularity or
+	// clock skew (NFS, FAT32, etc.) and of other writers' mtimes (#3520).
+	// Each holds the content identity of the bytes the conversation last
+	// wrote; authorship ends (`retired`) when the disk's bytes differ (#4131).
+	private readonly writtenThisSession = new Map<string, AuthoredBytes>();
+	// #4187 R4-1: the paths each in-flight call's own `tool_call` pre-write
+	// check ran on, keyed by the call id (`noteCheckedPaths`). A write that
+	// carries no bytes of its own may re-baseline an authorship ONLY for a path
+	// in its own call's set, because the set a tool NAMES at `tool_call` can be
+	// narrower than the set it WRITES: a rename's importers, an ast-grep folder
+	// or its project default, a server-initiated `workspace/applyEdit` that has
+	// no call at all. Bounded by READ_GUARD_MAX_CHECKED_CALLS; session state,
+	// so it dies with the guard every session start replaces, and a branch move
+	// clears it with the authorship it licenses.
+	private readonly checkedPathsByCall = new Map<string, Set<string>>();
+	// Files whose write record idle-expired (#3520): `evictFile` drops the
+	// authorship with the rest of the file's state, and a later zero-read edit
+	// must say so instead of "you have not read" (false for a file the agent
+	// wrote). Insertion order is eviction order; a branch move clears it with
+	// the authorship it describes. Session-scoped like the guard: `/new` and
+	// `/fork` build a fresh one, and a `/reload` does not carry it.
+	private readonly expiredWrites = new BoundedSet<string>(READ_GUARD_MAX_FILES);
 	// Existence-independent index for hasKnownPath/forgetPath (#1668 review
 	// F1). `this.key()` (normalizeFilePath) branches on whether `filePath`
 	// currently exists on disk, on EVERY platform since #3098 — an existing
@@ -585,11 +848,22 @@ export class ReadGuard {
 	/** Running per-file record-cap trim totals for this session (#1913 F1). */
 	private readonly trimAccumulators = new Map<string, FileTrimStats>();
 	private readonly sessionId: string;
-	private readonly sessionStartMs: number;
+	/**
+	 * The scope whose branch epoch this guard reads (#3611). Every
+	 * `retainBranch` moves it (#3521). A deferred writer captures the epoch
+	 * before it awaits, and `recordWritten` refuses the write when a `/tree`
+	 * moved the conversation in between (catalog shape 22). A guard built
+	 * outside a coordinator owns a scope of its own.
+	 */
+	private readonly scope: SessionScope;
 
-	constructor(sessionId: string, config: Partial<ReadGuardConfig> = {}) {
+	constructor(
+		sessionId: string,
+		config: Partial<ReadGuardConfig> = {},
+		scope: SessionScope = beginScope({ role: "primary" }),
+	) {
+		this.scope = scope;
 		this.sessionId = sessionId;
-		this.sessionStartMs = Date.now();
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.fileTime = createFileTime(sessionId);
 	}
@@ -606,6 +880,16 @@ export class ReadGuard {
 	 */
 	private key(filePath: string): string {
 		return normalizeFilePath(filePath);
+	}
+
+	/**
+	 * License keys compare paths independently resolved by the tool_call and
+	 * the writer. Unlike the general map key, this identity must collapse a
+	 * symlink spelling to the file it names; missing files retain an absolute
+	 * resolved fallback so the comparison still fails closed.
+	 */
+	private licenseKey(filePath: string): string {
+		return normalizeFilePath(realpathOrResolve(filePath));
 	}
 
 	private idleEvictMs(): number {
@@ -641,14 +925,16 @@ export class ReadGuard {
 	 * on the rising edge, so a file evicted repeatedly across a session can't
 	 * flood the log.
 	 *
-	 * `idle-timeout` is deliberately excluded from both the ledger tally and
-	 * the log line (#1918 review F2): idle eviction is designed housekeeping,
-	 * not a fault signal — a read-only session that idles out N files is
-	 * healthy, ordinary behavior, and N is unbounded (every distinct file path
-	 * touched that session is its own ledger subject). Recording it here would
-	 * grow the ledger's tally map without bound and spam `pilens_health` in
-	 * every healthy session, unlike the other three reasons, which are rare by
-	 * construction (only real pressure or an explicit delete reaches them).
+	 * `idle-timeout` is deliberately excluded from the ledger tally and, for a
+	 * file that carried no write record, from the log line (#1918 review F2):
+	 * idle eviction is designed housekeeping, not a fault signal — N is
+	 * unbounded (every distinct file path touched that session is its own
+	 * ledger subject). Recording it here would grow the ledger's tally map
+	 * without bound and spam `pilens_health` in every healthy session, unlike
+	 * the other three reasons, which are rare by construction (only real
+	 * pressure or an explicit delete reaches them). The one exception is a
+	 * dropped write record (#3520): it changes the next edit's verdict, so
+	 * {@link noteExpiredWrite} logs it once per file, outside the ledger.
 	 */
 	private evictFile(filePath: string, reason: FileEvictionReason): void {
 		this.clearFileTimer(filePath);
@@ -656,13 +942,16 @@ export class ReadGuard {
 		this.edits.delete(filePath);
 		this.fileLastUsed.delete(filePath);
 		this.consumedReadFiles.delete(filePath);
-		this.writtenThisSession.delete(filePath);
+		const droppedAuthorship = this.writtenThisSession.delete(filePath);
 		// #1668 review F1: prune the reverse-pointing knownPathIndex entries
 		// too, so it never outlives the record it points at.
 		for (const [syntacticKey, stored] of this.knownPathIndex) {
 			if (stored === filePath) this.knownPathIndex.delete(syntacticKey);
 		}
-		if (reason === "idle-timeout") return;
+		if (reason === "idle-timeout") {
+			if (droppedAuthorship) this.noteExpiredWrite(filePath);
+			return;
+		}
 		const isRisingEdge = incrementDegradationCount({
 			kind: "read-guard-file-evicted",
 			subject: filePath,
@@ -675,6 +964,63 @@ export class ReadGuard {
 				filePath,
 				metadata: { reason },
 			});
+		}
+	}
+
+	/**
+	 * #3520: remember that an idle eviction dropped this file's write record,
+	 * and log it once per file (the set is the once-only gate). The set holds
+	 * at most `READ_GUARD_MAX_FILES` files, oldest dropped first.
+	 */
+	private noteExpiredWrite(
+		filePath: string,
+		reason: "idle-timeout" | "authorship-cap" = "idle-timeout",
+	): void {
+		if (this.expiredWrites.has(filePath)) return;
+		this.expiredWrites.add(filePath);
+		if (reason === "authorship-cap") {
+			const isRisingEdge = incrementDegradationCount({
+				kind: "read-guard-authorship-cap",
+				subject: this.sessionId,
+				reason: "authorship cap evicted a live write record",
+			});
+			if (isRisingEdge) {
+				logReadGuardEvent({
+					event: "read_file_evicted",
+					sessionId: this.sessionId,
+					filePath,
+					metadata: { reason, authorshipDropped: true },
+				});
+			}
+			return;
+		}
+		logReadGuardEvent({
+			event: "read_file_evicted",
+			sessionId: this.sessionId,
+			filePath,
+			metadata: { reason, authorshipDropped: true },
+		});
+	}
+
+	/**
+	 * #4187 R2-6: hold `writtenThisSession` at READ_GUARD_MAX_AUTHORED_FILES.
+	 * A retired entry blocks like no entry, so it goes first; a live one is
+	 * dropped least recently credited first, as an expired write (#3520).
+	 */
+	private enforceAuthorshipCap(): void {
+		let excess = this.writtenThisSession.size - READ_GUARD_MAX_AUTHORED_FILES;
+		if (excess <= 0) return;
+		for (const [filePath, authored] of this.writtenThisSession) {
+			if (excess <= 0) return;
+			if (!authored.retired) continue;
+			this.writtenThisSession.delete(filePath);
+			excess -= 1;
+		}
+		for (const filePath of this.writtenThisSession.keys()) {
+			if (excess <= 0) return;
+			this.writtenThisSession.delete(filePath);
+			this.noteExpiredWrite(filePath, "authorship-cap");
+			excess -= 1;
 		}
 	}
 
@@ -732,23 +1078,78 @@ export class ReadGuard {
 	// --- Public API ---
 
 	/**
+	 * Drop every provisional native-read capture still held. The run boundary's
+	 * backstop (`handleAgentEnd`): a call's capture is released when the call
+	 * ends ({@link dropProvisionalReadByCall}), and only a run that dies
+	 * between a read's tool_call and its tool_execution_end leaves one here
+	 * (#4185 R2-3, round 4). Returns how many it dropped.
+	 */
+	dropProvisionalReads(): number {
+		let dropped = 0;
+		for (const [filePath, records] of this.reads) {
+			const kept = records.filter((record) => {
+				if (!record.provisional) return true;
+				dropped += 1;
+				return false;
+			});
+			if (kept.length === 0) this.reads.delete(filePath);
+			else if (kept.length !== records.length) this.reads.set(filePath, kept);
+		}
+		return dropped;
+	}
+
+	/**
+	 * Drop the tool_call capture of the read call `toolCallId` (the record
+	 * whose `source` is `native-read:<call>:provisional`), whatever path
+	 * spelling the call's result carries. The delivered record supersedes it
+	 * ({@link recordRead}); a call that ended in error, failed by the host or
+	 * blocked by a later extension, releases it at tool_execution_end
+	 * (`handleToolExecutionEnd`), because alone it satisfied the zero-read
+	 * check for an oldText edit of lines the agent never saw (#4185 rounds 2
+	 * to 4; `formal/read-guard` FailedReadLive, BlockedReadLive). Keyed by
+	 * the call's own identity: a nested call's is unique where its parent's,
+	 * the transcript identity a record carries, is shared by every read a
+	 * script makes. Returns whether a capture was found.
+	 */
+	dropProvisionalReadByCall(toolCallId: string): boolean {
+		for (const [filePath, records] of this.reads) {
+			const source = `native-read:${toolCallId}:provisional`;
+			const index = records.findIndex((record) => record.source === source);
+			if (index < 0) continue;
+			records.splice(index, 1);
+			if (records.length === 0) this.reads.delete(filePath);
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Record that a file was read.
 	 * Call this from the tool_call handler after any LSP expansion.
 	 */
 	recordRead(
 		record: ReadRecord,
-		opts?: { supersedes?: { toolCallId: string } },
+		opts?: {
+			supersedes?: { toolCallId: string };
+			/**
+			 * False when the record's evidence is text the conversation showed
+			 * the agent rather than the disk now, so the FileTime stamp is left
+			 * to whatever last observed the disk (#3519, #3523, #3524).
+			 */
+			stampFileTime?: boolean;
+			/**
+			 * False when the caller deliberately supplies or omits line evidence,
+			 * so the guard must not fall back to a disk hash capture. #3654 D5: a
+			 * coverage-only bridge read credits its range with no hashes and
+			 * performs zero disk reads. Default true preserves every existing
+			 * caller (native reads, search reads, the v1 read shim).
+			 */
+			captureLineHashes?: boolean;
+		},
 	): void {
 		const filePath = this.key(record.filePath);
-		if (opts?.supersedes) {
-			const records = this.reads.get(filePath);
-			const provisionalSource = `native-read:${opts.supersedes.toolCallId}:provisional`;
-			const provisionalIndex = records?.findIndex(
-				(candidate) => candidate.source === provisionalSource,
-			);
-			if (provisionalIndex !== undefined && provisionalIndex >= 0)
-				records!.splice(provisionalIndex, 1);
-		}
+		if (opts?.supersedes)
+			this.dropProvisionalReadByCall(opts.supersedes.toolCallId);
 		// #1668 review F1: index by the existence-independent syntactic key
 		// while the file is (presumably) still on disk, so a later
 		// hasKnownPath/forgetPath lookup after an external delete can still
@@ -762,11 +1163,13 @@ export class ReadGuard {
 			filePath,
 			lineHashes:
 				record.lineHashes ??
-				captureLineHashes(
-					filePath,
-					record.effectiveOffset,
-					record.effectiveLimit,
-				),
+				(opts?.captureLineHashes === false
+					? undefined
+					: captureLineHashes(
+							filePath,
+							record.effectiveOffset,
+							record.effectiveLimit,
+						)),
 		};
 		const arr = this.reads.get(storedRecord.filePath) ?? [];
 		this.consumedReadFiles.delete(storedRecord.filePath);
@@ -877,7 +1280,135 @@ export class ReadGuard {
 		}
 
 		// Also update FileTime stamp for this file
-		this.fileTime.read(storedRecord.filePath);
+		if (opts?.stampFileTime !== false)
+			this.fileTime.read(storedRecord.filePath);
+	}
+
+	/**
+	 * #4131: end the file's authorship when its bytes are no longer the ones the
+	 * conversation last wrote. Called by every guard decision that relies on
+	 * authorship: the zero-read edit check, and the start of a write that
+	 * carries no bytes of its own (a recognized bash write's tool_call, the
+	 * agent_end drain), which would otherwise re-baseline over the other
+	 * writer's bytes. Returns true when it ended the authorship here.
+	 */
+	retireChangedAuthorship(rawFilePath: string): boolean {
+		return this.retireIfChanged(this.key(rawFilePath));
+	}
+
+	/**
+	 * #4187 R4-1: record the paths THIS call's `tool_call` pre-write check ran
+	 * on, so the call's own bytes-less write may advance exactly those and no
+	 * other path it changes. The `tool_call` handler calls it beside
+	 * {@link retireChangedAuthorship}: the licensed set IS the checked set.
+	 *
+	 * A call id both sides normalize with `sanitizeCorrelationId`, so a producer
+	 * passes the host's raw id. No id (a server-initiated `workspace/applyEdit`,
+	 * a drain) licenses nothing. Both caps fail closed: a path past
+	 * READ_GUARD_MAX_CHECKED_PATHS_PER_CALL, or one named by a call evicted
+	 * past READ_GUARD_MAX_CHECKED_CALLS, ends an authorship instead of
+	 * re-baselining it, which costs a read and never vouches for a byte the
+	 * conversation did not see.
+	 */
+	noteCheckedPaths(
+		rawToolCallId: string | undefined,
+		rawPaths: readonly string[],
+	): void {
+		const toolCallId = sanitizeCorrelationId(rawToolCallId);
+		if (toolCallId === undefined || rawPaths.length === 0) return;
+		let checked = this.checkedPathsByCall.get(toolCallId);
+		if (!checked) {
+			checked = new Set<string>();
+			this.checkedPathsByCall.set(toolCallId, checked);
+			while (this.checkedPathsByCall.size > READ_GUARD_MAX_CHECKED_CALLS) {
+				const oldest = this.checkedPathsByCall.keys().next();
+				if (oldest.done === true) break;
+				this.checkedPathsByCall.delete(oldest.value);
+			}
+		}
+		for (const rawPath of rawPaths) {
+			if (checked.size >= READ_GUARD_MAX_CHECKED_PATHS_PER_CALL) return;
+			checked.add(this.licenseKey(rawPath));
+		}
+	}
+
+	/**
+	 * Consume whether `toolCallId`'s own `tool_call` licensed this path
+	 * ({@link noteCheckedPaths}). A `(call,path)` license is single-use: a
+	 * settled call id must not re-baseline a later writer's bytes.
+	 */
+	private consumeCheckedAtCall(
+		toolCallId: string | undefined,
+		filePath: string,
+	): boolean {
+		const callId = sanitizeCorrelationId(toolCallId);
+		if (callId === undefined) return false;
+		const checked = this.checkedPathsByCall.get(callId);
+		const licensedPath = this.licenseKey(filePath);
+		if (checked?.has(licensedPath) !== true) return false;
+		checked.delete(licensedPath);
+		if (checked.size === 0) this.checkedPathsByCall.delete(callId);
+		return true;
+	}
+
+	/**
+	 * {@link retireChangedAuthorship} on a key. `writer` names a write that
+	 * ended it after the fact (a `bridge` write, which no pre-write check
+	 * guarded), so the record tells the two triggers apart.
+	 */
+	private retireIfChanged(filePath: string, writer?: "bridge"): boolean {
+		const authored = this.writtenThisSession.get(filePath);
+		if (
+			!authored ||
+			authored.retired ||
+			authoredBytesIntact(filePath, authored)
+		)
+			return false;
+		authored.retired = true;
+		// Once per authorship episode: a retired entry is never retired again.
+		const isRisingEdge = incrementDegradationCount({
+			kind: "read-guard-authorship-retired",
+			subject: filePath,
+			reason:
+				"another writer changed the bytes the conversation wrote; the next edit needs a read",
+		});
+		if (isRisingEdge)
+			logReadGuardEvent({
+				event: "authorship_retired",
+				sessionId: this.sessionId,
+				filePath,
+				metadata: {
+					authoredSize: authored.size,
+					hashed: authored.hash !== undefined,
+					...(writer !== undefined && { writer }),
+					...(authored.toolCallId !== undefined && {
+						toolCallId: authored.toolCallId,
+					}),
+				},
+			});
+		return true;
+	}
+
+	/**
+	 * #3525: whether the disk may hold bytes no read or own write accounts
+	 * for: FileTime moved since its stamp, or there is none. An edit that
+	 * passes `checkEdit` then did so on other evidence (line hashes, a
+	 * resolved oldText), and its own write must not re-stamp FileTime.
+	 */
+	fileTimeMoved(filePath: string): boolean {
+		return this.fileTime.hasChanged(this.key(filePath));
+	}
+
+	/**
+	 * #3524: whether another write moved the file after its last FileTime
+	 * stamp (a native read's tool_call takes one). False when there is no
+	 * stamp at all: nothing says when the delivered bytes were read.
+	 */
+	diskMovedSinceStamp(filePath: string): boolean {
+		const key = this.key(filePath);
+		return (
+			this.fileTime.get(key) !== undefined && this.fileTime.hasChanged(key)
+		);
 	}
 
 	/**
@@ -899,6 +1430,7 @@ export class ReadGuard {
 		symbol: { name: string; kind: string; startLine: number; endLine: number },
 		turnIndex: number,
 		writeIndex: number,
+		toolCallId?: string,
 	): void {
 		const span = Math.max(1, symbol.endLine - symbol.startLine + 1);
 		this.recordRead({
@@ -917,6 +1449,7 @@ export class ReadGuard {
 			turnIndex,
 			writeIndex,
 			timestamp: Date.now(),
+			...(toolCallId !== undefined && { toolCallId }),
 		});
 	}
 
@@ -964,27 +1497,64 @@ export class ReadGuard {
 		// 1. Zero-read check
 		const fileReads = this.reads.get(filePath);
 		if (!fileReads || fileReads.length === 0) {
-			// If the file was written after this session started, the agent authored
-			// it in this session (via Write or any other mechanism). Allow the edit —
-			// a synthetic read would have been injected for Write tool calls, but
-			// this catches cases where the write bypassed the hook or the session
-			// restarted between write and edit.
-			if (this.wasWrittenThisSession(filePath)) {
-				this.injectCreationRead(filePath, 0, 0);
+			// Only a write pi-lens observed (recordWritten, from any producer) is
+			// the agent's own; a newer mtime is any writer's (#3520). It stays the
+			// agent's own while the disk holds the bytes it wrote (#4131).
+			this.retireChangedAuthorship(filePath);
+			if (this.writtenThisSession.get(filePath)?.retired) {
+				const verdict = this.blockOrWarn(
+					"authorship-retired",
+					`🔄 RETRYABLE — File modified since your write: \`${filePath}\` no longer holds the bytes this conversation wrote. Read it first, then retry: \`read path="${filePath}"\`.`,
+					undefined,
+					effectiveMode,
+				);
+				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+					reasonKind: "authorship_retired",
+				});
+				return verdict;
+			}
+			const authored = this.writtenThisSession.get(filePath);
+			if (authored && authoredRangeCovers(authored, touchedLines, editRanges)) {
+				// #4387: the bytes were just found intact, so the conversation
+				// holds every line. The authorship vouches from here through a
+				// whole-file read that names its write: a move keeps the read
+				// exactly when it keeps the authorship, and the own edit's
+				// one-line read cannot shadow the rest of the file. A range scope
+				// gets none: it would widen to the whole file (#4210).
+				if (authored.authoredRanges === undefined)
+					this.injectCreationRead(filePath, 0, 0, authored.toolCallId);
 				const verdict = this.allow();
 				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 					reasonKind: "session_authored",
 				});
 				return verdict;
 			}
+			if (authored) {
+				const verdict = this.blockOrWarn(
+					"authorship-range",
+					`🔄 RETRYABLE — Edit without read: this write only covered part of \`${filePath}\`; read the requested lines first, then retry.`,
+					undefined,
+					effectiveMode,
+				);
+				this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+					reasonKind: "authorship_range",
+				});
+				return verdict;
+			}
+			// #3520: an idle eviction dropped the agent's own write record, so
+			// "you have not read" would be false.
+			const writeRecordExpired = this.expiredWrites.has(filePath);
 			const verdict = this.blockOrWarn(
 				"zero-read",
-				`🔄 RETRYABLE — Edit without read: you have not read \`${filePath}\` in this conversation. Read it first, then retry: \`read path="${filePath}"\`.`,
+				writeRecordExpired
+					? `🔄 RETRYABLE — Edit without read: the earlier write record for \`${filePath}\` expired, so it needs a read again. Read it first, then retry: \`read path="${filePath}"\`.`
+					: `🔄 RETRYABLE — Edit without read: you have not read \`${filePath}\` in this conversation. Read it first, then retry: \`read path="${filePath}"\`.`,
 				undefined,
 				effectiveMode,
 			);
 			this.recordVerdict(filePath, "edit", touchedLines, verdict, {
 				reasonKind: "zero_read",
+				...(writeRecordExpired ? { writeRecordExpired } : {}),
 			});
 			return verdict;
 		}
@@ -994,7 +1564,14 @@ export class ReadGuard {
 			.find((read) => read.contentBinding !== undefined);
 		if (
 			lastBoundRead?.contentBinding &&
-			!currentContentMatchesBinding(filePath, lastBoundRead.contentBinding)
+			!currentContentMatchesBinding(filePath, lastBoundRead.contentBinding) &&
+			!this.newerReadSupersedesBinding(
+				filePath,
+				fileReads,
+				lastBoundRead,
+				touchedLines,
+				editRanges,
+			)
 		) {
 			const verdict = this.blockOrWarn(
 				"file-modified",
@@ -1011,7 +1588,6 @@ export class ReadGuard {
 		}
 
 		// 2. FileTime check (actual staleness)
-		let ignoredOwnEditStaleness = false;
 		let ignoredHashStaleness = false;
 		let ignoredOldTextResolvedStaleness = false;
 		if (this.fileTime.hasChanged(filePath)) {
@@ -1022,10 +1598,6 @@ export class ReadGuard {
 				// and stronger than FileTime's coarse external-write signal, matching
 				// the skipSnapshotCheck exception at the later range-stale gate.
 				ignoredOldTextResolvedStaleness = true;
-			} else if (
-				this.canTreatStalenessAsOwnPriorEdit(filePath, lastRead.timestamp)
-			) {
-				ignoredOwnEditStaleness = true;
 			} else if (
 				this.canIgnoreStalenessByHashes(
 					filePath,
@@ -1068,11 +1640,6 @@ export class ReadGuard {
 
 		let viaSymbol = false;
 		for (const range of rangesToCheck) {
-			const snapshotValidation = this.validateRangeSnapshot(
-				filePath,
-				range,
-				!!options?.skipSnapshotCheck,
-			);
 			const coverage = this.checkCoverage(filePath, range);
 			if (!coverage.covered) {
 				const lastRead = fileReads[fileReads.length - 1];
@@ -1110,18 +1677,15 @@ export class ReadGuard {
 				});
 				return verdict;
 			}
+			// After the coverage gate, so the per-line check below only ever walks
+			// a range some read covers, never an arbitrary caller-supplied one.
+			const snapshotValidation = this.validateRangeSnapshot(
+				filePath,
+				range,
+				!!options?.skipSnapshotCheck,
+			);
 			if (snapshotValidation.shouldBlock && !options?.skipSnapshotCheck) {
 				const [editStart, editEnd] = range;
-				// Grace period: when the snapshot is stale because THIS session's own
-				// earlier edit shifted line numbers (ignoredOwnEditStaleness), and
-				// the agent read the file recently, downgrade to a warning rather
-				// than blocking. The agent has fresh context — they just don't
-				// know the exact new line numbers after the shift.
-				const RANGE_STALE_GRACE_MS = 60_000;
-				const lastRead = fileReads[fileReads.length - 1];
-				const graceActive =
-					ignoredOwnEditStaleness &&
-					Date.now() - lastRead.timestamp < RANGE_STALE_GRACE_MS;
 				// Content-verified relocation: if the lines the agent read have
 				// merely shifted (same content, new offset), tell them exactly where
 				// so they re-target in one turn. We hint rather than silently
@@ -1154,7 +1718,7 @@ export class ReadGuard {
 						},
 						...(relocation ? { relocation } : {}),
 					},
-					graceActive ? "warn" : effectiveMode,
+					effectiveMode,
 				);
 				// Offer auto-apply only for a single-range edit: we relocated exactly
 				// one range, so shifting it is the whole edit. A multi-range edit
@@ -1167,7 +1731,6 @@ export class ReadGuard {
 					reasonKind: "range_stale",
 					range,
 					mismatchedLines: snapshotValidation.mismatchedLines.slice(0, 20),
-					graceActive,
 					relocatedTo: relocation?.to ?? null,
 					relocationAutoApplyOffered: !!verdict.relocation,
 				});
@@ -1184,7 +1747,6 @@ export class ReadGuard {
 					? "symbol_coverage"
 					: "range_coverage",
 			viaSymbol,
-			ignoredOwnEditStaleness,
 			ignoredHashStaleness,
 			oldTextResolved: ignoredOldTextResolvedStaleness,
 		});
@@ -1244,7 +1806,7 @@ export class ReadGuard {
 	 */
 	getTrackedPaths(): string[] {
 		const tracked = new Set<string>(this.reads.keys());
-		for (const written of this.writtenThisSession) tracked.add(written);
+		for (const written of this.writtenThisSession.keys()) tracked.add(written);
 		return [...tracked];
 	}
 
@@ -1290,10 +1852,12 @@ export class ReadGuard {
 		filePath: string,
 		turnIndex: number,
 		writeIndex: number,
+		toolCallId?: string,
 	): void {
 		this.pendingCreations.set(normalizeEphemeralMapKey(filePath), {
 			turnIndex,
 			writeIndex,
+			...(toolCallId !== undefined && { toolCallId }),
 		});
 	}
 
@@ -1301,16 +1865,66 @@ export class ReadGuard {
 	 * Refresh the FileTime stamp after the model's own write lands on disk.
 	 * Call this from the tool_result handler so the next checkEdit on the same
 	 * file doesn't see "file_modified" caused by our own previous edit.
+	 * A deferred writer passes the `branchEpoch` it captured before awaiting;
+	 * a write from before a `/tree` is then not credited (#3521).
 	 */
-	recordWritten(rawFilePath: string): void {
+	recordWritten(
+		rawFilePath: string,
+		opts?: {
+			branchEpoch?: number;
+			/**
+			 * False when the written bytes are not the agent's own call's, or
+			 * when the disk already held bytes no read accounts for: the stamp
+			 * is left where it was, so the next edit is judged by line hashes
+			 * (#3525).
+			 */
+			stampFileTime?: boolean;
+			/** The bytes a `write` wrote: its creation read's evidence (#3524). */
+			writtenContent?: string;
+			/**
+			 * The write's transcript entry (#3603). A writer that names none (a
+			 * pi-lens writer) keeps the id of the write its bytes descend from.
+			 */
+			toolCallId?: string;
+			/** sha256 (hex) of the bytes on disk the caller already read for this write. */
+			contentHash?: string;
+			authoredRanges?: Array<[number, number]>;
+			authorship?: "partial" | "whole-file" | "unknown";
+			allowFirstAuthorship?: boolean;
+			/**
+			 * Whether this write may re-baseline an EXISTING authorship over the
+			 * bytes it landed. Omitted for a writer that checked this exact path
+			 * immediately before writing (a native edit's preflight, a drain's
+			 * retire). `true` for a bytes-less in-process tool write (an LSP edit,
+			 * an ast-grep apply, a diagnostic-mark suppress, an observed replay):
+			 * it advances only a path its own `tool_call` licensed through
+			 * {@link noteCheckedPaths}, so `toolCallId` decides (#4187 R4-1).
+			 * `false` for a write no pre-write check guarded at all (a mutation
+			 * bridge record, #4187 R2-4): it may create a first authorship, but
+			 * over an existing one it can only end it, since the bytes it wrote
+			 * around may be another writer's.
+			 */
+			advanceAuthorship?: boolean;
+		},
+	): void {
+		if (
+			opts?.branchEpoch !== undefined &&
+			opts.branchEpoch !== this.currentBranchEpoch
+		) {
+			incrementDegradationCount({
+				kind: "read-guard-write-after-branch-move",
+				subject: "recordWritten",
+				reason: `a write captured at branch epoch ${opts.branchEpoch} landed at ${this.currentBranchEpoch}; not credited to the new branch`,
+			});
+			return;
+		}
 		const filePath = this.key(rawFilePath);
-		this.unchangedThisSession.delete(filePath);
 		// #1668 review F1: index by the existence-independent syntactic key
 		// (see `knownPathIndex`) so a later hasKnownPath/forgetPath lookup
 		// after an external delete can still find this entry's real key.
 		this.knownPathIndex.set(normalizeEphemeralMapKey(rawFilePath), filePath);
-		this.fileTime.read(filePath);
-		this.writtenThisSession.add(filePath);
+		if (opts?.stampFileTime !== false) this.fileTime.read(filePath);
+		this.creditAuthorship(filePath, opts);
 		if (this.reads.has(filePath)) this.consumedReadFiles.add(filePath);
 		this.touchFile(filePath);
 		this.enforceFileCap();
@@ -1326,17 +1940,10 @@ export class ReadGuard {
 				filePath,
 				creation.turnIndex,
 				creation.writeIndex,
+				creation.toolCallId,
+				opts?.writtenContent,
 			);
 		}
-	}
-
-	/** Record that a recognized mutation had complete evidence but changed no bytes. */
-	recordUnchanged(rawFilePath: string): void {
-		const filePath = this.key(rawFilePath);
-		// A no-op command is scoped to this command. It must not erase a
-		// confirmed Write from earlier in the session.
-		if (!this.writtenThisSession.has(filePath))
-			this.unchangedThisSession.add(filePath);
 	}
 
 	/**
@@ -1415,6 +2022,21 @@ export class ReadGuard {
 	}
 
 	/**
+	 * Whether the current bytes still match the newest full-content read binding.
+	 * Undefined means this file has no full-content binding to compare; callers
+	 * must preserve their existing uncertainty wording in that case.
+	 */
+	contentMatchesLastRead(filePath: string): boolean | undefined {
+		const reads = this.getReadHistory(filePath);
+		const binding = [...reads]
+			.reverse()
+			.find((read) => read.contentBinding?.fullFile)?.contentBinding;
+		return binding === undefined
+			? undefined
+			: currentContentMatchesBinding(filePath, binding);
+	}
+
+	/**
 	 * Session-lifetime record-cap trim totals for a file (#1913 review F1).
 	 * `recordRead` only writes ONE `read_cap_trimmed` read-guard.log line per
 	 * file per session (on the first trim), so this is the running-totals
@@ -1446,57 +2068,199 @@ export class ReadGuard {
 	}
 
 	/**
-	 * Rehydrate a persisted read-set (#1041) into this (fresh, post-resume)
-	 * guard, with mandatory staleness reconciliation: each read is re-verified
-	 * against the CURRENT on-disk content via its recorded `lineHashes`, and any
-	 * read whose file changed (or no longer exists, or that carries no verifiable
-	 * hashes) is DROPPED. A rehydrated read must never mask a real staleness — a
-	 * resume must not let the agent edit a file that changed on disk while it
-	 * believed it held a fresh read. Kept reads are replayed through
-	 * {@link recordRead}, which re-keys through {@link key} (idempotent — the
-	 * exported keys are already normalized) and re-stamps FileTime so the next
-	 * `checkEdit` sees a consistent baseline. Version-guarded and null-safe:
-	 * `undefined` / a mismatched version / a missing field loads as "no prior
-	 * reads". Returns a count of imported vs dropped reads for logging.
+	 * The files this session authored (#3612, D5): `writtenThisSession`, which
+	 * the zero-read check reads, each with the content identity and transcript
+	 * id of its write (#4131, #3603).
 	 */
-	importState(state: PersistedReadGuardState | undefined): {
-		imported: number;
+	exportAuthorship(): PersistedReadGuardAuthorship {
+		return {
+			// A released reader treats every `written` path as authored, so a
+			// retired one is carried in `entries` only.
+			written: [...this.writtenThisSession].flatMap(([filePath, authored]) =>
+				authored.retired ? [] : [filePath],
+			),
+			entries: [...this.writtenThisSession].map(([filePath, authored]) => ({
+				filePath,
+				...authored,
+			})),
+		};
+	}
+
+	/**
+	 * Restore {@link exportAuthorship}'s output for the branch this session
+	 * starts on (#3603): the {@link importBranch} rule, an entry is imported
+	 * iff its write's `toolCallId` is in `onBranch`. Its content identity
+	 * comes with it, so bytes another writer changed meanwhile end it at the
+	 * next check. A released writer's row (#3612: `written` paths only, maybe a
+	 * `sessionStartMs`) names no write, so it imports nothing. Null-safe on a
+	 * malformed payload; never throws.
+	 */
+	importAuthorship(
+		state: unknown,
+		onBranch: ReadonlySet<string>,
+	): { imported: number; dropped: number } {
+		const result = { imported: 0, dropped: 0 };
+		const authorship = state as Partial<PersistedReadGuardAuthorship> | null;
+		const entries = Array.isArray(authorship?.entries)
+			? authorship.entries
+			: [];
+		const withEntry = new Set<string>();
+		for (const entry of entries) {
+			const candidate = entry as Partial<{ filePath: string } & AuthoredBytes>;
+			if (typeof candidate?.filePath !== "string") continue;
+			withEntry.add(candidate.filePath);
+			if (
+				typeof candidate.toolCallId !== "string" ||
+				!onBranch.has(candidate.toolCallId) ||
+				typeof candidate.size !== "number" ||
+				typeof candidate.mtimeMs !== "number" ||
+				typeof candidate.ctimeMs !== "number" ||
+				(candidate.hash !== undefined && typeof candidate.hash !== "string") ||
+				(candidate.retired !== undefined && candidate.retired !== true) ||
+				(candidate.authoredRanges !== undefined &&
+					!isValidAuthoredRanges(candidate.authoredRanges)) ||
+				(candidate.authoredLineCount !== undefined &&
+					typeof candidate.authoredLineCount !== "number")
+			) {
+				result.dropped += 1;
+				continue;
+			}
+			const filePath = this.key(candidate.filePath);
+			this.knownPathIndex.set(
+				normalizeEphemeralMapKey(candidate.filePath),
+				filePath,
+			);
+			this.writtenThisSession.set(filePath, {
+				size: candidate.size,
+				mtimeMs: candidate.mtimeMs,
+				ctimeMs: candidate.ctimeMs,
+				...(candidate.hash !== undefined && { hash: candidate.hash }),
+				toolCallId: candidate.toolCallId,
+				...(candidate.retired === true && { retired: true as const }),
+				...(candidate.authoredRanges !== undefined && {
+					authoredRanges: candidate.authoredRanges,
+				}),
+				...(candidate.authoredLineCount !== undefined && {
+					authoredLineCount: candidate.authoredLineCount,
+				}),
+			});
+			result.imported += 1;
+		}
+		this.enforceAuthorshipCap();
+		if (Array.isArray(authorship?.written))
+			for (const filePath of authorship.written)
+				if (typeof filePath === "string" && !withEntry.has(filePath))
+					result.dropped += 1;
+		return result;
+	}
+
+	/**
+	 * Keep exactly the reads the conversation still shows the agent, after it
+	 * moved to another branch in this activation (`/tree`, #3521).
+	 *
+	 * A record stays, whole, when its `toolCallId` is in `onBranch` (the
+	 * `toolResult`s on the new branch); every other record is deleted. Nothing
+	 * is re-verified or re-stamped here: the FileTime stamps are cleared, so
+	 * each kept record must pass the per-line hash check against disk at the
+	 * next edit. A stamp taken on the abandoned branch would otherwise vouch
+	 * for bytes this branch never showed. Authorship follows the same rule
+	 * (#3603): it stays, retired or not, iff the write it came from is on the
+	 * branch, and its content identity still decides. Edits, idle-expiry
+	 * marks and pending creations came from the old branch, so they go.
+	 */
+	retainBranch(onBranch: ReadonlySet<string>): {
+		kept: number;
 		dropped: number;
 	} {
+		const result = { kept: 0, dropped: 0 };
+		for (const [filePath, records] of this.reads) {
+			const kept: ReadRecord[] = [];
+			for (const read of records)
+				if (read.toolCallId !== undefined && onBranch.has(read.toolCallId))
+					kept.push(read);
+			result.kept += kept.length;
+			result.dropped += records.length - kept.length;
+			if (kept.length > 0) {
+				this.reads.set(filePath, kept);
+				continue;
+			}
+			this.reads.delete(filePath);
+		}
+		for (const [filePath, authored] of this.writtenThisSession)
+			if (
+				authored.toolCallId === undefined ||
+				!onBranch.has(authored.toolCallId)
+			)
+				this.writtenThisSession.delete(filePath);
+		this.edits.clear();
+		this.expiredWrites.clear();
+		this.pendingCreations.clear();
+		// #4187 R4-1: a license belongs to a call of the branch that moved. An
+		// in-flight write that still lands is fenced by its own branch epoch;
+		// dropping the license makes the unfenced one fail closed.
+		this.checkedPathsByCall.clear();
+		this.fileTime.clear();
+		moveBranch(this.scope);
+		return result;
+	}
+
+	/** The epoch a deferred writer captures before it awaits (#3521). */
+	get currentBranchEpoch(): number {
+		return this.scope.branchEpoch();
+	}
+
+	/**
+	 * #3676: which guard lifetime {@link currentBranchEpoch} counts in. The epoch
+	 * restarts at 0 in every new guard (`/fork`, `/new`, a resume), so a stamp
+	 * that outlives its guard, in a cache file for instance, carries this beside
+	 * the epoch. The scope ticket is drawn from a per-process counter that starts
+	 * at 1 in every process, so the pid is part of the key.
+	 */
+	get lineageKey(): string {
+		return `${process.pid}:${this.scope.scopeId}`;
+	}
+
+	/**
+	 * Load a persisted read-set (#1041) for the branch this session starts on
+	 * (#3521): a resume, `pi --fork`, or the fork/clone hand-off. The same rule
+	 * as {@link retainBranch}: a record is imported, whole, only when its
+	 * `toolCallId` is in `onBranch`, and without a FileTime stamp, so the
+	 * per-line hash check decides each edit against the current disk. The
+	 * guard is fresh here (`resetForSession`), so there is no older
+	 * conversation state to clear. A
+	 * record for a file that no longer exists is dropped. Version-guarded and
+	 * null-safe: `undefined`, a version-1 sidecar (no ids), or a malformed
+	 * payload loads as no reads and never throws — a throw here would abort
+	 * the whole session_start rehydration.
+	 */
+	importBranch(
+		state: PersistedReadGuardState | undefined,
+		onBranch: ReadonlySet<string>,
+	): { imported: number; dropped: number } {
 		const result = { imported: 0, dropped: 0 };
 		if (!state || state.version !== READ_GUARD_STATE_VERSION) return result;
-		// A corrupt/hand-edited sidecar must degrade to "no prior reads", never
-		// throw: loadSessionState validates only version/widget, so a malformed
-		// `reads` reaches here. If importState threw, the session_start try/catch
-		// would abort the ENTIRE rehydration (incl. widget + mountLensWidget)
-		// rather than just skipping the read-set.
 		if (!Array.isArray(state.reads)) return result;
 		for (const entry of state.reads) {
-			// Skip anything that isn't a well-formed [key, records] tuple.
 			if (!Array.isArray(entry) || entry.length !== 2) continue;
 			const [rawPath, records] = entry;
 			if (typeof rawPath !== "string") continue;
 			if (!Array.isArray(records) || records.length === 0) continue;
 			const filePath = this.key(rawPath);
-			let lines: string[];
-			try {
-				lines = splitLines(fs.readFileSync(filePath, "utf-8"));
-			} catch {
-				// File gone since it was read → drop every read for it.
-				result.dropped += records.length;
-				continue;
-			}
-			for (const record of records) {
-				const rehydrated: ReadRecord = { ...record, filePath };
-				// readHashesStillMatch returns false when the recorded hashes no
-				// longer match disk OR when the read captured no hashes — both
-				// unverifiable, so both drop (safety over convenience).
-				if (this.readHashesStillMatch(rehydrated, lines)) {
-					this.recordRead(rehydrated);
-					result.imported += 1;
-				} else {
+			const exists = fs.existsSync(filePath);
+			for (const read of records) {
+				const id = (read as Partial<ReadRecord> | undefined)?.toolCallId;
+				if (!exists || typeof id !== "string" || !onBranch.has(id)) {
 					result.dropped += 1;
+					continue;
 				}
+				// `?? {}`: a record without hashes must not be re-hashed from
+				// today's disk by recordRead; that would vouch for bytes written
+				// after the conversation last saw the file.
+				this.recordRead(
+					{ ...read, filePath, lineHashes: read.lineHashes ?? {} },
+					{ stampFileTime: false },
+				);
+				result.imported += 1;
 			}
 		}
 		return result;
@@ -1513,17 +2277,145 @@ export class ReadGuard {
 
 	// --- Private helpers ---
 
+	/**
+	 * #4187 R4-1: whether a write may re-baseline an EXISTING authorship over
+	 * the bytes it just landed. One rule, three caller classes:
+	 *
+	 * - `advanceAuthorship` omitted — the caller checked this exact path
+	 *   immediately before writing (a native edit's preflight, a drain's
+	 *   `retireChangedAuthorshipBeforeDrain`), so the only unaccounted bytes
+	 *   are its own. Advance.
+	 * - `true` — a bytes-less in-process tool write (an LSP edit, an ast-grep
+	 *   apply, a diagnostic-mark suppress, an observed replay). Advance only a
+	 *   path its OWN `tool_call` checked ({@link noteCheckedPaths}): the set a
+	 *   tool names can be narrower than the set it writes, and a path outside
+	 *   it ends the authorship instead.
+	 * - `false` — a record with no pre-write check at all (a co-process
+	 *   producer, the settled sweep). Never advance.
+	 *
+	 * A path with no entry is a first credit only when the writer supplies
+	 * evidence for it. Partial bridge credits retain their reported range;
+	 * settled-sweep drift supplies no such evidence (#4210).
+	 */
+	private mayAdvanceAuthorship(
+		filePath: string,
+		opts: { toolCallId?: string; advanceAuthorship?: boolean } | undefined,
+	): boolean {
+		if (opts?.advanceAuthorship === undefined) return true;
+		if (opts.advanceAuthorship !== true) return false;
+		return this.consumeCheckedAtCall(opts.toolCallId, filePath);
+	}
+
+	/**
+	 * #4131: record the content identity of the bytes `recordWritten` just
+	 * credited. A retired authorship is never resumed (see
+	 * `AuthoredBytes.retired`).
+	 */
+	private creditAuthorship(
+		filePath: string,
+		opts:
+			| {
+					toolCallId?: string;
+					contentHash?: string;
+					advanceAuthorship?: boolean;
+					authoredRanges?: Array<[number, number]>;
+					authorship?: "partial" | "whole-file" | "unknown";
+					allowFirstAuthorship?: boolean;
+			  }
+			| undefined,
+	): void {
+		const existing = this.writtenThisSession.get(filePath);
+		if (!existing && opts?.allowFirstAuthorship === false) return;
+		if (existing?.retired) return;
+		if (existing && !this.mayAdvanceAuthorship(filePath, opts)) {
+			this.retireIfChanged(filePath, "bridge");
+			return;
+		}
+		// F-4210-2: an UNKNOWN range is no license of its own: no first credit.
+		if (opts?.authorship === "unknown" && !existing) return;
+		// #4387: a scope covers a line only while the conversation holds that
+		// line's bytes, or while a read that a move keeps with the authorship
+		// bounds the file. So the scope after a credit is what the credit holds
+		// (a positional edit: its produced lines; any other credit: nothing) plus
+		// what it may keep. A native write holds the whole file through its
+		// creation read, which a move keeps with the authorship, so its scope is
+		// never consulted. A credit that names the lines it changed keeps the old
+		// scope. An UNKNOWN credit absorbs bytes no check covered, so it keeps
+		// the scope only while a read that names a call bounds it after a move
+		// (S12, S13). No credit widens a scope past the lines it holds (S14 to
+		// S17).
+		const keeps =
+			opts?.authorship !== "unknown" ||
+			(this.reads
+				.get(filePath)
+				?.some((read) => read.toolCallId !== undefined) ??
+				false);
+		const nextRanges = !existing
+			? opts?.authoredRanges
+			: keeps && existing.authoredRanges === undefined
+				? undefined
+				: (opts?.authoredRanges ?? []);
+		const observed = observeAuthoredBytes(
+			filePath,
+			opts?.contentHash,
+			nextRanges,
+		);
+		const { authoredRanges: _observedRanges, ...observedWithoutRanges } =
+			observed;
+		const composedRanges =
+			nextRanges !== undefined &&
+			keeps &&
+			existing?.authoredRanges !== undefined
+				? composeAuthoredRanges(
+						existing,
+						nextRanges,
+						observed.authoredLineCount,
+					)
+				: nextRanges;
+		const toolCallId = opts?.toolCallId ?? existing?.toolCallId;
+		// Re-inserted, so the map's order is credit order for the cap.
+		this.writtenThisSession.delete(filePath);
+		this.writtenThisSession.set(filePath, {
+			...observedWithoutRanges,
+			...(composedRanges !== undefined
+				? {
+						authoredRanges: composedRanges,
+						...(observed.authoredLineCount !== undefined && {
+							authoredLineCount: observed.authoredLineCount,
+						}),
+					}
+				: {}),
+			...(toolCallId !== undefined && { toolCallId }),
+		});
+		this.enforceAuthorshipCap();
+	}
+
+	/**
+	 * `writtenContent`, when the write's bytes are known, is the agent's view
+	 * of the file: hashed from it, not from a disk another writer may have
+	 * moved before this handler ran (#3524). Without it (the `session_authored`
+	 * path, #3520) the disk is all there is.
+	 */
 	private injectCreationRead(
 		filePath: string,
 		turnIndex: number,
 		writeIndex: number,
+		toolCallId?: string,
+		writtenContent?: string,
 	): void {
-		let lineCount = 0;
+		let evidence: ReturnType<typeof deliveredLineEvidence>;
 		try {
-			lineCount = splitLines(fs.readFileSync(filePath, "utf-8")).length;
+			evidence =
+				writtenContent !== undefined
+					? deliveredLineEvidence(writtenContent, 1)
+					: {
+							lineCount: splitLines(fs.readFileSync(filePath, "utf-8")).length,
+							lineHashes: undefined,
+						};
 		} catch {
 			return;
 		}
+		const { lineCount, lineHashes } = evidence;
 		if (lineCount === 0) return;
 		this.recordRead({
 			filePath,
@@ -1532,36 +2424,12 @@ export class ReadGuard {
 			effectiveOffset: 1,
 			effectiveLimit: lineCount,
 			expandedByLsp: false,
+			...(lineHashes && { lineHashes }),
 			turnIndex,
 			writeIndex,
 			timestamp: Date.now(),
+			...(toolCallId !== undefined && { toolCallId }),
 		});
-	}
-
-	private wasWrittenThisSession(filePath: string): boolean {
-		if (this.unchangedThisSession.has(filePath)) return false;
-		// Authoritative path: we observed a write of this file via recordWritten.
-		// Survives mtime granularity (FAT32 ~2s), clock skew (NFS), and external
-		// tools that touch mtime backward.
-		if (this.writtenThisSession.has(filePath)) return true;
-		try {
-			return fs.statSync(filePath).mtimeMs >= this.sessionStartMs;
-		} catch {
-			return false;
-		}
-	}
-
-	private canTreatStalenessAsOwnPriorEdit(
-		filePath: string,
-		lastReadTimestamp: number,
-	): boolean {
-		const edits = this.edits.get(filePath) ?? [];
-		const latest = edits.at(-1);
-		if (!latest) return false;
-		if (latest.verdict !== "allowed" && latest.verdict !== "warned")
-			return false;
-		if (latest.timestamp < lastReadTimestamp) return false;
-		return Date.now() - latest.timestamp <= OWN_EDIT_STALE_GRACE_MS;
 	}
 
 	private canIgnoreStalenessByHashes(
@@ -1588,36 +2456,27 @@ export class ReadGuard {
 			return !!lastRead && this.readHashesStillMatch(lastRead, lines);
 		}
 
-		return rangesToCheck.every((range) =>
-			reads.some(
-				(read) =>
-					this.readCoversRange(read, range) &&
-					this.readRangeHashesStillMatch(read, lines, range),
-			),
-		);
-	}
-
-	private readCoversRange(
-		read: ReadRecord,
-		[editStart, editEnd]: [number, number],
-	): boolean {
-		const readStart = Math.max(
-			1,
-			read.effectiveOffset - this.config.contextLines,
-		);
-		const readEnd =
-			read.effectiveOffset + read.effectiveLimit - 1 + this.config.contextLines;
-		if (editStart >= readStart && editEnd <= readEnd) return true;
-		if (!read.enclosingSymbol) return false;
-		return (
-			read.enclosingSymbol.startLine <= editStart &&
-			read.enclosingSymbol.endLine >= editEnd
-		);
+		// The same per-line question as `validateRangeSnapshot` (#3522): every
+		// line must still match the newest read that delivered it. "Some read
+		// covers the whole range" vouched from an older read for a line a newer
+		// read saw differently.
+		return rangesToCheck.every(([startLine, endLine]) => {
+			for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+				const view = newestViewOfLine(reads, lineNo);
+				if (
+					!view ||
+					!this.readRangeHashesStillMatch(view, lines, [lineNo, lineNo])
+				) {
+					return false;
+				}
+			}
+			return true;
+		});
 	}
 
 	private validateRangeSnapshot(
 		filePath: string,
-		range: [number, number],
+		[startLine, endLine]: [number, number],
 		/**
 		 * What the CALLER will do with the verdict. `checkEdit` honours
 		 * `skipSnapshotCheck` for content-validated (oldText) edits, so a
@@ -1626,75 +2485,46 @@ export class ReadGuard {
 		snapshotCheckSkipped: boolean,
 	): {
 		status: "match" | "mismatch" | "unavailable";
-		matchingReadIndex: number;
 		missingLines: number[];
 		mismatchedLines: number[];
-		candidateReadCount: number;
-		checkedCandidateCount: number;
-		unavailableCandidateCount: number;
 		shouldBlock: boolean;
 	} {
 		const reads = this.reads.get(filePath) ?? [];
-		const candidates = reads.filter((read) =>
-			this.readCoversRange(read, range),
-		);
-		let status: "match" | "mismatch" | "unavailable" = "unavailable";
-		let matchingReadIndex = -1;
-		let missingLines: number[] = [];
-		let mismatchedLines: number[] = [];
-		let checkedCandidateCount = 0;
-		let unavailableCandidateCount = 0;
-		let hashUnavailableCandidateCount = 0;
-		let lastMismatchTimestamp = -Infinity;
-		let lastUnavailableTimestamp = -Infinity;
-		for (let i = 0; i < candidates.length; i += 1) {
-			const validation = currentLinesMatchReadSnapshot(
-				filePath,
-				candidates[i],
-				range,
-			);
-			if (!validation.checked) {
-				unavailableCandidateCount += 1;
-				if (readEffectiveRangeCoversRange(candidates[i], range)) {
-					hashUnavailableCandidateCount += 1;
-				}
-				if (status === "unavailable") {
-					missingLines = validation.missingLines;
-				}
-				lastUnavailableTimestamp = Math.max(
-					lastUnavailableTimestamp,
-					candidates[i].timestamp,
-				);
+		// Judge each line by the newest read that delivered it (#3522), in runs
+		// that share one read. A line no read delivered (only in a context zone)
+		// or whose newest view carries no hash for it cannot be checked and is
+		// reported missing; it never blocks and never lets an older read speak
+		// for it.
+		const runs: Array<{ read: ReadRecord; range: [number, number] }> = [];
+		const missingLines: number[] = [];
+		for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+			const view = newestViewOfLine(reads, lineNo);
+			if (!view || view.lineHashes?.[lineNo] === undefined) {
+				missingLines.push(lineNo);
 				continue;
 			}
-			checkedCandidateCount += 1;
-			if (validation.matches) {
-				status = "match";
-				matchingReadIndex = i;
-				missingLines = [];
-				mismatchedLines = [];
-				break;
+			const last = runs.at(-1);
+			if (last?.read === view && last.range[1] === lineNo - 1) {
+				last.range[1] = lineNo;
+			} else {
+				runs.push({ read: view, range: [lineNo, lineNo] });
 			}
-			status = "mismatch";
-			missingLines = [];
-			mismatchedLines = validation.mismatchedLines;
-			lastMismatchTimestamp = Math.max(
-				lastMismatchTimestamp,
-				candidates[i].timestamp,
+		}
+		const mismatchedLines: number[] = [];
+		let checkedLineCount = 0;
+		for (const { read, range } of runs) {
+			checkedLineCount += range[1] - range[0] + 1;
+			mismatchedLines.push(
+				...currentLinesMatchReadSnapshot(filePath, read, range).mismatchedLines,
 			);
 		}
-
-		// Enforce only when no candidate that actually delivered the target range
-		// lacks hashes. Context-only/symbol-only coverage may be unavailable without
-		// weakening enforcement from another hash-checkable read of the same range.
-		// Also suppress when a re-read (unavailable only due to context-zone boundary)
-		// is more recent than the stale read that triggered the mismatch — the agent
-		// refreshed their view, and the re-read's edge lines fall within contextLines.
-		const shouldBlock =
-			status === "mismatch" &&
-			lastUnavailableTimestamp <= lastMismatchTimestamp &&
-			checkedCandidateCount > 0 &&
-			hashUnavailableCandidateCount === 0;
+		const status: "match" | "mismatch" | "unavailable" =
+			mismatchedLines.length > 0
+				? "mismatch"
+				: missingLines.length === 0
+					? "match"
+					: "unavailable";
+		const shouldBlock = status === "mismatch";
 
 		// `enforced` below states INTENT — whether this validation reached a
 		// decidable verdict. It says nothing about what the caller did with it.
@@ -1713,13 +2543,10 @@ export class ReadGuard {
 			sessionId: this.sessionId,
 			filePath,
 			metadata: {
-				range,
+				range: [startLine, endLine],
 				status,
-				candidateReadCount: candidates.length,
-				checkedCandidateCount,
-				unavailableCandidateCount,
-				hashUnavailableCandidateCount,
-				matchingReadIndex,
+				viewRunCount: runs.length,
+				checkedLineCount,
 				missingLineCount: missingLines.length,
 				mismatchedLineCount: mismatchedLines.length,
 				missingLines: missingLines.slice(0, 20),
@@ -1729,16 +2556,7 @@ export class ReadGuard {
 			},
 		});
 
-		return {
-			status,
-			matchingReadIndex,
-			missingLines,
-			mismatchedLines,
-			candidateReadCount: candidates.length,
-			checkedCandidateCount,
-			unavailableCandidateCount,
-			shouldBlock,
-		};
+		return { status, missingLines, mismatchedLines, shouldBlock };
 	}
 
 	private readRangeHashesStillMatch(
@@ -1760,6 +2578,61 @@ export class ReadGuard {
 	}
 
 	/**
+	 * #3962: whether a read recorded AFTER `boundRead` is at least as strong
+	 * evidence for THIS edit as the bridge `contentBinding` it would otherwise be
+	 * judged against. A stale binding (its snapshot no longer matches disk) must
+	 * not keep blocking once a newer record has DELIVERED every edited line from
+	 * the current bytes: the block's own remedy ("Re-read the file") is exactly
+	 * what a native re-read cannot satisfy, because native records carry hashes,
+	 * never a binding. The rule lives here, in the evidence owner; consumers do
+	 * not re-derive it.
+	 *
+	 * Eligibility is deliberately narrow so the strong anchor is never dropped
+	 * for weak evidence: the candidate must be non-provisional (delivered), its
+	 * effective range must cover the line (never the context zone), it must
+	 * carry a read-time hash for the line, and that hash must equal the bytes on
+	 * disk now. A newer partial, unhashed, search-slack-only, or stale read is
+	 * not eligible, and `touchedLines === undefined` keeps the existing block
+	 * (there is no range to prove coverage over).
+	 */
+	private newerReadSupersedesBinding(
+		filePath: string,
+		fileReads: ReadRecord[],
+		boundRead: ReadRecord,
+		touchedLines?: [number, number],
+		editRanges?: [number, number][],
+	): boolean {
+		if (!touchedLines) return false;
+		const rangesToCheck: [number, number][] =
+			editRanges && editRanges.length > 1 ? editRanges : [touchedLines];
+
+		const boundIndex = fileReads.lastIndexOf(boundRead);
+		if (boundIndex < 0) return false;
+
+		// Newest-first reads recorded after the bound one. Iterating a reversed
+		// slice types `candidate` as `ReadRecord`: a raw `fileReads[i]` narrows to
+		// `ReadRecord | undefined` under `noUncheckedIndexedAccess` and would add
+		// strictness diagnostics without proving anything (the index is already in
+		// range). The order is exactly the old `length - 1` down to `boundIndex + 1`.
+		for (const candidate of fileReads.slice(boundIndex + 1).reverse()) {
+			if (candidate.provisional === true) continue;
+			// `currentLinesMatchReadSnapshot` reads the disk itself and reports
+			// `checked: false` for a candidate that covers no hash, so a partial
+			// or unhashed newer read never reaches disk and never qualifies.
+			const deliversEveryEditedLine = rangesToCheck.every((range) => {
+				const evidence = currentLinesMatchReadSnapshot(
+					filePath,
+					candidate,
+					range,
+				);
+				return evidence.checked && evidence.matches;
+			});
+			if (deliversEveryEditedLine) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Content-verified relocation. When a range the agent read has drifted, find
 	 * where the read-time line-hash sequence for [startLine,endLine] now appears
 	 * in the current file. Returns the unique new location, or undefined when:
@@ -1776,27 +2649,19 @@ export class ReadGuard {
 		// A single line's hash collides too easily to relocate on confidently.
 		if (span < 2) return undefined;
 
-		// Newest read that captured hashes for the entire target range wins.
-		let wanted: string[] | undefined;
-		for (let i = reads.length - 1; i >= 0; i -= 1) {
-			const hashes = reads[i].lineHashes;
-			if (!hashes) continue;
-			const seq: string[] = [];
-			let complete = true;
-			for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
-				const h = hashes[lineNo];
-				if (h === undefined) {
-					complete = false;
-					break;
-				}
-				seq.push(h);
+		// Relocate only from the read that is the agent's newest view of EVERY
+		// line of the range (#3522). A run taken from an older read would
+		// overwrite lines a newer read showed the agent differently.
+		const source = newestViewOfLine(reads, startLine);
+		if (!source?.lineHashes) return undefined;
+		const wanted: string[] = [];
+		for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+			const hash = source.lineHashes[lineNo];
+			if (hash === undefined || newestViewOfLine(reads, lineNo) !== source) {
+				return undefined;
 			}
-			if (complete) {
-				wanted = seq;
-				break;
-			}
+			wanted.push(hash);
 		}
-		if (!wanted) return undefined;
 
 		let lines: string[];
 		try {

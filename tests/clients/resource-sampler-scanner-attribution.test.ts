@@ -22,6 +22,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setPlatform } from "../support/platform-stub.js";
 
 interface SpawnRecord {
 	command: string;
@@ -93,13 +94,6 @@ const { RESOURCE_SAMPLE_QUERY_TIMEOUT_MS } =
 	await import("../../clients/resource-sampler.js");
 
 const realPlatform = process.platform;
-function setPlatform(platform: NodeJS.Platform): void {
-	Object.defineProperty(process, "platform", {
-		value: platform,
-		configurable: true,
-	});
-}
-
 function reasonsFor(kind: string): Array<{ subject: string; reason: string }> {
 	return (
 		getDegradationSummary().find((g) => g.kind === kind)?.latestReasons ?? []

@@ -2097,3 +2097,87 @@ describe("past-EOF diagnostic gate (#1641)", () => {
 		}
 	});
 });
+
+// #3959: opt-in one-line widget summary (ui.compactWidget / --lens-compact-widget).
+describe("renderWidget compact summary (#3959)", () => {
+	const summaryFixture = () => {
+		const filePath = `${process.cwd()}/compact-widget.ts`;
+		setSessionLanguages(["css", "html", "json", "jsts", "markdown", "shell"]);
+		recordRunner(filePath, "type-safety", "failed", 1);
+		recordDiagnostics(filePath, [
+			{
+				severity: "error",
+				semantic: "blocking",
+				message: "blocking detail that must not render",
+				line: 2278,
+				rule: "typescript:2451",
+			},
+			{
+				severity: "warning",
+				message: "warning detail that must not render",
+				line: 497,
+				rule: "ts-react-antipatterns",
+			},
+		]);
+		return filePath;
+	};
+
+	it("renders exactly one line: the summary header with languages and totals", () => {
+		summaryFixture();
+
+		const lines = renderWidget(120, theme, { compact: true });
+
+		expect(lines).toHaveLength(1);
+		const header = lines[0] ?? "";
+		expect(header).toContain("pi-lens");
+		expect(header).toContain("css html json jsts markdown shell");
+		expect(header).toContain("1E");
+		expect(header).toContain("1W");
+		// No file rows, no blocker details in compact mode.
+		expect(header).not.toContain("compact-widget.ts");
+		expect(header).not.toContain("blocking detail that must not render");
+		expect(header).not.toContain("warning detail that must not render");
+		expect(visibleWidth(header)).toBeLessThanOrEqual(120);
+	});
+
+	// #3959 review 1: narrow mode must not rely on whole-line tail truncation —
+	// it swallows the totals, which are this line's primary datum. The language
+	// text is what gets truncated.
+	it("keeps totals visible in narrow mode while language text is truncated", () => {
+		summaryFixture();
+
+		const lines = renderWidget(40, theme, { compact: true });
+
+		expect(lines).toHaveLength(1);
+		const header = lines[0] ?? "";
+		expect(header).toContain("1E");
+		expect(header).toContain("1W");
+		expect(header).not.toContain("css html json jsts markdown shell");
+		expect(visibleWidth(header)).toBeLessThanOrEqual(40);
+	});
+
+	// #3959 review 2: compact narrow mode keeps the LSP spawning state too,
+	// or it would diverge from wide-mode behavior.
+	it("keeps the LSP spawning chip in compact narrow mode", () => {
+		summaryFixture();
+		recordLsp("typescript", "/repo", "spawn_start");
+
+		const lines = renderWidget(40, theme, { compact: true });
+
+		expect(lines).toHaveLength(1);
+		const header = lines[0] ?? "";
+		expect(header).toContain("LSP↑");
+		expect(header).toContain("1E");
+		expect(header).toContain("1W");
+		expect(visibleWidth(header)).toBeLessThanOrEqual(40);
+	});
+
+	it("keeps the default multi-line rendering when compact is off", () => {
+		summaryFixture();
+
+		const lines = renderWidget(120, theme);
+
+		expect(lines.length).toBeGreaterThan(1);
+		expect(lines.join("\n")).toContain("compact-widget.ts");
+	});
+});

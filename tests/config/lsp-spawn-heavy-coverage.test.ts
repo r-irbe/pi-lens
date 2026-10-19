@@ -58,6 +58,7 @@ import {
 	relativePosix,
 	stripSource,
 } from "../support/sweep-kit.js";
+import { vitestCollects } from "../support/vitest-collection.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -149,8 +150,12 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"#2507: the real LSP child is spawned by a headless NODE child this test runs, not by this process; it is phased in the serialized wall-clock-budget lane (the flake-shape admission gate requires that lane), and its assertions are the child's exit code and stdout, not a handshake budget",
 	"tests/clients/lsp/kill-process-tree-real-child.test.ts":
 		"#2042/#3091: the real child is `/bin/sh` launched through `launchLSP` purely to obtain a pid whose `/proc` PPid is this process — there is no language server, no handshake and no diagnostics wait to starve; the leader is killed within milliseconds and the assertions read which signal `killProcessTree` issued. It is already phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes without running twice (same shape as the two entries above).",
+	"tests/clients/instance-reaper-pid-reuse.test.ts":
+		"#3539: the one `launchLSP` call starts `/bin/sh -c sleep 30` to read the owner tag out of its /proc environ; no language server, no handshake and no diagnostics wait. The file is phased in the serialized wall-clock-budget lane, which the flake-shape admission gate requires, and a file cannot sit in both lanes.",
 	"tests/clients/lsp/initialize-timeout-backstop.test.ts":
 		"POSIX-only real-child initialize-timeout backstop; waits on a 50ms timeout firing then sleeps past kill escalation — deterministic and short",
+	"tests/clients/lsp/lean-real-smoke.test.ts":
+		"real Lean child is routed through the serialized wall-clock-budget lane after the LSP spawn lane; no overlapping spawn window or competing fork storm",
 	"tests/clients/lsp/launch.test.ts":
 		"unit-tests the launchLSP seam itself over real binaries; asserts spawn/exit/failure shapes, never an LSP handshake under a timing budget",
 	"tests/clients/lsp/lifecycle.test.ts":
@@ -171,6 +176,8 @@ const SPAWN_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"one real handshake proving lsp client byte attribution; asserts the memory table, never a contended wire transaction",
 	"tests/clients/memory-sampler-root-discriminator.test.ts":
 		"real handshakes at two roots proving per-root client attribution; the assertion is the side table, not a timing budget",
+	"tests/clients/lsp/idle-eviction-enabled-servers.test.ts":
+		"#3952 caller witness: every spawn seam is doubled (all LSP_SERVERS.spawn implementations and createLSPClient are mocked) and the shared idle timer runs on a fake clock, so no real LSP child is launched; the registry lookup only establishes object identity, and the assertions are the shutdown call and the respawned client generation, not a handshake-plus-diagnostics budget",
 	// NB: these reasons must NOT spell the fixture's own name — this file
 	// self-excludes by splitting that literal at runtime, so writing it out
 	// here would make the sweep flag itself.
@@ -190,13 +197,14 @@ describe("lsp-spawn-heavy Vitest project coverage", () => {
 
 	it("phases or documents every test that spawns a real LSP child", () => {
 		const included = lspSpawnHeavyInclude();
+		// Fixture projects carry *.test.ts inputs belonging to the fixture's
+		// own toolchain; vitest never runs them, so the sweep must not count
+		// them either. vitestCollects reads that from vitest.config.ts: the
+		// hand-written `tests/fixtures/` exclude it replaces never matched,
+		// because listSourceFiles passes paths relative to `tests/` (#4399).
 		const files = listSourceFiles(path.join(repoRoot, "tests"), {
 			extensions: [".ts"],
-			// Fixture projects carry *.test.ts inputs belonging to the fixture's
-			// own toolchain; vitest's sharedExclude never runs them, so the sweep
-			// must not count them as candidates either.
-			exclude: (rel) => rel.startsWith("tests/fixtures/"),
-		}).filter((file) => file.endsWith(".test.ts"));
+		}).filter((file) => vitestCollects(relativePosix(repoRoot, file)));
 
 		// readWalkedFiles: a path that vanished between the walk and the read is
 		// out of the population, not a finding (#3082 — this scan was one of the

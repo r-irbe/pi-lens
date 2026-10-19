@@ -114,6 +114,7 @@ export const tryCatchFactProvider: FactProvider = {
 		await extractFactsFromTree(
 			ctx,
 			store,
+			tryCatchFactProvider.id,
 			{ "file.tryCatchSummaries": [] },
 			(root) => {
 				const summaries: TryCatchSummary[] = [];

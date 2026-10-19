@@ -114,6 +114,7 @@ pi --lens-turn-summary   # Persist a per-turn summary of diagnostics, autofixes,
 pi --lens-compact-tool-line   # Render tool results as one compact, theme-aware line (closes #1327)
 pi --lens-compact-lsp-status  # Collapse the footer LSP status to one state glyph instead of the server names (refs #3099)
 pi --lens-hide-lsp-status     # Publish no pi-lens-lsp footer status at all, so a status-rendering host stops showing the key (closes #3099)
+pi --lens-compact-widget      # Render the widget as one summary line (languages + totals, LSP↑ chip while servers spawn) with no file rows or blocker details (refs #3959)
 pi --no-lazy-tools       # Keep every pi-lens tool active instead of activating the situational ones on demand
 pi --lens-turn-end-madge # Run the madge circular-dependency check at every turn end, not just at session start
 pi --no-knip             # Disable the knip session-start analyzer
@@ -199,4 +200,7 @@ turn-end is skipped, not faked: one line on stderr and nothing on stdout.
 - Check `~/.pi-lens/sessionstart.log`, `~/.pi-lens/latency.log`, and
   `~/.pi-lens/cascade.log` for lifecycle/performance/debug traces.
 - For live tool validation, use `node scripts/smoke-tools.mjs` with the relevant
-  `--lsp`, `--format`, or `--autofix` layer.
+  `--lsp`, `--format`, or `--autofix` layer. `--resolution` checks, without
+  installing or spawning anything, that the resolvers find project-local tools in
+  `.venv/bin`, `vendor/bin` and `node_modules/.bin` (it runs nightly in
+  tool-smoke).

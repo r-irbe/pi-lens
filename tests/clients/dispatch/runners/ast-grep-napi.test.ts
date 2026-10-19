@@ -20,7 +20,7 @@ const { mockAuxiliaryLspPublished, fsSyncOverrides } = vi.hoisted(() => ({
 	},
 }));
 
-vi.mock("../../../../clients/lsp/index.js", () => ({
+vi.mock("../../../../clients/lsp/capabilities.js", () => ({
 	hasAuxiliaryLspPublishedForRoot: mockAuxiliaryLspPublished,
 }));
 
@@ -103,6 +103,7 @@ function mockWorkingSgLoad(): void {
 // the mock registry, so drop it after each case (#2883).
 afterEach(() => {
 	vi.doUnmock("@ast-grep/napi");
+	vi.doUnmock("../../../../clients/dispatch/ast-grep-catalog.js");
 });
 
 describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
@@ -366,6 +367,41 @@ describe("ast-grep-napi runner — skip paths", () => {
 	});
 });
 
+describe("ast-grep-napi rule-policy scan admission", () => {
+	it("does not evaluate a rule on an ignored path", async () => {
+		vi.resetModules();
+		const findAll = vi.fn().mockReturnValue([]);
+		vi.doMock("../../../../clients/dispatch/ast-grep-catalog.js", () => ({
+			buildEffectiveAstGrepCatalog: () => {
+				const rule = {
+					id: "fake-rule",
+					language: "typescript",
+					severity: "warning",
+					rule: { pattern: "$X" },
+				};
+				return {
+					sources: [{ source: "test", rules: [rule] }],
+					effectiveRules: new Map([[rule.id, { rule }]]),
+				};
+			},
+		}));
+		const mod =
+			await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+		const result = mod.evaluateAstGrepRules(
+			"/fake/vendorish/file.ts",
+			{ findAll } as any,
+			"/fake",
+			"jsts",
+			{
+				projectRoot: "/fake",
+				rulePolicy: { "fake-rule": { ignorePaths: ["vendorish/**"] } },
+			},
+		);
+		expect(result).toEqual([]);
+		expect(findAll).not.toHaveBeenCalled();
+	});
+});
+
 describe("ast-grep-napi runner — real shipped rule", () => {
 	it("loads and matches no-sort-without-comparator through the real YAML parser", async () => {
 		vi.resetModules();
@@ -462,6 +498,44 @@ describe("ast-grep-napi runner — aux-runner-findings-lost degradation (#2324 R
 			// The reason must describe an EARLIER-touch leftover, not this
 			// touch's own aux-grace outcome — R2-C's corrected claim.
 			expect(group?.latestReasons[0]?.reason).toContain("EARLIER touch");
+			pendingAux.resetPendingAuxiliaryCoverage();
+			ledger.resetDegradationLedger();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps the complete diagnostic before a 200-character file path (#3704/#3696)", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-long-loss-");
+		try {
+			const filePath = path.join(env.tmpDir, `file-${"x".repeat(180)}.ts`);
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			const ledger = await import("../../../../clients/degradation-ledger.js");
+			ledger.resetDegradationLedger();
+			const pendingAux =
+				await import("../../../../clients/lsp/pending-aux-coverage.js");
+			pendingAux.resetPendingAuxiliaryCoverage();
+			pendingAux.markPendingAuxiliaryCoverage(filePath, ["ast-grep"]);
+			mockAuxiliaryLspPublished.mockResolvedValue(true);
+			mockWorkingSgLoad();
+			const mod =
+				await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+
+			const reason = ledger
+				.getDegradationSummary()
+				.find((g) => g.kind === "aux-runner-findings-lost")
+				?.latestReasons[0]?.reason;
+			expect(reason).toContain("Gate B skipped napi:");
+			expect(reason).toContain("EARLIER touch");
+			expect(reason).toContain("prior publication satisfies per-file gate");
+			// incrementDegradationCount appends its bounded count suffix after
+			// truncateForLedger's 200-character reason field.
+			expect(reason?.length).toBeLessThanOrEqual(212);
+			expect(reason?.endsWith("(count: 1)")).toBe(true);
+			expect(reason?.startsWith("Gate B skipped napi:")).toBe(true);
 			pendingAux.resetPendingAuxiliaryCoverage();
 			ledger.resetDegradationLedger();
 		} finally {

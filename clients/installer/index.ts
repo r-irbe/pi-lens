@@ -56,7 +56,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import fs from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -82,11 +82,15 @@ import { commitDurableStoreAsync } from "../durable-store.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { createGenerationMap } from "../generation-guard.js";
 import {
+	type GenerationHeartbeat,
 	type GenerationHold,
+	heartbeatIntervalMs,
 	isLockContention,
+	ownsTopGeneration,
 	recordGenerationTakeover,
 	recordLegacyLockHeld,
 	releaseGeneration,
+	startGenerationHeartbeat,
 	tryAcquireGeneration,
 } from "../generation-lock.js";
 import { resolveToolCwd } from "../tool-cwd.js";
@@ -131,15 +135,17 @@ interface InstallLockOwner {
 }
 
 /**
- * A held install lock: its generation, and the exact text it wrote to the old
- * file. Release compares that text, as the bounded lock compares its token:
- * a pid alone also matches a newer hold of this same process (#3476 review
- * F3). The `nonce` keeps two holds created in one millisecond apart; older
- * installers read only `pid` and `createdAt`.
+ * A held install lock: its generation, the exact text it wrote to the old
+ * file, and the heartbeat keeping the generation's mtime fresh for the whole
+ * hold (#3515). Release compares that text, as the bounded lock compares its
+ * token: a pid alone also matches a newer hold of this same process (#3476
+ * review F3). The `nonce` keeps two holds created in one millisecond apart;
+ * older installers read only `pid` and `createdAt`.
  */
 interface InstallLockHold {
 	generation: GenerationHold;
 	token: string;
+	heartbeat: GenerationHeartbeat;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -233,6 +239,11 @@ function installLockOwner(): string {
  * pre-#3476 file. Of two takers of one stale generation exactly one exclusive
  * create succeeds; the old takeover removed the lock by path, and a taker
  * acting on an earlier judgement could remove a live successor's lock.
+ *
+ * #3515: the generation's mtime is kept fresh by a heartbeat for as long as
+ * the hold lives — an ERESOLVE npm install can run two 120s
+ * `runInstallAttempt`s inside `maxAgeMs` (180s by default), and nothing
+ * previously renewed the generation while that ran.
  */
 function tryAcquireInstallLock(
 	maxAgeMs: number,
@@ -240,6 +251,10 @@ function tryAcquireInstallLock(
 	const hold = tryAcquireGeneration(INSTALL_LOCK_GENERATIONS, maxAgeMs);
 	if (!hold) return "busy";
 	if (hold.tookOverStale) recordGenerationTakeover(hold);
+	const heartbeat = startGenerationHeartbeat(
+		hold,
+		heartbeatIntervalMs(maxAgeMs),
+	);
 	const token = JSON.stringify({
 		pid: process.pid,
 		createdAt: Date.now(),
@@ -249,10 +264,12 @@ function tryAcquireInstallLock(
 	try {
 		took = takeLegacyInstallLock(maxAgeMs, token);
 	} catch (cause) {
+		heartbeat.stop();
 		releaseGeneration(hold);
 		throw cause;
 	}
-	if (took) return { generation: hold, token };
+	if (took) return { generation: hold, token, heartbeat };
+	heartbeat.stop();
 	releaseGeneration(hold);
 	return "legacy-held";
 }
@@ -264,6 +281,7 @@ function tryAcquireInstallLock(
  */
 function releaseInstallLock(hold: InstallLockHold): void {
 	activeInstallLocks.delete(hold);
+	hold.heartbeat.stop();
 	try {
 		if (readFileSync(INSTALL_LOCK_PATH, "utf8") === hold.token)
 			unlinkSync(INSTALL_LOCK_PATH);
@@ -276,6 +294,14 @@ function releaseInstallLock(hold: InstallLockHold): void {
 async function acquireInstallLock(): Promise<{
 	release?: () => Promise<void>;
 	reason?: string;
+	/**
+	 * Present only when `release` is: whether this hold is still the live top
+	 * generation right now (#3515). The heartbeat is what usually keeps this
+	 * true for the hold's whole lifetime; a strategy with more than one
+	 * critical write inside one hold (npm's ERESOLVE retry) checks this
+	 * between them and aborts rather than risk racing a second holder.
+	 */
+	ownsLock?: () => boolean;
 }> {
 	// #946 review F2: the waiter's bound must exceed the owner's install bound
 	// (PI_LENS_INSTALL_TIMEOUT_MS, default 120s) — a 30s waiter gave up on a
@@ -308,6 +334,7 @@ async function acquireInstallLock(): Promise<{
 					released = true;
 					releaseInstallLock(hold);
 				},
+				ownsLock: () => ownsTopGeneration(hold.generation),
 			};
 		}
 		await new Promise((resolve) => setTimeout(resolve, 100));
@@ -441,6 +468,29 @@ export interface ArchiveSpec {
 	 * launcher-existence check.
 	 */
 	treeMarker?: string;
+	/**
+	 * Lowercase-hex sha256 of every archive this spec can resolve, KEYED BY THE
+	 * RESOLVED URL (#3400). An archive install has no `--version` verdict, so the
+	 * bytes are checked against this pin before anything is extracted; a missing
+	 * key is a refusal, never an unchecked install. Keying by URL (not by a
+	 * parallel `(platform, arch)` resolver) means bumping a URL without its pin
+	 * reds `tests/clients/installer/tool-registry-consistency.test.ts` offline,
+	 * and a wrong pin reds the nightly tool-smoke row that downloads the archive.
+	 * Refresh a pin from the release: `gh api repos/<o>/<r>/releases/tags/<tag>
+	 * --jq '.assets[]|[.name,.digest]|@tsv'` (GitHub publishes `sha256:<hex>`).
+	 */
+	sha256?: Record<string, string>;
+	/**
+	 * Command the extracted launcher needs at run time (`java` for a JVM launcher
+	 * script), checked spawn-free BEFORE the download so a box without it is
+	 * `unavailable` rather than holding an 87 MB tree that cannot start. The
+	 * check is "the executable under the runtime's home env var when that is set
+	 * and non-empty (it decides alone, as the launcher's own does), else a
+	 * non-empty file named `runtime` on PATH" (`ARCHIVE_RUNTIME_HOMES`). It is a presence check, not a
+	 * working-JDK check: stock macOS ships `/usr/bin/java` as a stub, so there the
+	 * precheck passes and the download still happens.
+	 */
+	runtime?: string;
 }
 
 export interface ToolDefinition {
@@ -483,9 +533,15 @@ export interface ToolDefinition {
 	 * {@link verifyNpmPackageEntry} — for an npm stdio LSP server that has no
 	 * CLI surface at all AND whose transport-required diagnostic cannot be read
 	 * back through a pipe, so neither `checkArgs` nor #208's rescue can produce
-	 * a verdict (#2722).
+	 * a verdict (#2722). `"tree-manifest"` is the same spawn-free stance for an
+	 * ARCHIVE whose launcher starts a JVM/BEAM on any argument: it is verified AT
+	 * INSTALL by the pinned archive sha256 plus the launcher/marker found on disk
+	 * by `installArchiveTool` (later resolution only checks the shim exists), and
+	 * no `--version` is ever spawned: not after a refresh, not on the PATH rung,
+	 * not in the `/lens-tools` listing (#3400). The
+	 * initialize handshake stays in the nightly tool-smoke.
 	 */
-	verification?: "package-entry";
+	verification?: "package-entry" | "tree-manifest";
 }
 
 export interface PlatformPackageSpec {
@@ -797,7 +853,7 @@ export const TOOLS: ToolDefinition[] = [
 		checkCommand: "jscpd",
 		checkArgs: ["--version"],
 		installStrategy: "npm",
-		packageName: "jscpd@5.3.0", // v5.3.0 is the repository's exact devDependency; the v4 packaging defect that required the older v5.0.12 pin is gone, and parseReport() reads the unchanged clone-report fields.
+		packageName: "jscpd@5.4.1", // v5.4.1 is the repository's exact devDependency; the v4 packaging defect that required the older v5.0.12 pin is gone, and parseReport() reads the unchanged clone-report fields.
 		binaryName: "jscpd",
 	},
 	// Structural search and dead code detection
@@ -1307,6 +1363,40 @@ export const TOOLS: ToolDefinition[] = [
 			url: "https://github.com/spotbugs/spotbugs/releases/download/4.10.2/spotbugs-4.10.2.tgz",
 			kind: "tgz",
 			launcher: "bin/spotbugs",
+			sha256: {
+				"https://github.com/spotbugs/spotbugs/releases/download/4.10.2/spotbugs-4.10.2.tgz":
+					"63d7687c35fba12cbc8e55ec2a889a2bbf1b9be299dea91f2b0d351dc285308a",
+			},
+		},
+	},
+	{
+		// kotlin-language-server (fwcd, #3400) — a platform-agnostic launcher ZIP
+		// (`server/{bin,lib}`, 87 MB) whose `bin/kotlin-language-server` script
+		// starts a JVM on ANY argument and has no stable `--version`, so it is
+		// verified at install by manifest, not by spawn: the pinned sha256, the
+		// launcher on disk with an exec bit, and `java` on PATH or JAVA_HOME before
+		// the download (`verification: "tree-manifest"`). The 2025 release publishes
+		// no digest, so its pin is trust-on-first-use (the hash of the download). The initialize handshake is the nightly
+		// tool-smoke `kotlin` row. fwcd 1.3.13 (2025-01-18) rather than JetBrains'
+		// kotlin-lsp (v263.4702.0): its CDN ships the macOS standalone archives as
+		// `.sit`, which this installer's tar/unzip/Expand-Archive paths cannot
+		// extract, and its six per-platform archives would need six pins.
+		id: "kotlin-language-server",
+		name: "Kotlin Language Server",
+		checkCommand: "kotlin-language-server",
+		checkArgs: ["--version"],
+		installStrategy: "archive",
+		binaryName: "kotlin-language-server",
+		verification: "tree-manifest",
+		archive: {
+			url: "https://github.com/fwcd/kotlin-language-server/releases/download/1.3.13/server.zip",
+			kind: "zip",
+			launcher: "bin/kotlin-language-server",
+			runtime: "java",
+			sha256: {
+				"https://github.com/fwcd/kotlin-language-server/releases/download/1.3.13/server.zip":
+					"4fe7d71d087b307c7869036171bd9d8c6a4284cd7c25b89098b0a24eb2d9b6d2",
+			},
 		},
 	},
 	{
@@ -1333,6 +1423,10 @@ export const TOOLS: ToolDefinition[] = [
 			kind: "zip",
 			stripComponents: 0,
 			treeMarker: "PowerShellEditorServices/Start-EditorServices.ps1",
+			sha256: {
+				"https://github.com/PowerShell/PowerShellEditorServices/releases/download/v4.6.0/PowerShellEditorServices.zip":
+					"0d91898f73d4faeb64291336f6386f0c890a933df012827571adf7008480a04a",
+			},
 		},
 	},
 	{
@@ -1367,6 +1461,14 @@ export const TOOLS: ToolDefinition[] = [
 			kind: "zip",
 			stripComponents: 1,
 			treeMarker: "bin",
+			sha256: {
+				"https://github.com/clangd/clangd/releases/download/22.1.0/clangd-linux-22.1.0.zip":
+					"c54e57dbff3ccc9e8352367ddb7030ad3f624073ec58c7477424e7919f578572",
+				"https://github.com/clangd/clangd/releases/download/22.1.0/clangd-mac-22.1.0.zip":
+					"71eddc5303da9a5bc5e8b509488b5b2c5acf45f20e33b8394e71a12a56d67198",
+				"https://github.com/clangd/clangd/releases/download/22.1.0/clangd-windows-22.1.0.zip":
+					"e31e271fe11f6dcd7cf87ca74be4a12788ff8ce5a0b07762583e335c058e939a",
+			},
 		},
 	},
 	{
@@ -1409,6 +1511,18 @@ export const TOOLS: ToolDefinition[] = [
 			kind: (platform) => (platform === "win32" ? "zip" : "tgz"),
 			stripComponents: 0,
 			treeMarker: "bin",
+			sha256: {
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-linux-arm64.tar.gz":
+					"273af33f26f4a1143f27c96d9f9e1188aba619c71e0807042134f66b4bd27f24",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-linux-x64.tar.gz":
+					"ca71415dd19f19e30aaa35a4915aefca9fdb5fec31b98331cc3d77f778d539c5",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-darwin-arm64.tar.gz":
+					"cec99d70b1f612acec4a10a79a03664e3aa0c229d4d8a586cb3f928ec37d509e",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-darwin-x64.tar.gz":
+					"e26cfefe423dd7326fc7c649539e4d4aaa4f35f34d2fefd8af2ed7090b72c556",
+				"https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-win32-x64.zip":
+					"a4439a8f5e8e9e6505c11f045a7bf45db602124a1e246371c1dbe34924f3cf71",
+			},
 		},
 	},
 	{
@@ -2868,12 +2982,18 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 			// Try to get version — through the probe seam (#2894), which owns the
 			// synchronous-throw case (#533) and the timeout tree-kill that a bare
 			// `spawn({ timeout })` promise did not do.
-			const probe = await probeToolAsync(tool.checkCommand, ["--version"], {
-				timeout: 5000,
-			});
-			status.version =
-				`${probe.stdout}${probe.stderr}`.trim().split("\n")[0]?.slice(0, 30) ||
-				undefined;
+			// #3400: a `tree-manifest` launcher answers any argument by starting a
+			// JVM, so `--version` is no probe there; the listing shows no version.
+			if (tool.verification !== "tree-manifest") {
+				const probe = await probeToolAsync(tool.checkCommand, ["--version"], {
+					timeout: 5000,
+				});
+				status.version =
+					`${probe.stdout}${probe.stderr}`
+						.trim()
+						.split("\n")[0]
+						?.slice(0, 30) || undefined;
+			}
 			statuses.push(status);
 			continue;
 		}
@@ -3281,6 +3401,10 @@ async function getToolPathResolved(
 		// says nothing about the command: this rung keeps the pre-#3311 behaviour
 		// for those entries rather than inventing a verdict from a failed lookup.
 		if (packageEntryVerification(tool) !== undefined) return tool.checkCommand;
+		// #3400: a `tree-manifest` launcher answers any argument by starting a JVM,
+		// so `checkArgs` is no verdict here either — a nonzero exit from that probe
+		// would drop a working PATH install for a managed one.
+		if (tool.verification === "tree-manifest") return tool.checkCommand;
 		let probeStalled = false;
 		const verified = await verifyToolBinary(
 			tool.checkCommand,
@@ -4747,7 +4871,10 @@ async function verifyRefreshedArtifact(
 	tool: ToolDefinition,
 	installedPath: string,
 ): Promise<boolean> {
-	if (tool.installStrategy === "archive" && !tool.archive?.launcher) {
+	if (
+		tool.installStrategy === "archive" &&
+		(!tool.archive?.launcher || tool.verification === "tree-manifest")
+	) {
 		// A tree bundle has no single binary to run — `installArchiveTool` already
 		// confirmed its tree marker — but it still needs its NEW mtime recorded
 		// (#1759 review F7), or the persisted probe entry keeps the pre-refresh
@@ -5150,6 +5277,43 @@ export async function swapExtractedDir(
 	}
 }
 
+/**
+ * Where a launcher's runtime lives when it is not on PATH: the home env var the
+ * launcher itself honours and the dir under it that holds the executable (#3400).
+ * fwcd's Gradle launcher resolves `$JAVA_HOME/bin/java`, so a JAVA_HOME-only box
+ * can run it and must not be refused. A new runtime (OmniSharp's dotnet) adds a
+ * row here, not a branch.
+ */
+const ARCHIVE_RUNTIME_HOMES: Record<string, { env: string; dir: string }> = {
+	java: { env: "JAVA_HOME", dir: "bin" },
+};
+
+/**
+ * The runtime's home-env verdict, or `undefined` when that env var is unset or
+ * empty (fall back to PATH). A NON-EMPTY home decides ALONE: fwcd's launcher
+ * treats a set JAVA_HOME as authoritative and dies with "JAVA_HOME is set to an
+ * invalid directory" when `$JAVA_HOME/bin/java` is not executable, whatever
+ * `java` PATH would have found. So the verdict is "a non-empty regular file,
+ * with an exec bit on POSIX" at that one path (#3400).
+ */
+function runtimeHomeVerdict(runtime: string): boolean | undefined {
+	const home = ARCHIVE_RUNTIME_HOMES[runtime];
+	const root = home ? process.env[home.env] : undefined;
+	if (!home || !root) return undefined;
+	const windows = installerPlatform() === "win32";
+	const names = windows ? [`${runtime}.exe`, runtime] : [runtime];
+	return names.some((name) => {
+		try {
+			const stat = statSync(path.join(root, home.dir, name));
+			return (
+				stat.isFile() && stat.size > 0 && (windows || (stat.mode & 0o111) !== 0)
+			);
+		} catch {
+			return false;
+		}
+	});
+}
+
 async function installArchiveTool(
 	tool: ToolDefinition,
 ): Promise<string | undefined> {
@@ -5177,6 +5341,30 @@ async function installArchiveTool(
 	} catch (err) {
 		logSessionStart(
 			`archive-install ${tool.id}: download failed: ${(err as Error).message}`,
+		);
+		return undefined;
+	}
+
+	// #3400: an archive has no `--version`, so the pinned sha256 is the only
+	// integrity evidence there is — checked BEFORE a byte reaches the extractor,
+	// and failing closed on a URL with no pin. Its own ledger subject (not the
+	// extraction one): `recordDegradationOnce` keys on kind+subject, so sharing
+	// `${id}:${format}` would let an earlier extraction row swallow this one.
+	const pinned = spec.sha256?.[url];
+	const digest = createHash("sha256").update(archiveBuffer).digest("hex");
+	if (digest !== pinned) {
+		const reason = pinned === undefined ? "sha256-unpinned" : "sha256-mismatch";
+		recordDegradationOnce({
+			kind: "managed-tool-install",
+			subject: `${tool.id}:${archiveKind}:integrity`,
+			reason: `archive integrity ${reason}`,
+		});
+		installFailureReasons.set(
+			tool.id,
+			`archive integrity ${reason} (${archiveBuffer.length} bytes from ${url})`,
+		);
+		logSessionStart(
+			`archive-install ${tool.id}: refused ${reason} (got ${digest}, pinned ${pinned ?? "none"}) — keeping installed version`,
 		);
 		return undefined;
 	}
@@ -5320,7 +5508,7 @@ async function installArchiveTool(
 			}
 			await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 			logSessionStart(
-				`archive-install ${tool.id}: installed tree bundle → ${extractDir} (extracted ${archiveBuffer.length} bytes)`,
+				`archive-install ${tool.id}: installed tree bundle → ${extractDir} (extracted ${archiveBuffer.length} bytes, sha256 verified ${digest})`,
 			);
 			debugLog(`[archive] installed ${tool.name} bundle → ${extractDir}`);
 			return extractDir;
@@ -5350,6 +5538,30 @@ async function installArchiveTool(
 			return undefined;
 		}
 		if (!isWindows) await fs.chmod(tmpResolvedInner, 0o750).catch(() => {});
+		// #3400: "present" is not "runnable" — an empty file, a directory, or a
+		// launcher whose exec bit did not stick (a zip entry extracted without it,
+		// or a chmod that silently did nothing, e.g. FAT) would otherwise be shimmed
+		// and recorded as a successful install. This reads the mode bits: it cannot
+		// see a noexec mount.
+		const launcherStat = await fs.stat(tmpResolvedInner).catch(() => undefined);
+		const launcherRunnable =
+			launcherStat?.isFile() === true &&
+			launcherStat.size > 0 &&
+			(isWindows || (launcherStat.mode & 0o111) !== 0);
+		if (!launcherRunnable) {
+			recordArchiveExtractionDegradation(
+				tool.id,
+				archiveKind,
+				"launcher-invalid",
+			);
+			logSessionStart(
+				`archive-install ${tool.id}: ${archiveKind} launcher is empty or not executable — keeping installed version`,
+			);
+			await fs
+				.rm(tmpExtractDir, { recursive: true, force: true })
+				.catch(() => {});
+			return undefined;
+		}
 
 		await swapExtractedDir(tool.id, tmpExtractDir, extractDir);
 
@@ -5379,7 +5591,7 @@ async function installArchiveTool(
 			);
 		}
 		logSessionStart(
-			`archive-install ${tool.id}: installed → ${shimPath} (extracted ${archiveBuffer.length} bytes)`,
+			`archive-install ${tool.id}: installed → ${shimPath} (extracted ${archiveBuffer.length} bytes, sha256 verified ${digest})`,
 		);
 		debugLog(`[archive] installed ${tool.name} → ${shimPath}`);
 		return shimPath;
@@ -5431,6 +5643,16 @@ function boundInstallError(
 	return line.length > limit ? `${line.slice(0, limit - 3)}...` : line;
 }
 
+/**
+ * #3515: thrown when a re-check right before a second critical write finds
+ * the install lock's generation no longer owned — a competing installer
+ * judged this hold stale (the heartbeat missed enough ticks, or the process
+ * was suspended) and took over. Caught by `installNpmTool`'s own outer catch
+ * like any other install failure; never continues to spawn a second npm
+ * process that would race the new holder's writes into `TOOLS_DIR`.
+ */
+class InstallLockLostError extends Error {}
+
 async function installNpmTool(
 	toolId: string,
 	packageName: string,
@@ -5439,7 +5661,21 @@ async function installNpmTool(
 	verificationTimeoutMs = 10_000,
 	/** See {@link packageEntryVerification} — spawn-free verification (#2722). */
 	packageEntryOf?: string,
+	/** See {@link installTool}'s `ownsLock` parameter. */
+	ownsLock?: () => boolean,
 ): Promise<string | undefined> {
+	const assertOwnsLock = (context: string): void => {
+		if (ownsLock && !ownsLock()) {
+			recordDegradationOnce({
+				kind: "install-lock-lost-mid-install",
+				subject: toolId,
+				reason: `install lock generation lost before ${context}; aborting rather than risk a second writer in TOOLS_DIR`,
+			});
+			throw new InstallLockLostError(
+				`install lock lost before ${context} for ${packageName} (#3515)`,
+			);
+		}
+	};
 	try {
 		// Ensure tools directory exists
 		await fs.mkdir(TOOLS_DIR, { recursive: true });
@@ -5488,6 +5724,7 @@ async function installNpmTool(
 			};
 		};
 
+		assertOwnsLock(`spawning ${pmCommand} install`);
 		let outcome = await runInstallAttempt([
 			...(testNpmScript ? [testNpmScript] : []),
 			...baseInstallArgs,
@@ -5501,6 +5738,12 @@ async function installNpmTool(
 			);
 
 		if (pm === "npm" && erResolve) {
+			// #3515: the first attempt alone can run up to INSTALL_TIMEOUT_MS
+			// (120s default); a second attempt on top of it is exactly the hold
+			// the fixed 180s lease used to be too short for. The heartbeat above
+			// is what keeps the lock's generation from going stale for real, but
+			// this re-check is what stops a WRITE if it ever did anyway.
+			assertOwnsLock(`retrying ${pmCommand} install with --legacy-peer-deps`);
 			const retryArgs = installArgs(pm, packageName, {
 				ignoreScripts: !needsScripts,
 				legacyPeerDeps: true,
@@ -6145,7 +6388,16 @@ async function finishInstallAttempt(
 /**
  * Install a tool by ID
  */
-export async function installTool(toolId: string): Promise<boolean> {
+export async function installTool(
+	toolId: string,
+	/**
+	 * #3515: whether the caller's install-lock hold is still the live top
+	 * generation, threaded down to the npm strategy so it can abort its
+	 * ERESOLVE retry rather than risk a second write past a lost lock.
+	 * Undefined for a caller with no lock context (there is none today).
+	 */
+	ownsLock?: () => boolean,
+): Promise<boolean> {
 	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
 		installFailureReasons.set(
 			toolId,
@@ -6184,6 +6436,7 @@ export async function installTool(toolId: string): Promise<boolean> {
 					tool.checkArgs,
 					getToolVerificationTimeout(tool),
 					packageEntryVerification(tool),
+					ownsLock,
 				);
 				if (npmPath !== undefined) {
 					// #1746 review F4: an install just resolved this package's range
@@ -6252,6 +6505,20 @@ export async function installTool(toolId: string): Promise<boolean> {
 				if (!tool.archive) return false;
 				if (!resolveArchiveUrl(tool.archive)) {
 					const reason = `unsupported platform=${process.platform} arch=${process.arch}`;
+					noteInstallAttempt(tool.id, "unavailable", reason);
+					logSessionStart(`auto-install ${tool.id}: ${reason}`);
+					return false;
+				}
+				// #3400: a launcher that needs a runtime (java) is `unavailable`
+				// without it, decided BEFORE the download, no spawn. A set home env
+				// var (JAVA_HOME) decides alone; otherwise a PATH walk.
+				const runtime = tool.archive.runtime;
+				const viaHome = runtime ? runtimeHomeVerdict(runtime) : undefined;
+				if (runtime && !(viaHome ?? (await isCommandAvailable(runtime)))) {
+					const reason =
+						viaHome === undefined
+							? `runtime ${runtime} not found on PATH`
+							: `runtime ${runtime} is not an executable file under ${ARCHIVE_RUNTIME_HOMES[runtime]?.env}`;
 					noteInstallAttempt(tool.id, "unavailable", reason);
 					logSessionStart(`auto-install ${tool.id}: ${reason}`);
 					return false;
@@ -6381,7 +6648,7 @@ async function ensureToolResolved(
 		}
 		let installed: boolean;
 		try {
-			installed = await installTool(toolId);
+			installed = await installTool(toolId, lock.ownsLock);
 		} finally {
 			await lock.release();
 		}
@@ -6555,7 +6822,7 @@ async function ensureToolResolved(
 				);
 				return installedByPeer;
 			}
-			installed = await installTool(toolId);
+			installed = await installTool(toolId, lock.ownsLock);
 		} finally {
 			await lock.release();
 		}

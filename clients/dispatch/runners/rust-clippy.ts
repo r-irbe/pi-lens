@@ -157,16 +157,19 @@ const rustClippyRunner: RunnerDefinition = {
 		// Parse JSON output. span.file is relative to the package root, so pass
 		// the cargo dir to resolve diagnostics to absolute paths for filtering.
 		const allDiagnostics = parseClippyOutput(raw, ctx.filePath, cargoDir);
-
-		if (allDiagnostics.length === 0) {
-			// Non-parseable output
-			return {
-				status: "failed",
-				diagnostics: [],
-				semantic: "warning",
-				rawOutput: raw.substring(0, 500),
-			};
-		}
+		const hasRecognizedCargoOutput = raw.split("\n").some((line) => {
+			try {
+				const reason = JSON.parse(line).reason;
+				return (
+					reason === "build-finished" ||
+					reason === "compiler-artifact" ||
+					reason === "compiler-message" ||
+					reason === "build-script-executed"
+				);
+			} catch {
+				return false;
+			}
+		});
 
 		// Lint-style policy (#265 B1): `cargo clippy` compiles the whole crate, so
 		// a crate-mate's pre-existing diagnostic must NOT fail the edited file's
@@ -180,16 +183,53 @@ const rustClippyRunner: RunnerDefinition = {
 		const diagnostics = allDiagnostics.filter((d) =>
 			pathsEqual(resolve(cargoDir, d.filePath), absEdited),
 		);
+		const hasBlocking = diagnostics.some((d) => d.semantic === "blocking");
+		const semantic = hasBlocking
+			? "blocking"
+			: diagnostics.length > 0
+				? "warning"
+				: "none";
 
-		const hasErrors = diagnostics.some((d) => d.semantic === "blocking");
+		if (result.error || result.failure) {
+			return {
+				status: "failed",
+				diagnostics,
+				semantic,
+				failureKind:
+					result.failure === "timeout" ||
+					result.spawnFailure?.kind === "timeout"
+						? "timeout"
+						: "server_error",
+				rawOutput: raw.substring(0, 500),
+			};
+		}
+
+		if (
+			allDiagnostics.length === 0 &&
+			!(result.status === 0 && hasRecognizedCargoOutput)
+		) {
+			// Non-parseable output
+			return {
+				status: "failed",
+				diagnostics: [],
+				semantic: "warning",
+				rawOutput: raw.substring(0, 500),
+			};
+		}
+
+		// #3751: `status` is the execution outcome, not a severity channel. clippy
+		// ran and produced parseable output, so the run succeeded even when a
+		// deny-level lint is present; severity lives in `semantic` and the
+		// diagnostics. The dispatcher derives blocking from `semantic ===
+		// "blocking"` (dispatcher.ts), never from `status`. `status: "failed"` is
+		// reserved for the unparsable-output arm above — a genuine failure to
+		// produce a usable result. Spawn failures remain failed even when their
+		// partial output contains parseable diagnostics, with failureKind preserving
+		// the cause for consumers.
 		return {
-			status: hasErrors ? "failed" : "succeeded",
+			status: "succeeded",
 			diagnostics,
-			semantic: hasErrors
-				? "blocking"
-				: diagnostics.length > 0
-					? "warning"
-					: "none",
+			semantic,
 		};
 	},
 };

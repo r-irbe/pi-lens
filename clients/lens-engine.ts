@@ -27,7 +27,7 @@ import {
 } from "./instance-registry.js";
 import { extensionsForLanguageToken } from "./language-registry.js";
 import { initLSPConfig } from "./lsp/config.js";
-import { getLSPService } from "./lsp/index.js";
+import { getLSPService } from "./lsp/capabilities.js";
 import { acquireWarmWordIndex } from "./mcp/analyze.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
@@ -56,6 +56,7 @@ export {
 	createWarmIpcRequestQueue,
 	ipcPathForCwd,
 	readTurnEndStatus,
+	unlinkStaleUnixSocket,
 	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmAnalyzeRequest,
 	type WarmTurnEndRequest,

@@ -167,10 +167,40 @@ type ParseCacheMeasurement = TreeCacheCounters & TreeSitterParserCounters;
 /**
  * Result of a cache-safe parse. `parsed: false` means the grammar/parse was
  * unavailable — distinct from a consumer that legitimately returned null.
+ * `wasmTrap` (#3605) means a web-tree-sitter trap cost this input its parse:
+ * `retry` after the input's first trap, `charged` once it has trapped twice
+ * and is skipped until its content changes.
  */
 export type ParsedTreeOutcome<T> =
 	| { parsed: true; value: T }
-	| { parsed: false };
+	| { parsed: false; wasmTrap?: WasmTrapState };
+
+export type WasmTrapState = "retry" | "charged";
+
+/** What a trap is charged to (#3605): a file's language and content, or a
+ * query's cache key. `key` is its hash, computed on first need.
+ *
+ * `caller` names who is acting on the input: a consumer of the parsed tree,
+ * or none for the parse itself and a query compile. It is not part of the
+ * key, so every caller of one content shares one entry and one budget unit
+ * (#3678 F5, F6). It only decides which success may decay the entry (F2). */
+export interface WasmInput {
+	languageId: string;
+	source: string;
+	key?: string;
+	caller?: string;
+}
+
+/**
+ * The trap-map input a compiled query is charged to (#3605; #3678 F-C). The
+ * client's own compile paths and the symbol extractor share this key path, so
+ * one always-trapping query source is charged to itself instead of spending
+ * the process budget at every extractor init and poisoning the runtime on the
+ * fourth (#3678).
+ */
+export function wasmQueryInput(queryKey: string): WasmInput {
+	return { languageId: "query", source: queryKey };
+}
 
 const NOT_PARSED: ParsedTreeOutcome<never> = { parsed: false };
 
@@ -187,6 +217,31 @@ interface QueryBatch {
 	entries: QueryBatchEntry[];
 	/** patternIndex → index into `entries`. */
 	ownerOfPattern: number[];
+	/** The batch cache key: the rule set's identity for trap decay (#3678 F4). */
+	key: string;
+	/** Active scans keep the native query alive after cache invalidation. */
+	users: number;
+	retired: boolean;
+	disposed: boolean;
+}
+
+/**
+ * Consumer leases counted for one in-flight combined build (#4207 F9). A
+ * consumer counts here when it joins, because the batch it will scan does not
+ * exist yet; the build's publication section moves the count onto `users` in
+ * the same synchronous step that makes the batch visible.
+ */
+interface QueryBatchLease {
+	/** Consumers counted at join and not yet moved onto a batch. */
+	count: number;
+	/** The decided batch, `undefined` until the publication section runs. */
+	batch: QueryBatch | null | undefined;
+}
+
+/** One registered in-flight combined build per batch cache key. */
+interface QueryBatchBuild {
+	promise: Promise<QueryBatch | null>;
+	lease: QueryBatchLease;
 }
 
 interface GrammarDirResolutionDeps {
@@ -252,10 +307,67 @@ function grammarFileStamp(filePath: string): string | undefined {
 	}
 }
 
-function isTreeSitterWasmAbortError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	return message.includes("Aborted") || message.includes("abort()");
+/** The loader's unresolved-import stub error (#3996); see the classifier. */
+const UNRESOLVED_IMPORT_MESSAGE = "resolved is not a function";
+
+/**
+ * V8's messages for the three traps the #3605 log shows, as a fallback for
+ * one rewrapped on a plain `Error`. The `instanceof` check below is the
+ * primary test: any other trap (`unreachable`, `divide by zero`, ...) is
+ * classified only while it is still a `WebAssembly.RuntimeError`.
+ */
+const WASM_TRAP_MESSAGES = [
+	"memory access out of bounds",
+	"table index is out of bounds",
+	"null function or function signature mismatch",
+];
+
+/**
+ * The one classification seam for a failure thrown out of web-tree-sitter
+ * (#3605). `abort`: Emscripten `abort()` — the runtime is dead. It is also a
+ * `WebAssembly.RuntimeError`, so the message is tested first. `trap`: a wasm
+ * runtime trap — the runtime lives on, but its heap may be damaged.
+ * `undefined`: not a wasm failure.
+ */
+export function classifyTreeSitterWasmError(
+	thrown: unknown,
+): "abort" | "trap" | undefined {
+	const message = thrown instanceof Error ? thrown.message : String(thrown);
+	if (message.includes("Aborted") || message.includes("abort()")) {
+		return "abort";
+	}
+	// `WebAssembly` is a runtime global the build's `lib` does not declare.
+	// SAFETY: every supported Node runtime defines `WebAssembly` with a
+	// `RuntimeError` constructor; the cast only names that global for the
+	// `instanceof` check below and reads nothing else from it.
+	const { WebAssembly } = globalThis as unknown as {
+		WebAssembly: { RuntimeError: new () => Error };
+	};
+	if (thrown instanceof WebAssembly.RuntimeError) return "trap";
+	// #3996: a grammar that imports a libc symbol web-tree-sitter's main module
+	// does not export (the tree-sitter-wasms@0.1.13 bash wasm imports
+	// `isalpha`) gets an unresolved-import stub from the emscripten loader
+	// (`resolved(...args)` in tree-sitter.js `resolveSymbol`). Calling it throws
+	// a plain TypeError out of wasm mid-call, with the same damage as a trap.
+	// Exact message and class only: a bare "is not a function" is a JS bug.
+	if (thrown instanceof TypeError && message === UNRESOLVED_IMPORT_MESSAGE) {
+		return "trap";
+	}
+	return WASM_TRAP_MESSAGES.some((trap) => message.includes(trap))
+		? "trap"
+		: undefined;
 }
+
+/**
+ * Traps a process absorbs before it is treated as an abort (#3605). A trap
+ * recycles the parsers and the tree cache. Web-tree-sitter keeps one wasm
+ * instance per process, so nothing short of a restart resets its heap; a trap
+ * that keeps recurring means that heap is damaged.
+ */
+export const WASM_TRAP_BUDGET = 3;
+
+/** Distinct scanner traps before retiring one grammar (#4010). */
+export const GRAMMAR_TRAP_LATCH_THRESHOLD = WASM_TRAP_BUDGET - 1;
 
 /**
  * Positively-identified RESOLUTION-failure codes for a dynamic `import()`:
@@ -475,6 +587,12 @@ export class TreeSitterClient {
 	private queryBatchCache = new BoundedFifoMap<string, QueryBatch | null>(
 		TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES,
 	);
+	/** Concurrent callers share one native batch build per cache key. */
+	private queryBatchBuilds = new Map<string, QueryBatchBuild>();
+	/** Advances whenever a successful query input heal can invalidate a build. */
+	private queryBatchHealEpoch = 0;
+	/** Raw and batch cache keys represented by each bounded entry (#3834). */
+	private queryBatchInputs = new Map<string, Set<string>>();
 	private queryCacheCap(): number {
 		const value = Number.parseInt(
 			process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP ?? "",
@@ -508,13 +626,71 @@ export class TreeSitterClient {
 		for (const [, dropped] of evicted) dropped?.query?.delete?.();
 	}
 
-	private cacheQueryBatch(key: string, value: QueryBatch | null): void {
+	private cacheQueryBatch(
+		key: string,
+		value: QueryBatch | null,
+		inputKeys: Iterable<string> = [],
+	): void {
+		const replaced = this.queryBatchCache.get(key);
 		this.queryBatchCache.delete(key);
+		if (replaced) this.retireQueryBatch(replaced);
 		const evicted = this.queryBatchCache.setMaxEntries(
 			this.queryBatchCacheCap(),
 		);
 		evicted.push(...this.queryBatchCache.set(key, value));
-		for (const [, dropped] of evicted) dropped?.query?.delete?.();
+		for (const [evictedKey] of evicted)
+			this.queryBatchInputs.delete(evictedKey);
+		this.queryBatchInputs.set(key, new Set(inputKeys));
+		for (const [, dropped] of evicted) this.retireQueryBatch(dropped);
+	}
+
+	private disposeQueryBatch(batch: QueryBatch): void {
+		if (batch.disposed) return;
+		batch.disposed = true;
+		batch.query?.delete?.();
+	}
+
+	private retireQueryBatch(batch: QueryBatch | null): void {
+		if (!batch) return;
+		batch.retired = true;
+		if (batch.users === 0) {
+			this.disposeQueryBatch(batch);
+		} else {
+			incrementDegradationCount({
+				kind: "wasm-query-batch-disposal-deferred",
+				subject: "web-tree-sitter",
+				reason: "deferred batch disposal while a scan is active",
+			});
+		}
+	}
+
+	private retainQueryBatch(batch: QueryBatch): void {
+		batch.users++;
+	}
+
+	private releaseQueryBatch(batch: QueryBatch): void {
+		batch.users--;
+		if (batch.retired && batch.users === 0) this.disposeQueryBatch(batch);
+	}
+
+	/**
+	 * Move the leases counted at join onto the batch they were built for, and
+	 * mark the build decided (#4207 F9). Runs in the same synchronous section
+	 * that publishes the batch, so a batch is never visible to a heal without
+	 * its consumers' leases: the heal then defers disposal to the last release
+	 * instead of deleting the native Query under scans that are about to run it
+	 * and silently report zero findings. A later joiner reads `lease.batch` and
+	 * retains directly, because the counter is drained.
+	 */
+	private takeQueryBatchLeases(
+		lease: QueryBatchLease,
+		batch: QueryBatch | null,
+	): QueryBatch | null {
+		lease.batch = batch;
+		if (!batch) return null;
+		batch.users += lease.count;
+		lease.count = 0;
+		return batch;
 	}
 	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
 	private queryBatchLoadFailures = new Map<string, number>();
@@ -526,6 +702,30 @@ export class TreeSitterClient {
 	private activeMeasurements = 0;
 	private onWasmAbort: (() => void) | undefined;
 	private wasmAborted = false;
+	/** Traps absorbed so far. Process-lifetime like `wasmAborted`: the heap
+	 * outlives sessions, so no session reset may re-arm it (#3605). */
+	private wasmTraps = 0;
+	/** Traps already counted, so one that passes two report sites (the
+	 * extractor's `queryMatches`, then `parseFileAndUse`) costs one unit. */
+	private reportedTraps = new WeakSet<object>();
+	/** Traps per input (#3605). An input's first trap spends budget; its second
+	 * charges the input, which is then skipped until its content changes. Only
+	 * a trap that spends budget (or escalates) adds an entry, so the map never
+	 * holds more than `WASM_TRAP_BUDGET + 1`. */
+	private trappedInputs = new Map<
+		string,
+		{ traps: number; by: string | undefined; source?: string | undefined }
+	>();
+	/** Distinct input keys that trapped (first trap) and have not healed, by
+	 * language. Process-lifetime. A key enters only on a trap, a first trap
+	 * spends budget, and the budget aborts the process after `WASM_TRAP_BUDGET + 1`
+	 * of them, so at most that many keys exist across all languages. */
+	private grammarTrapInputs = new Map<string, Set<string>>();
+	/** Grammars retired for the process after repeated scanner traps. */
+	private retiredGrammars = new Map<string, string>();
+	/** The input `parseFileAndUse` is consuming. That region is synchronous, so
+	 * a report nested in it (the extractor's `queryMatches`) is charged to it. */
+	private activeWasmInput: WasmInput | undefined;
 	private readonly grammarDirResolutionDeps: GrammarDirResolutionDeps;
 
 	constructor(
@@ -563,18 +763,158 @@ export class TreeSitterClient {
 		if (measurement) measurement[key] += amount;
 	}
 
-	reportWasmAbort(error: unknown): boolean {
-		if (!isTreeSitterWasmAbortError(error)) return false;
+	/**
+	 * True when the wasm runtime is dead: `error` is an abort, or the trap past
+	 * {@link WASM_TRAP_BUDGET}. Either poisons the process. A trap within the
+	 * budget recycles the parsers and the tree cache, is counted, and returns
+	 * false, so each caller keeps its own non-fatal path (#3605). A trap on an
+	 * `input` that has trapped before is charged to that input instead: no
+	 * budget, no recycle.
+	 */
+	reportWasmAbort(
+		thrown: unknown,
+		input: WasmInput | undefined = this.activeWasmInput,
+	): boolean {
+		const failure = classifyTreeSitterWasmError(thrown);
+		if (!failure) return false;
+		const message = thrown instanceof Error ? thrown.message : String(thrown);
+		if (failure === "trap") {
+			if (typeof thrown === "object" && thrown !== null) {
+				if (this.reportedTraps.has(thrown)) return this.wasmAborted;
+				this.reportedTraps.add(thrown);
+			}
+			if (input) {
+				const key = this.wasmInputKey(input);
+				this.countGrammarTrapInput(input.languageId, key);
+				const entry = this.trappedInputs.get(key);
+				if (entry) {
+					entry.traps++;
+					// A second trap on one input is that input's fault, not the
+					// heap's: charge it, and spend no budget (#3605).
+					incrementDegradationCount({
+						kind: "wasm-trap",
+						subject: "web-tree-sitter",
+						reason: `input charged: ${message}`,
+					});
+					return false;
+				}
+				this.trappedInputs.set(key, {
+					traps: 1,
+					by: input.caller,
+					source: input.languageId === "query" ? input.source : undefined,
+				});
+			}
+			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {
+				incrementDegradationCount({
+					kind: "wasm-trap",
+					subject: "web-tree-sitter",
+					reason: message,
+				});
+				// Dropped, not deleted: a caller may hold a parser across the await
+				// in `parseFileAndUse`. The leak is at most one parser per language
+				// per trap, and the budget caps the traps.
+				this.parsers.clear();
+				this.treeCache.clear();
+				return false;
+			}
+		}
 		if (!this.wasmAborted) {
 			this.wasmAborted = true;
 			recordDegradation({
 				kind: "wasm-abort",
 				subject: "web-tree-sitter",
-				reason: error instanceof Error ? error.message : String(error),
+				reason:
+					failure === "trap"
+						? `${WASM_TRAP_BUDGET} wasm traps absorbed, next one: ${message}`
+						: message,
 			});
 			this.onWasmAbort?.();
 		}
 		return true;
+	}
+
+	/**
+	 * Count `key` as a distinct trapping input of `languageId`'s grammar and
+	 * retire the grammar at {@link GRAMMAR_TRAP_LATCH_THRESHOLD} of them (#4010).
+	 * The first trap of an input is what counts: most surfaces parse fresh bytes
+	 * per edit, so waiting for a retry would let distinct bad files spend the
+	 * whole budget first. A repeat trap of one input adds nothing (set), and
+	 * `clearWasmInput` removes the key when the trapper's own parse succeeds.
+	 */
+	private countGrammarTrapInput(languageId: string, key: string): void {
+		const grammarFile = LANGUAGE_TO_GRAMMAR[languageId];
+		if (!grammarFile) return;
+		let inputs = this.grammarTrapInputs.get(languageId);
+		if (!inputs) this.grammarTrapInputs.set(languageId, (inputs = new Set()));
+		inputs.add(key);
+		if (inputs.size >= GRAMMAR_TRAP_LATCH_THRESHOLD) {
+			this.retiredGrammars.set(languageId, grammarFile);
+			this.recordGrammarBlocked(grammarFile);
+		}
+	}
+
+	private wasmInputKey(input: WasmInput): string {
+		input.key ??= crypto
+			.createHash("sha256")
+			.update(input.languageId)
+			.update("\0")
+			.update(input.source)
+			.digest("hex");
+		return input.key;
+	}
+
+	/** Traps charged to `input` so far; no hash while nothing has trapped. */
+	private wasmInputTraps(input: WasmInput | undefined): number {
+		if (!input || this.trappedInputs.size === 0) return 0;
+		return this.trappedInputs.get(this.wasmInputKey(input))?.traps ?? 0;
+	}
+
+	/**
+	 * Forget `input`'s trap entry after it parsed or compiled successfully
+	 * (#3678 F-A). A trap can be a one-off on an otherwise healthy input, so a
+	 * stale entry would let the next one-off trap charge the input and skip it
+	 * for the rest of the process. The hash is already computed on this path,
+	 * and the map is non-empty; the process budget still bounds trap absorption.
+	 * Only a success by the entry's first trapper decays it (#3678 F2, F4): a
+	 * healthy consumer says nothing about another consumer's trap.
+	 */
+	clearWasmInput(
+		input: WasmInput | undefined,
+		internalBatchHeal = false,
+	): void {
+		if (!input || this.trappedInputs.size === 0) return;
+		const key = this.wasmInputKey(input);
+		const entry = this.trappedInputs.get(key);
+		const source = entry?.source;
+		if (entry?.by === input.caller) {
+			this.trappedInputs.delete(key);
+			this.grammarTrapInputs.get(input.languageId)?.delete(key);
+			if (!internalBatchHeal) this.queryBatchHealEpoch++;
+			// A batch that skipped this input (or cached null after it was charged)
+			// is no longer equivalent to a clean rebuild. Invalidate it before the
+			// healed entry becomes observable (#3834).
+			for (const [batchKey, batch] of this.queryBatchCache) {
+				const inputs = this.queryBatchInputs.get(batchKey);
+				if (!source || !inputs?.has(source)) continue;
+				this.queryBatchCache.delete(batchKey);
+				this.queryBatchInputs.delete(batchKey);
+				this.retireQueryBatch(batch);
+			}
+		}
+	}
+
+	/** The not-parsed outcome for `thrown` on `input` (#3605). */
+	private notParsed(
+		thrown: unknown,
+		input: WasmInput | undefined,
+	): ParsedTreeOutcome<never> {
+		if (!input || classifyTreeSitterWasmError(thrown) !== "trap") {
+			return NOT_PARSED;
+		}
+		return {
+			parsed: false,
+			wasmTrap: this.wasmInputTraps(input) > 1 ? "charged" : "retry",
+		};
 	}
 
 	/**
@@ -837,6 +1177,19 @@ export class TreeSitterClient {
 		this.grammarLastNotifiedDelayMs.clear();
 		this.poisonedGrammarPaths.clear();
 		this.staleReportedGrammarPaths.clear();
+		for (const grammarFile of this.retiredGrammars.values()) {
+			this.recordGrammarBlocked(grammarFile);
+		}
+	}
+
+	private recordGrammarBlocked(grammarFile: string): void {
+		recordDegradationOnce({
+			kind: "grammar-blocked",
+			subject: grammarFile,
+			reason:
+				`grammar retired after ${GRAMMAR_TRAP_LATCH_THRESHOLD} distinct WASM traps; ` +
+				"structural analysis is unavailable for this language until restart",
+		});
 	}
 
 	/**
@@ -1473,6 +1826,7 @@ export class TreeSitterClient {
 	 */
 	resetLoadStateForSession(): void {
 		this.webTreeSitterLoadFailed = false;
+		this.refreshGrammarSessionLatches();
 	}
 
 	/** Load language grammar */
@@ -1481,6 +1835,7 @@ export class TreeSitterClient {
 	): Promise<TreeSitterLanguage | null> {
 		if (this.wasmAborted) return null;
 		this.dbg(`Loading language: ${languageId}`);
+		if (this.retiredGrammars.has(languageId)) return null;
 
 		if (this.languages.has(languageId)) {
 			this.dbg(`Language ${languageId} already loaded`);
@@ -1552,8 +1907,13 @@ export class TreeSitterClient {
 			// vouched for — e.g. "Code section extends past end of the module" on
 			// a truncated-but-magic-valid download. That is evidence the file
 			// itself is bad, not the runtime, so record it and stop vouching for
-			// this exact file so the next demand can re-fetch it.
-			if (!this.reportWasmAbort(err)) {
+			// this exact file so the next demand can re-fetch it. A trap here
+			// runs in the grammar's own module code, so it is charged to the
+			// file too, not to the trap budget: one bad grammar must not
+			// poison every language (#3605).
+			if (classifyTreeSitterWasmError(err) === "abort") {
+				this.reportWasmAbort(err);
+			} else {
 				this.recordGrammarLoadFailure(grammarPath, grammarFile, err);
 			}
 			this.dbg(`Language load error: ${err}`);
@@ -1594,6 +1954,7 @@ export class TreeSitterClient {
 			languageId,
 			contentOverride,
 			(tree) => tree,
+			"parseFile",
 		);
 		return outcome.parsed ? outcome.value : null;
 	}
@@ -1603,8 +1964,15 @@ export class TreeSitterClient {
 		languageId: string,
 		contentOverride: string | undefined,
 		consume: (tree: TreeSitterTree) => T,
+		caller = "withParsedTree",
 	): Promise<ParsedTreeOutcome<T>> {
-		return this.parseFileAndUse(filePath, languageId, contentOverride, consume);
+		return this.parseFileAndUse(
+			filePath,
+			languageId,
+			contentOverride,
+			consume,
+			caller,
+		);
 	}
 
 	private async parseFileAndUse<T>(
@@ -1612,6 +1980,7 @@ export class TreeSitterClient {
 		languageId: string,
 		contentOverride: string | undefined,
 		consume: (tree: TreeSitterTree) => T,
+		caller: string,
 	): Promise<ParsedTreeOutcome<T>> {
 		this.dbg(`Parsing ${filePath} with language ${languageId}`);
 		const parser = await this.getParser(languageId);
@@ -1621,9 +1990,16 @@ export class TreeSitterClient {
 		}
 
 		let tree: TreeSitterTree;
+		let input: WasmInput | undefined;
 		try {
 			const content = contentOverride ?? fs.readFileSync(filePath, "utf-8");
 			this.dbg(`File content length: ${content.length}`);
+			// #3678 F5: the parse carries no caller; the content traps it for all.
+			input = { languageId, source: content };
+			// #3605: an input that trapped twice is not parsed again.
+			if (this.wasmInputTraps(input) > 1) {
+				return { parsed: false, wasmTrap: "charged" };
+			}
 
 			const cachedTree = this.treeCache.get(filePath, content, languageId);
 			if (cachedTree) {
@@ -1647,15 +2023,39 @@ export class TreeSitterClient {
 				this.treeCache.set(filePath, content, languageId, tree);
 			}
 		} catch (err) {
-			this.reportWasmAbort(err);
+			this.reportWasmAbort(err, input);
 			this.dbg(`Parse error: ${err}`);
-			return NOT_PARSED;
+			return this.notParsed(err, input);
 		}
+		// #3678 F-A: a clean parse heals a parse-phase entry, whoever asked.
+		this.clearWasmInput(input);
+		// The consumer shares the parse's entry and key; its identity decides
+		// only which of its own successes may decay that entry (#3678 F2, F4).
+		input = { ...input, caller };
 		try {
-			return { parsed: true, value: consume(tree) };
-		} catch (error) {
-			this.reportWasmAbort(error);
-			throw error;
+			this.activeWasmInput = input;
+			// #3678 F1: an entry a trap sets inside `consume` must survive the
+			// success path. A swallowing consumer returns normally after it
+			// reports the trap, so snapshot the count and clear only when this
+			// call did not charge the input itself.
+			const trapsBefore = this.wasmInputTraps(input);
+			const value = consume(tree);
+			if (this.wasmInputTraps(input) <= trapsBefore) {
+				// #3678 F-A: a healthy consume by the consumer that trapped drops
+				// its entry, so a later one-off trap starts from `retry`.
+				this.clearWasmInput(input);
+			}
+			return { parsed: true, value };
+		} catch (thrown) {
+			// #3605: a wasm abort or trap while querying the tree degrades this
+			// file alone, like a failed parse; any other error is a bug.
+			this.reportWasmAbort(thrown);
+			if (classifyTreeSitterWasmError(thrown)) {
+				return this.notParsed(thrown, input);
+			}
+			throw thrown;
+		} finally {
+			this.activeWasmInput = undefined;
 		}
 	}
 
@@ -1743,7 +2143,7 @@ export class TreeSitterClient {
 
 	/** Get loaded language for symbol extraction */
 	getLanguage(languageId: string): TreeSitterLanguage | null {
-		if (this.wasmAborted) return null;
+		if (this.wasmAborted || this.retiredGrammars.has(languageId)) return null;
 		return this.languages.get(languageId) || null;
 	}
 
@@ -1850,7 +2250,7 @@ export class TreeSitterClient {
 			compiled.query,
 			compiled.metavars,
 			languageId,
-			queryDef.id,
+			`${queryDef.id}\0${queryDef.query}`,
 			compiled.postFilter,
 			compiled.postFilterParams,
 			contentOverride,
@@ -1886,7 +2286,7 @@ export class TreeSitterClient {
 		}
 		const maxResults = options.maxResults ?? 50;
 
-		const batch = await this.compileQueryBatch(queryDefs, languageId);
+		const batch = await this.compileQueryBatch(queryDefs, languageId, true);
 		if (!batch) {
 			// Fallback: one walk per rule, preserving rule order.
 			const results: Array<{
@@ -1905,7 +2305,6 @@ export class TreeSitterClient {
 			}
 			return results;
 		}
-
 		const perQuery = new Map<number, StructuralMatch[]>();
 		await this.parseFileAndUse(
 			filePath,
@@ -1959,7 +2358,10 @@ export class TreeSitterClient {
 					this.dbg(`Batched query matching error: ${err}`);
 				}
 			},
-		);
+			// #3678 F4: the scanner and the dispatch runner run different rule
+			// sets under this one call site.
+			`runQueriesOnFile\0${batch.key}`,
+		).finally(() => this.releaseQueryBatch(batch));
 
 		const results: Array<{
 			queryDef: TreeSitterQuery;
@@ -1980,6 +2382,54 @@ export class TreeSitterClient {
 	private async compileQueryBatch(
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
+		retain = false,
+	): Promise<QueryBatch | null> {
+		const identity = crypto
+			.createHash("sha256")
+			.update(JSON.stringify(queryDefs))
+			.digest("hex");
+		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
+		const cached = this.queryBatchCache.get(cacheKey);
+		if (cached !== undefined) {
+			this.queryBatchCache.delete(cacheKey);
+			this.queryBatchCache.set(cacheKey, cached);
+			if (retain && cached) this.retainQueryBatch(cached);
+			return cached;
+		}
+		const inFlight = this.queryBatchBuilds.get(cacheKey);
+		if (inFlight) {
+			// Lease rule (#4207 F9): a waiter counts its lease when it joins, not
+			// when the shared build resolves — a heal that lands between the
+			// publication and a late retain would otherwise dispose the native
+			// Query under every coalesced scan. A build that has already decided
+			// drained its counter, so the lease goes onto the batch directly.
+			if (retain) {
+				const decided = inFlight.lease.batch;
+				if (decided === undefined) inFlight.lease.count++;
+				else if (decided) this.retainQueryBatch(decided);
+			}
+			return inFlight.promise;
+		}
+
+		const lease: QueryBatchLease = { count: retain ? 1 : 0, batch: undefined };
+		const promise = this.compileQueryBatchOnce(queryDefs, languageId, lease);
+		const build: QueryBatchBuild = { promise, lease };
+		this.queryBatchBuilds.set(cacheKey, build);
+		try {
+			// The owner's lease is already counted in `lease`; the publication
+			// section moves it onto the batch, so no retain happens here.
+			return await promise;
+		} finally {
+			if (this.queryBatchBuilds.get(cacheKey) === build) {
+				this.queryBatchBuilds.delete(cacheKey);
+			}
+		}
+	}
+
+	private async compileQueryBatchOnce(
+		queryDefs: TreeSitterQuery[],
+		languageId: string,
+		lease: QueryBatchLease,
 	): Promise<QueryBatch | null> {
 		// Key on rule CONTENT, not just ids: the batch stores each queryDef (its
 		// message reaches diagnostics) and the compiled patterns. Rule ids are
@@ -1992,12 +2442,26 @@ export class TreeSitterClient {
 			.update(JSON.stringify(queryDefs))
 			.digest("hex");
 		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
+		const inputKeys = [
+			cacheKey,
+			...queryDefs.map((queryDef) =>
+				this.getQueryCacheKey(
+					`raw:${queryDef.id}:${queryDef.query}`,
+					languageId,
+				),
+			),
+		];
 		const cached = this.queryBatchCache.get(cacheKey);
 		if (cached !== undefined) {
 			this.queryBatchCache.delete(cacheKey);
 			this.queryBatchCache.set(cacheKey, cached);
-			return cached;
+			// Defensive: the caller checked this key in the same synchronous
+			// section, so nothing can have published in between. Settled anyway,
+			// because a counted lease that no batch receives would be released
+			// against another consumer's count (#4207 F9).
+			return this.takeQueryBatchLeases(lease, cached);
 		}
+		const healEpoch = this.queryBatchHealEpoch;
 
 		// A loadLanguage() failure is transient (offline lazy grammar fetch,
 		// transient mid-scan load error) — do NOT cache null for it, or every
@@ -2012,15 +2476,26 @@ export class TreeSitterClient {
 					`Batch: grammar for ${languageId} failed to load ${failures} times — caching miss`,
 				);
 				this.queryBatchLoadFailures.delete(cacheKey);
-				this.cacheQueryBatch(cacheKey, null);
+				this.cacheQueryBatch(cacheKey, null, inputKeys);
 			} else {
 				this.queryBatchLoadFailures.set(cacheKey, failures);
 			}
-			return null;
+			return this.takeQueryBatchLeases(lease, null);
 		}
 		this.queryBatchLoadFailures.delete(cacheKey);
 
+		// #3707: a compile that trapped this build makes the result degraded (a
+		// rule skipped, or the batch nulled). A transient trap must not stay
+		// cached for the process, so such a build is not cached below.
+		let trapped = false;
+		// One entry per query source (#3605): the combined compile is charged to
+		// the batch key, each probe to the rule's raw-query key, which
+		// `compileRawQuery` shares. A charged key is never compiled again, so
+		// its cached result is permanent either way.
+		const batchInput = wasmQueryInput(cacheKey);
+
 		const build = async (): Promise<QueryBatch | null> => {
+			if (this.wasmInputTraps(batchInput) > 1) return null;
 			const Query = (await loadWebTreeSitter()).Query;
 
 			const entries: QueryBatchEntry[] = [];
@@ -2028,13 +2503,25 @@ export class TreeSitterClient {
 			const ownerOfPattern: number[] = [];
 			for (const queryDef of queryDefs) {
 				let patternCount: number;
+				const probeInput = wasmQueryInput(
+					this.getQueryCacheKey(
+						`raw:${queryDef.id}:${queryDef.query}`,
+						languageId,
+					),
+				);
+				if (this.wasmInputTraps(probeInput) > 1) {
+					this.dbg(`Batch: skipping ${queryDef.id}, its compile trapped twice`);
+					continue;
+				}
 				try {
 					// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 					const probe = new Query(language as any, queryDef.query);
 					patternCount = probe.patternCount();
 					probe.delete?.();
+					this.clearWasmInput(probeInput, true);
 				} catch (err) {
-					if (this.reportWasmAbort(err)) return null;
+					if (this.reportWasmAbort(err, probeInput)) return null;
+					if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
 					// A rule that can't compile against THIS grammar is simply not
 					// applicable here (e.g. a `type_annotation` pattern on javascript).
 					this.dbg(`Batch: skipping ${queryDef.id} for ${languageId}: ${err}`);
@@ -2062,16 +2549,40 @@ export class TreeSitterClient {
 					);
 					return null;
 				}
-				return { query, entries, ownerOfPattern };
+				this.clearWasmInput(batchInput, true);
+				return {
+					query,
+					entries,
+					ownerOfPattern,
+					key: cacheKey,
+					users: 0,
+					retired: false,
+					disposed: false,
+				};
 			} catch (err) {
-				if (this.reportWasmAbort(err)) return null;
+				if (this.reportWasmAbort(err, batchInput)) return null;
+				if (classifyTreeSitterWasmError(err) === "trap") trapped = true;
 				this.dbg(`Batch compile failed for ${languageId}: ${err}`);
 				return null;
 			}
 		};
 
 		const batch = await build();
-		this.cacheQueryBatch(cacheKey, batch);
+		const published = !trapped && this.queryBatchHealEpoch === healEpoch;
+		// Lease rule (#4207 F9): the consumers counted at join take their leases
+		// before the batch becomes visible, in the same synchronous section that
+		// publishes it.
+		this.takeQueryBatchLeases(lease, batch);
+		if (published) {
+			this.cacheQueryBatch(cacheKey, batch, inputKeys);
+		} else {
+			// Disposal rule (#4207 F10): a batch this build does not publish is
+			// unreachable through the cache, so retire it here and let the last
+			// consumer's release free the native Query. Without this, every
+			// epoch-skipped or trapped build leaks one Query for the process
+			// lifetime, and nothing the process reclaims bounds the count.
+			this.retireQueryBatch(batch);
+		}
 		return batch;
 	}
 
@@ -2224,6 +2735,10 @@ export class TreeSitterClient {
 			return cached;
 		}
 
+		// #3605: a query whose compile trapped twice is not compiled again.
+		const input = wasmQueryInput(cacheKey);
+		if (this.wasmInputTraps(input) > 1) return null;
+
 		const language = await this.loadLanguage(languageId);
 		if (!language) {
 			this.dbg(`Could not load language ${languageId}`);
@@ -2246,11 +2761,13 @@ export class TreeSitterClient {
 			this.dbg(`Query compiled with ${query.patternCount()} patterns`);
 
 			const result = { query, metavars, postFilter, postFilterParams };
+			// #3678 F-A: a successful compile drops this query source's entry.
+			this.clearWasmInput(input);
 			// Cache the compiled query
 			this.cacheQuery(cacheKey, result);
 			return result;
 		} catch (err) {
-			this.reportWasmAbort(err);
+			this.reportWasmAbort(err, input);
 			this.dbg(`Query compilation failed: ${err}`);
 			return null;
 		}
@@ -2282,6 +2799,10 @@ export class TreeSitterClient {
 			return cached;
 		}
 
+		// #3605: a query whose compile trapped twice is not compiled again.
+		const input = wasmQueryInput(cacheKey);
+		if (this.wasmInputTraps(input) > 1) return null;
+
 		const language = await this.loadLanguage(languageId);
 		if (!language) return null;
 
@@ -2291,10 +2812,12 @@ export class TreeSitterClient {
 			// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 			const query = new Query(language as any, queryStr);
 			const result = { query, metavars, postFilter, postFilterParams };
+			// #3678 F-A: a successful compile drops this query source's entry.
+			this.clearWasmInput(input);
 			this.cacheQuery(cacheKey, result);
 			return result;
 		} catch (err) {
-			this.reportWasmAbort(err);
+			this.reportWasmAbort(err, input);
 			this.dbg(`Raw query compilation failed (${queryId}): ${err}`);
 			this.reportQueryCompileFailure(queryId, languageId, err);
 			return null;
@@ -4675,7 +5198,7 @@ export class TreeSitterClient {
 		query: any,
 		metavars: string[],
 		languageId: string,
-		_originalPattern?: string,
+		queryKey: string,
 		postFilter?: string,
 		// biome-ignore lint/suspicious/noExplicitAny: Post filter params
 		postFilterParams?: any,
@@ -4747,6 +5270,8 @@ export class TreeSitterClient {
 					this.dbg(`Query matching error: ${err}`);
 				}
 			},
+			// #3678 F4: every rule and pattern searched here is its own consumer.
+			`runQueryOnFile\0${queryKey}`,
 		);
 
 		return matches;

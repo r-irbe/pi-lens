@@ -252,10 +252,39 @@ export function enabledAuxiliaryLspServerIds(getFlag: GetFlag): string[] {
 	// isSubagentSession() returning false.
 	if (shouldDegradeAuxiliaryLsp() || isSubagentSession()) return [];
 	return AUXILIARY_LSP_PROFILES.flatMap((p) =>
-		p.enabledByDefault &&
-		!(p.killSwitchFlag && getFlag(p.killSwitchFlag) === true)
-			? [p.serverId]
-			: [],
+		isEnabledByConfiguration(p, getFlag) ? [p.serverId] : [],
+	);
+}
+
+/**
+ * #4323: the auxiliary server ids the operator's configuration turns off: a
+ * profile that is off by default, or whose kill switch is set (`--no-opengrep`
+ * or `opengrep.enabled=false` in the global config, resolved by `getFlag`).
+ *
+ * An explicit all-server check (`lens_diagnostics source=lsp`) passes these to
+ * the LSP service as `excludeServerIds`, so it never starts a scanner the
+ * write-time runner would not start. The session's resource degrade (the LSP
+ * budget, subagent light mode) is deliberately not part of this answer: it is
+ * not a configuration decision, and an explicit request still asks those
+ * scanners.
+ */
+export function configDisabledAuxiliaryLspServerIds(
+	getFlag: GetFlag,
+): ReadonlySet<string> {
+	return new Set(
+		AUXILIARY_LSP_PROFILES.flatMap((p) =>
+			isEnabledByConfiguration(p, getFlag) ? [] : [p.serverId],
+		),
+	);
+}
+
+function isEnabledByConfiguration(
+	profile: AuxiliaryLspProfile,
+	getFlag: GetFlag,
+): boolean {
+	return (
+		profile.enabledByDefault &&
+		!(profile.killSwitchFlag && getFlag(profile.killSwitchFlag) === true)
 	);
 }
 

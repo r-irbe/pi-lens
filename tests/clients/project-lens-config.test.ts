@@ -463,6 +463,15 @@ describe("loadPiLensProjectConfig", () => {
 				.some((arg) => typeof arg === "string" && arg.includes(substring));
 		}
 
+		function noticeFor(substring: string): string | undefined {
+			return (console.error as ReturnType<typeof vi.fn>).mock.calls
+				.flat()
+				.find(
+					(arg): arg is string =>
+						typeof arg === "string" && arg.includes(substring),
+				);
+		}
+
 		it("warns on a typo'd top-level key", () => {
 			fs.writeFileSync(
 				path.join(tmpDir, ".pi-lens.json"),
@@ -565,12 +574,28 @@ describe("loadPiLensProjectConfig", () => {
 				JSON.stringify({
 					delta: { enabled: false },
 					tests: { enabled: false },
+					dispatch: { runnerTimeoutFloorMs: 180_000 },
+					widget: { visible: false },
 				}),
 			);
 			loadPiLensProjectConfig(tmpDir);
 			expect(warnedFor("not honored in a project")).toBe(true);
 			expect(warnedFor('"delta"')).toBe(true);
 			expect(warnedFor('"tests"')).toBe(true);
+			expect(warnedFor('"dispatch"')).toBe(true);
+			expect(warnedFor('"widget"')).toBe(true);
+			const deltaNotice = noticeFor('"delta" is a global-only');
+			const testsNotice = noticeFor('"tests" is a global-only');
+			const dispatchNotice = noticeFor('"dispatch" is a global-only');
+			const widgetNotice = noticeFor('"widget" is a global-only');
+			expect(deltaNotice).toBeDefined();
+			expect(testsNotice).toBeDefined();
+			expect(dispatchNotice).toBeDefined();
+			expect(widgetNotice).toBeDefined();
+			expect(deltaNotice).toContain("pass the matching CLI flag");
+			expect(testsNotice).toContain("pass the matching CLI flag");
+			expect(dispatchNotice).not.toContain("pass the matching CLI flag");
+			expect(widgetNotice).not.toContain("pass the matching CLI flag");
 			// It is NOT reported as a typo — it is a real key, wrong scope.
 			expect(warnedFor('unknown key "delta"')).toBe(false);
 		});
@@ -612,6 +637,8 @@ describe("loadPiLensProjectConfig", () => {
 			loadPiLensProjectConfig(tmpDir);
 			expect(warnedFor("not honored in a project")).toBe(true);
 			expect(warnedFor('"lsp.enabled"')).toBe(true);
+			expect(warnedFor('"lsp.enabled" is a global-only')).toBe(true);
+			expect(warnedFor("pass the matching CLI flag")).toBe(true);
 			// The four honored LSP settings stay silent — they are read from this
 			// very file by the LSP loader.
 			for (const key of [
@@ -1132,6 +1159,25 @@ describe("project-scope tools.<name>.enabled (#3112)", () => {
 		expect(warnCountFor('"lsp.enabled" is a global-only')).toBe(1);
 	});
 
+	// #3968 AC 4 — verify, don't fix: `tools.shellcheck.enabled` is spelled
+	// against a RUNNER id, not a TOOL_REGISTRY tool, so `readToolConfig` must
+	// keep emitting PILENS_CFG_0009 instead of silently no-op'ing. This pin
+	// exists so a future change cannot widen `tools.*` to accept runner ids
+	// without review — the knob would start reading like it works while
+	// governing nothing.
+	it("keeps refusing a runner id under tools.* — shellcheck is a runner, not a tool", () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ tools: { shellcheck: { enabled: false } } }),
+		);
+		loadPiLensProjectConfig(tmpDir);
+		expect(warnedFor("[PILENS_CFG_0009]")).toBe(true);
+		expect(
+			warnedFor('"tools.shellcheck.enabled" is not a recognized pi-lens tool'),
+		).toBe(true);
+		// The setting must not be accepted into tool state either way: no
+		// `tools.shellcheck` entry exists to resolve.
+	});
 	it("leaves an unknown tool name to readToolConfig — one notice, not two", () => {
 		// `readToolConfig` already reports an unrecognized tool name with its own
 		// code (`PILENS_CFG_0009`). A second, generic "check for a typo" notice
@@ -1196,6 +1242,12 @@ describe("non-flag global-only key inside a mixed-scope section (#3131)", () => 
 		expect(
 			warnedFor('"actionableWarnings.autoFix.maxFixes" is a global-only'),
 		).toBe(true);
+		expect(
+			warnedFor(
+				'"actionableWarnings.autoFix.maxFixes" is a global-only pi-lens setting and is not honored in a project',
+			),
+		).toBe(true);
+		expect(warnedFor("pass the matching CLI flag")).toBe(false);
 		expect(warnCountFor("actionableWarnings.autoFix.maxFixes")).toBe(1);
 		// The value never reaches the parsed project config — same non-goal #3126
 		// left this key with: the notice is new, the scope is not.

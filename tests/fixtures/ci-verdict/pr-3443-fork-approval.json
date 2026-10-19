@@ -1,0 +1,157 @@
+{
+  "source": "GitHub REST API, apmantza/pi-lens, PR #3443 head (fork-approval state), fetched 2026-09-30 via gh api",
+  "sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+  "checkRuns": {
+    "total_count": 8,
+    "check_runs": [
+      {
+        "id": 109399833871,
+        "name": "SonarCloud Code Analysis",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:46Z",
+        "html_url": "https://github.com/apmantza/pi-lens/runs/109399833871",
+        "details_url": "https://sonarcloud.io/dashboard?id=apmantza_pi-lens&pullRequest=3443"
+      },
+      {
+        "id": 109399826362,
+        "name": "CodeQL",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:12:16Z",
+        "html_url": "https://github.com/apmantza/pi-lens/runs/109399826362",
+        "details_url": "https://github.com/apmantza/pi-lens/runs/109399826362"
+      },
+      {
+        "id": 109399607153,
+        "name": "Analyze (javascript-typescript)",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:41Z",
+        "html_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399607153",
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399607153"
+      },
+      {
+        "id": 109399606375,
+        "name": "Analyze (python)",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:41Z",
+        "html_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606375",
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606375"
+      },
+      {
+        "id": 109399606373,
+        "name": "Analyze (go)",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:42Z",
+        "html_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606373",
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606373"
+      },
+      {
+        "id": 109399606368,
+        "name": "Analyze (actions)",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:42Z",
+        "html_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606368",
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606368"
+      },
+      {
+        "id": 109399606238,
+        "name": "Analyze (rust)",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:41Z",
+        "html_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606238",
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606238"
+      },
+      {
+        "id": 109399606000,
+        "name": "Analyze (ruby)",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-09-29T12:11:41Z",
+        "html_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606000",
+        "details_url": "https://github.com/apmantza/pi-lens/actions/runs/36566498452/job/109399606000"
+      }
+    ]
+  },
+  "workflowRuns": {
+    "total_count": 7,
+    "workflow_runs": [
+      {
+        "id": 36566498452,
+        "name": "PR #3443",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "success",
+        "event": "dynamic",
+        "run_attempt": 1
+      },
+      {
+        "id": 36566476498,
+        "name": "Lint",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "action_required",
+        "event": "pull_request",
+        "run_attempt": 1
+      },
+      {
+        "id": 36566476511,
+        "name": "Mutation diff",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "action_required",
+        "event": "pull_request",
+        "run_attempt": 1
+      },
+      {
+        "id": 36566476557,
+        "name": "CI infra-kill rerun",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "action_required",
+        "event": "pull_request",
+        "run_attempt": 1
+      },
+      {
+        "id": 36566476485,
+        "name": "Close-keyword syntax",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "action_required",
+        "event": "pull_request",
+        "run_attempt": 1
+      },
+      {
+        "id": 36566476600,
+        "name": "CI",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "action_required",
+        "event": "pull_request",
+        "run_attempt": 1
+      },
+      {
+        "id": 36566477020,
+        "name": "OSV scan",
+        "head_sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+        "status": "completed",
+        "conclusion": "action_required",
+        "event": "pull_request",
+        "run_attempt": 1
+      }
+    ]
+  },
+  "commit": {
+    "sha": "6b10666a87f18cefe60571cbf23bf38db9e1c92d",
+    "commit": {
+      "committer": {
+        "date": "2026-09-29T12:11:15Z"
+      }
+    }
+  }
+}

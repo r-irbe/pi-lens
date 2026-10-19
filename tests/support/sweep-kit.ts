@@ -91,8 +91,9 @@
  *
  * - {@link listSourceFiles}'s `exclude` filters FILES only. It never prunes a
  *   directory walk, so excluding `vendor/x.ts` still descends into `vendor/`.
- *   That is cheap on these trees; a sweep over a `node_modules`-sized tree
- *   needs directory pruning this kit does not offer (#1755 review F5).
+ *   That is cheap on these trees. The one pruning it does offer is the fixed
+ *   {@link RUNTIME_SCRATCH_DIRS} set (#4097); a sweep over any other
+ *   `node_modules`-sized tree still needs more (#1755 review F5).
  * - RESOLVED by #2502: under `strings: "blank"`, a call written inside a
  *   TEMPLATE EXPRESSION (`` `${resetThing()}` ``) used to be blanked with the
  *   rest of the template — a false NEGATIVE, the direction that matters for a
@@ -473,6 +474,511 @@ export function matchingOpenIndex(
 	return -1;
 }
 
+/** Modifiers that take their own argument list before the test call. */
+const ARGUMENT_TAKING_MODIFIERS = new Set(["each", "skipIf", "runIf", "for"]);
+
+/**
+ * Modifiers after which vitest does not run the declaration as written:
+ * skipped, a placeholder, conditional on a runtime value, or inverted
+ * (`fails` passes only when its body fails).
+ */
+const NOT_RUN_MODIFIERS = new Set(["skip", "todo", "skipIf", "runIf", "fails"]);
+
+/** `(`-introducing keywords whose `) {` opens a BLOCK, not a function body. */
+const CONTROL_KEYWORDS = new Set([
+	"if",
+	"for",
+	"while",
+	"switch",
+	"catch",
+	"with",
+]);
+
+/** Bare-brace keywords — `try {`, `else {`, `do {`, `finally {`, `catch {`. */
+const BLOCK_KEYWORDS = new Set(["try", "else", "do", "finally", "catch"]);
+
+/** Loop heads: a declaration in a loop body still runs once per iteration. */
+const LOOP_KEYWORDS = new Set(["for", "while"]);
+
+function prevNonSpace(source: string, from: number): number {
+	let i = from;
+	while (i >= 0 && /\s/.test(source[i])) i--;
+	return i;
+}
+
+/** Index of the first non-space character at or after `from`. */
+export function nextNonSpace(source: string, from: number): number {
+	let i = from;
+	while (i < source.length && /\s/.test(source[i])) i++;
+	return i;
+}
+
+function wordEndingAt(source: string, end: number): string {
+	if (end < 0 || !/[\w$]/.test(source[end])) return "";
+	let start = end;
+	while (start > 0 && /[\w$]/.test(source[start - 1])) start--;
+	return source.slice(start, end + 1);
+}
+
+/** The keyword before the `(` that the `)` at `close` balances, or "". */
+function headKeyword(source: string, close: number): string {
+	const open = matchingOpenIndex(source, close, "(", ")");
+	return open < 0 ? "" : wordEndingAt(source, prevNonSpace(source, open - 1));
+}
+
+/**
+ * Does the `{` at `index` of stripped source open a FUNCTION body (as opposed
+ * to a block or an object literal)? Decided from the preceding token: `=> {`
+ * and `) {` are function bodies unless that `)` closes a control-flow head.
+ */
+export function isFunctionBrace(source: string, index: number): boolean {
+	const j = prevNonSpace(source, index - 1);
+	if (j < 0) return false;
+	if (source[j] === ">" && source[j - 1] === "=") return true;
+	if (source[j] === ")") {
+		if (matchingOpenIndex(source, j, "(", ")") < 0) return false;
+		return !CONTROL_KEYWORDS.has(headKeyword(source, j));
+	}
+	const word = wordEndingAt(source, j);
+	if (word) return !BLOCK_KEYWORDS.has(word);
+	return false;
+}
+
+/** Does the `{` at `index` open a loop body (`for (…) {`, `while (…) {`, `do {`)? */
+function isLoopBrace(source: string, index: number): boolean {
+	const j = prevNonSpace(source, index - 1);
+	if (j < 0) return false;
+	if (source[j] === ")") return LOOP_KEYWORDS.has(headKeyword(source, j));
+	return wordEndingAt(source, j) === "do";
+}
+
+/**
+ * Walk from a declaration identifier through its modifier chain to the `(`
+ * that opens the declaration call itself — `it(`, `it.only(`,
+ * `it.each([...])(`, `it.skipIf(cond)(`, ``it.each`table`(``. Returns
+ * undefined when the chain does not end in a call (`it.todo` with no parens,
+ * a bare mention).
+ */
+function declarationCall(
+	source: string,
+	identifierEnd: number,
+	closes: Int32Array,
+): { paren: number; modifiers: string[] } | undefined {
+	let i = identifierEnd;
+	let lastModifier = "";
+	const modifiers: string[] = [];
+	for (;;) {
+		i = nextNonSpace(source, i);
+		if (i >= source.length) return undefined;
+		const ch = source[i];
+		if (ch === ".") {
+			const start = nextNonSpace(source, i + 1);
+			let end = start;
+			while (end < source.length && /[\w$]/.test(source[end])) end++;
+			if (end === start) return undefined;
+			lastModifier = source.slice(start, end);
+			modifiers.push(lastModifier);
+			i = end;
+			continue;
+		}
+		if (ch === "`" && ARGUMENT_TAKING_MODIFIERS.has(lastModifier)) {
+			const close = source.indexOf("`", i + 1);
+			if (close < 0) return undefined;
+			lastModifier = "";
+			i = close + 1;
+			continue;
+		}
+		if (ch === "(") {
+			if (!ARGUMENT_TAKING_MODIFIERS.has(lastModifier))
+				return { paren: i, modifiers };
+			const close = closes[i] - 1;
+			if (close < 0) return undefined;
+			lastModifier = "";
+			i = close + 1;
+			continue;
+		}
+		return undefined;
+	}
+}
+
+/**
+ * Index of the `{` opening the call's inline callback body, or -1 when it has
+ * none (an extracted handler, a concise arrow body). Nested groups are skipped
+ * whole, so a brace inside an options object or an `each` table cannot be
+ * mistaken for the body. `stripped` is strings-blanked source.
+ */
+export function callbackBodyBrace(
+	stripped: string,
+	callParen: number,
+	callEnd: number,
+): number {
+	for (let i = callParen + 1; i < callEnd; i++) {
+		const ch = stripped[i];
+		if (ch === "(" || ch === "[") {
+			i = matchingCloseIndex(stripped, i, ch, ch === "(" ? ")" : "]");
+			if (i < 0) return -1;
+			continue;
+		}
+		if (ch !== "{") continue;
+		if (isFunctionBrace(stripped, i)) return i;
+		i = matchingCloseIndex(stripped, i, "{", "}");
+		if (i < 0) return -1;
+	}
+	return -1;
+}
+
+/** One vitest declaration found by {@link testDeclarations}. */
+export interface TestDeclaration {
+	/** The first argument as written in the RAW source (escapes unexpanded,
+	 *  `${...}` and `%s` verbatim), or "" when it is not a literal. */
+	title: string;
+	callee: "it" | "test" | "describe" | "suite";
+	/** The chain in order, e.g. `["each"]`, `["skipIf"]`, `["concurrent", "only"]`. */
+	modifiers: string[];
+	/** 1-based line of the callee identifier. */
+	line: number;
+	/**
+	 * Whether a run reaches it, computed on first read for the whole file:
+	 * no not-run marker on it or on an enclosing suite (a `skip`/`todo`/
+	 * `skipIf`/`runIf`/`fails` modifier; an options object whose `skip`,
+	 * `todo` or `fails` key is not literally `false`; options that are not a
+	 * literal; for a test, a skip call in its inline callback); it starts a
+	 * statement at the top level, in a loop body, or directly in a live
+	 * `describe`/`suite` callback (no `if`, no other function, no object
+	 * between); and, in a file with an `.only` (chain or options), it or an
+	 * enclosing suite carries the `.only`.
+	 */
+	readonly live: boolean;
+	/** Index of the `(` that opens the declaration call itself. */
+	callParen: number;
+	/** Index of its balancing `)`. */
+	callEnd: number;
+}
+
+const DECLARATION_IDENTIFIER =
+	/(?<![\w$.])(?:it|test|describe|suite)(?![\w$])/g;
+
+/**
+ * Every `it`/`test`/`describe`/`suite` call in a test file's source, with
+ * whether vitest runs it. The one walker for test-existence detectors
+ * (#4393): a detector that decides a test exists counts only `live`
+ * declarations. Syntactic and conservative: a test declared through an alias,
+ * inside a helper function, or in a concise arrow body reads as not live, a
+ * false red that points the safe way. `stripped`, when given, must be
+ * `stripSource(source)`; a caller that already stripped the file passes it,
+ * so the file is stripped once.
+ */
+export function testDeclarations(
+	source: string,
+	stripped: string = stripSource(source, { strings: "blank" }),
+): TestDeclaration[] {
+	const closes = bracketCloses(stripped);
+	const found: Array<{
+		title: string;
+		callee: TestDeclaration["callee"];
+		modifiers: string[];
+		line: number;
+		callParen: number;
+		callEnd: number;
+		identifier: number;
+	}> = [];
+	for (const match of stripped.matchAll(DECLARATION_IDENTIFIER)) {
+		const call = declarationCall(
+			stripped,
+			match.index + match[0].length,
+			closes,
+		);
+		if (!call) continue;
+		const callEnd = closes[call.paren] - 1;
+		if (callEnd < 0) continue;
+		found.push({
+			title: titleAt(source, stripped, call.paren),
+			callee: match[0] as TestDeclaration["callee"],
+			modifiers: call.modifiers,
+			line: lineOf(stripped, match.index),
+			callParen: call.paren,
+			callEnd,
+			identifier: match.index,
+		});
+	}
+	// Liveness is a whole-file pass, run on the first read of any `live`:
+	// a caller that needs only call positions (vacuous-skip-scan) never pays
+	// it (#4399 verify r2 F1).
+	let liveness: boolean[] | undefined;
+	const live = (index: number): boolean => {
+		liveness ??= declarationLiveness(stripped, closes, found);
+		return liveness[index];
+	};
+	return found.map(({ identifier: _identifier, ...declaration }, index) => ({
+		...declaration,
+		get live() {
+			return live(index);
+		},
+	}));
+}
+
+/** {@link TestDeclaration.live} for every declaration of one file. */
+function declarationLiveness(
+	stripped: string,
+	closes: Int32Array,
+	found: ReadonlyArray<{
+		callee: TestDeclaration["callee"];
+		modifiers: string[];
+		callParen: number;
+		callEnd: number;
+		identifier: number;
+	}>,
+): boolean[] {
+	// The innermost enclosing brace of each declaration that is not a loop
+	// body, in one pass (loop bodies are transparent).
+	const innermostOf: Array<number | undefined> = [];
+	const braces: boolean[] = [];
+	const blocks: number[] = [];
+	let next = 0;
+	for (let i = 0; i < stripped.length && next < found.length; i++) {
+		while (next < found.length && found[next].identifier === i)
+			innermostOf[next++] = blocks.at(-1);
+		const code = stripped.charCodeAt(i);
+		if (code === 123) {
+			const loop = isLoopBrace(stripped, i);
+			braces.push(loop);
+			if (!loop) blocks.push(i);
+		} else if (code === 125 && braces.pop() === false) blocks.pop();
+	}
+	const reachable: boolean[] = [];
+	const underOnly: boolean[] = [];
+	const suiteByBody = new Map<number, number>();
+	for (const [index, declaration] of found.entries()) {
+		const innermost = innermostOf[index];
+		const parent =
+			innermost === undefined ? undefined : suiteByBody.get(innermost);
+		const before = prevNonSpace(stripped, declaration.identifier - 1);
+		const startsStatement =
+			before < 0 ||
+			"{;}".includes(stripped[before]) ||
+			(stripped[before] === ")" &&
+				LOOP_KEYWORDS.has(headKeyword(stripped, before)));
+		const isTest = declaration.callee === "it" || declaration.callee === "test";
+		const options = callOptions(stripped, closes, declaration, isTest);
+		reachable[index] =
+			startsStatement &&
+			(innermost === undefined ||
+				(parent !== undefined && reachable[parent])) &&
+			!declaration.modifiers.some((modifier) =>
+				NOT_RUN_MODIFIERS.has(modifier),
+			) &&
+			!options.notRun;
+		underOnly[index] =
+			declaration.modifiers.includes("only") ||
+			options.only ||
+			(parent !== undefined && underOnly[parent]);
+		if (!isTest) {
+			const body = callbackBodyBrace(
+				stripped,
+				declaration.callParen,
+				declaration.callEnd,
+			);
+			if (body >= 0) suiteByBody.set(body, index);
+		}
+	}
+	const onlyMode = underOnly.some(Boolean);
+	return found.map(
+		(declaration, index) =>
+			reachable[index] &&
+			(!onlyMode ||
+				underOnly[index] ||
+				declaration.callee === "describe" ||
+				declaration.callee === "suite"),
+	);
+}
+
+/** `lineOf`'s newline index, for the last source it read. */
+let lineIndexSource: string | undefined;
+let lineStarts: number[] = [];
+
+/**
+ * 1-based line of `index` in `source`. Keeps the newline offsets of the last
+ * source it read, so a walk that asks for many lines of one file pays one
+ * scan, not one per call (#4399 verify r2 F1: per-declaration rescans made
+ * vacuous-skip-coverage 3x slower and timed it out in CI).
+ */
+export function lineOf(source: string, index: number): number {
+	if (source !== lineIndexSource) {
+		lineStarts = [0];
+		for (let i = 0; i < source.length; i++)
+			if (source[i] === "\n") lineStarts.push(i + 1);
+		lineIndexSource = source;
+	}
+	let low = 0;
+	let high = lineStarts.length - 1;
+	while (low < high) {
+		const mid = (low + high + 1) >> 1;
+		if (lineStarts[mid] <= index) low = mid;
+		else high = mid - 1;
+	}
+	return low + 1;
+}
+
+/** `ctx.skip(...)` / `skip(...)` / `this.skip()`, but never `it.skip(...)`. */
+const SKIP_CALL = /(?<![\w$])(?:([\w$]+)\s*\.\s*)?skip\s*\(/g;
+
+const SKIP_QUALIFIER_BLOCKLIST = new Set(["it", "test", "describe", "suite"]);
+
+/** Does `text` (stripped source) call a run-time skip (`ctx.skip()`, `skip()`)? */
+export function hasSkipCall(text: string): boolean {
+	if (!text.includes("skip")) return false;
+	SKIP_CALL.lastIndex = 0;
+	for (const match of text.matchAll(SKIP_CALL)) {
+		if (!match[1] || !SKIP_QUALIFIER_BLOCKLIST.has(match[1])) return true;
+	}
+	return false;
+}
+
+/**
+ * For each `(`, `[` or `{` of stripped source, its balancing close index
+ * plus one (0 when unbalanced, so the table needs no fill; read it as
+ * `closes[i] - 1`). One pass, so a walk that jumps over many nested groups
+ * pays the file once, not once per enclosing call (#4399 verify r2 F1).
+ */
+function bracketCloses(stripped: string): Int32Array {
+	const closes = new Int32Array(stripped.length);
+	const opens: number[] = [];
+	for (let i = 0; i < stripped.length; i++) {
+		const code = stripped.charCodeAt(i);
+		// ( [ {  and  ) ] }
+		if (code === 40 || code === 91 || code === 123) opens.push(i);
+		else if (code === 41 || code === 93 || code === 125) {
+			const open = opens.at(-1);
+			if (open === undefined) continue;
+			const want = code === 41 ? 40 : code === 93 ? 91 : 123;
+			if (stripped.charCodeAt(open) !== want) continue;
+			opens.pop();
+			closes[open] = i + 1;
+		}
+	}
+	return closes;
+}
+
+/** The top-level argument spans `[start, end)`, trimmed, of a call. */
+function callArguments(
+	text: string,
+	closes: Int32Array | undefined,
+	callParen: number,
+	callEnd: number,
+): Array<[number, number]> {
+	const spans: Array<[number, number]> = [];
+	const push = (start: number, end: number) => {
+		let a = start;
+		let b = end;
+		while (a < b && /\s/.test(text[a])) a++;
+		while (b > a && /\s/.test(text[b - 1])) b--;
+		if (a < b) spans.push([a, b]);
+	};
+	let start = callParen + 1;
+	for (let i = callParen + 1; i < callEnd; i++) {
+		const ch = text[i];
+		if (ch === "(" || ch === "[" || ch === "{") {
+			const end = closes
+				? closes[i] - 1
+				: matchingCloseIndex(
+						text,
+						i,
+						ch,
+						ch === "(" ? ")" : ch === "[" ? "]" : "}",
+					);
+			if (end < 0) break;
+			i = end;
+		} else if (ch === ",") {
+			push(start, i);
+			start = i + 1;
+		}
+	}
+	push(start, callEnd);
+	return spans;
+}
+
+const FUNCTION_ARGUMENT =
+	/^(?:async\s*)?(?:function\b|[\w$]+\s*=>|\([\s\S]*?\)\s*(?::[^=]*)?=>)/;
+
+/** Options keys after which vitest does not run the declaration as written. */
+const NOT_RUN_OPTIONS = new Set(["skip", "todo", "fails"]);
+
+/**
+ * What a declaration's options say (#4399 verify r2 F2): `test(name, options,
+ * fn)` or the older `test(name, fn, options)`. `notRun` when a `skip`,
+ * `todo` or `fails` key is not literally `false`, or when the options are
+ * not a literal at all (vitest reads them at run time, so they prove
+ * nothing); `only` when an `only` key is not literally `false`. For a test,
+ * `notRun` also when its inline callback calls a run-time skip
+ * (`ctx.skip()`, a destructured `skip()`; #4399 verify r2 Q5).
+ */
+function callOptions(
+	stripped: string,
+	closes: Int32Array,
+	call: { callParen: number; callEnd: number },
+	isTest: boolean,
+): { notRun: boolean; only: boolean } {
+	const args = callArguments(stripped, closes, call.callParen, call.callEnd)
+		.slice(1)
+		.map(([start, end]) => ({
+			start,
+			end,
+			isFunction: FUNCTION_ARGUMENT.test(stripped.slice(start, start + 200)),
+			isObject: stripped[start] === "{",
+		}));
+	const result = { notRun: false, only: false };
+	for (const arg of args) {
+		if (!arg.isFunction) continue;
+		if (isTest && hasSkipCall(stripped.slice(arg.start, arg.end)))
+			result.notRun = true;
+	}
+	// Two arguments: the second is the callback, inline or by reference.
+	const candidates = args.length >= 2 ? args : args.filter((a) => a.isObject);
+	for (const arg of candidates) {
+		if (arg.isFunction || /^[\d_.]+$/.test(stripped.slice(arg.start, arg.end)))
+			continue;
+		if (!arg.isObject) {
+			result.notRun = true;
+			continue;
+		}
+		const object = stripped.slice(arg.start, arg.end);
+		const inner = `(${object.slice(1, -1)})`;
+		for (const [start, end] of callArguments(
+			inner,
+			undefined,
+			0,
+			inner.length - 1,
+		)) {
+			const entry = inner.slice(start, end);
+			if (entry.startsWith("...")) {
+				result.notRun = true;
+				continue;
+			}
+			const colon = entry.indexOf(":");
+			const key = (colon < 0 ? entry : entry.slice(0, colon)).trim();
+			const value = colon < 0 ? key : entry.slice(colon + 1).trim();
+			if (value === "false") continue;
+			if (NOT_RUN_OPTIONS.has(key)) result.notRun = true;
+			if (key === "only") result.only = true;
+		}
+	}
+	return result;
+}
+
+/**
+ * The first argument of the call at `callParen`, sliced out of the RAW source.
+ * `stripSource` preserves every index, so the delimiters found in the
+ * stripped text address the same characters in the original.
+ */
+function titleAt(raw: string, stripped: string, callParen: number): string {
+	const start = nextNonSpace(stripped, callParen + 1);
+	const quote = stripped[start];
+	if (quote !== '"' && quote !== "'" && quote !== "`") return "";
+	const close = stripped.indexOf(quote, start + 1);
+	if (close < 0) return "";
+	return raw.slice(start + 1, close);
+}
+
 /**
  * Return every raw match whose span contains source code.
  *
@@ -615,6 +1121,22 @@ export function firstCommentMatch(
 	return undefined;
 }
 
+/**
+ * Directories {@link listSourceFiles} never descends into: runtime scratch and
+ * third-party trees that hold no repo source and that sibling processes
+ * create and delete while a sweep walks. Named recurrence (#4097): the
+ * bounded-container guard walked the repo root, `.probe-home/` included, and
+ * died with ENOENT when a sibling vitest worker removed its
+ * `worker-home-*` mid-walk. Matched by directory name at any depth below the
+ * walk root (the root itself is always walked).
+ */
+export const RUNTIME_SCRATCH_DIRS: ReadonlySet<string> = new Set([
+	".git",
+	".probe-home",
+	".claude",
+	"node_modules",
+]);
+
 export interface ListSourceFilesOptions {
 	/** File extensions to include, with the dot. Default `[".ts"]`. */
 	extensions?: readonly string[];
@@ -639,16 +1161,32 @@ export function listSourceFiles(
 	const extensions = options.extensions ?? [".ts"];
 	const skipDeclarations = options.skipDeclarations ?? true;
 	const skipTests = options.skipTests ?? false;
-	const walk = (dir: string): string[] =>
-		fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+	const walk = (dir: string): string[] => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch (error) {
+			// A directory listed by its parent but gone before its own listing
+			// (#4097) is out of the population, like a vanished file (#3082).
+			// The root itself must exist: a missing root is the caller's bug.
+			if (dir === root || (error as NodeJS.ErrnoException).code !== "ENOENT") {
+				throw error;
+			}
+			recordVanishedPath(dir, "its descent");
+			return [];
+		}
+		return entries.flatMap((entry) => {
 			const entryPath = path.join(dir, entry.name);
-			if (entry.isDirectory()) return walk(entryPath);
+			if (entry.isDirectory()) {
+				return RUNTIME_SCRATCH_DIRS.has(entry.name) ? [] : walk(entryPath);
+			}
 			if (!extensions.some((ext) => entry.name.endsWith(ext))) return [];
 			if (skipDeclarations && /\.d\.[cm]?ts$/.test(entry.name)) return [];
 			if (skipTests && /\.test\.[cm]?[jt]s$/.test(entry.name)) return [];
 			if (options.exclude?.(relativePosix(root, entryPath))) return [];
 			return [entryPath];
 		});
+	};
 	return walk(root).sort();
 }
 
@@ -725,17 +1263,26 @@ export function readWalkedFile(file: string): string | undefined {
 		return fs.readFileSync(file, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		if (!vanishedBetweenWalkAndRead.has(file)) {
-			vanishedBetweenWalkAndRead.add(file);
-			// Raw stderr write, not console.warn (#3107): Vitest's default
-			// reporter swallows a worker's console.warn on a passing run, so
-			// this line would never reach CI's log. See the docstring above.
-			process.stderr.write(
-				`[sweep-kit] ${file} vanished between the walk and the read; skipped (#3082)\n`,
-			);
-		}
+		recordVanishedPath(file, "the read");
 		return undefined;
 	}
+}
+
+/**
+ * Record a path the walk found gone, once per distinct path per fork, via a
+ * raw stderr write (#3107, see {@link readWalkedFile}). Shared by the read
+ * and the directory-descent tolerance so both land in
+ * {@link walkedFilesVanished}.
+ */
+function recordVanishedPath(file: string, phase: string): void {
+	if (vanishedBetweenWalkAndRead.has(file)) return;
+	vanishedBetweenWalkAndRead.add(file);
+	// Raw stderr write, not console.warn (#3107): Vitest's default
+	// reporter swallows a worker's console.warn on a passing run, so
+	// this line would never reach CI's log. See readWalkedFile's docstring.
+	process.stderr.write(
+		`[sweep-kit] ${file} vanished between the walk and ${phase}; skipped (#3082)\n`,
+	);
 }
 
 /**
@@ -765,11 +1312,39 @@ export function readWalkedFiles(
  *
  * Declarations are matched by shape at the start of the line: `function`/
  * `class` (with `export`/`default`/`abstract`/`async` modifiers), or a
- * `const`/`let` bound to a name. The walk goes upward and returns the FIRST
- * match — the nearest enclosing declaration, on the assumption true of every
- * #2442 site: a flagged statement sits directly inside the body of the
- * declaration immediately above it. `maxLookback` bounds the walk so one
- * pathological file can't turn this into an O(fileSize) scan per occurrence.
+ * `const`/`let` bound to a name. The result is the nearest such declaration
+ * strictly above the flagged line, on the assumption true of every #2442
+ * site: a flagged statement sits directly inside the body of the declaration
+ * immediately above it.
+ *
+ * ## Why this is a per-file index, not a per-occurrence window (#3938)
+ *
+ * This used to walk UP from `lineIndex` for at most `maxLookback = 400`
+ * physical lines. Crossing that window silently dropped the function-name
+ * identity component: the SAME statement in the SAME function produced
+ * `path#handleToolResult:hash~ctx` at distance 400 and `path#hash~ctx` at
+ * distance 402 (master's #3650 inserted two harmless lines inside
+ * `handleToolResult` and re-keyed a live exemption; #3824 swapped the table
+ * entry by hand, which is the drift this shape keeps producing). A numeric
+ * window is not identity: identity is "the nearest declaration above", and
+ * that fact does not change when unrelated lines are inserted.
+ *
+ * The lookup is now a REQUEST-LOCAL pass: {@link enclosingOwnerIndex} scans
+ * the file ONCE, forward, recording for every line the nearest declaration
+ * strictly above it. One O(lines) pass per distinct `lines` array, memoised
+ * in a `WeakMap` keyed on that array, so a scan that flags k occurrences in
+ * one file pays O(lines) total, not O(k × lines) — the per-occurrence bound
+ * the old cap existed to solve, solved without a magic distance. Work is
+ * bounded on both axes: one pass per distinct array, and each pass visits
+ * each line once.
+ *
+ * Ownership is LEXICAL (#3938 r2): the lines are passed through the shared
+ * {@link stripSource} seam (`strings: "blank"`) before the declaration match,
+ * so a column-0 `function`/`const`-shaped line inside a multi-line block
+ * comment or template literal is blanked to spaces and is NOT an owner. This
+ * is the same comment/string stripper every sweep already runs for detection;
+ * it preserves length, line count and column layout, so the blanked line index
+ * is still the raw line index, and the flagged line's own hash stays RAW.
  *
  * Matched at column 0 ONLY — no leading whitespace. This repo's shipped
  * source declares every top-level function/class/const at column 0, so
@@ -781,25 +1356,75 @@ export function readWalkedFiles(
  * variable, instead of `recordTrackedInit`. The trade is real: a declaration
  * nested inside a class or namespace is invisible to this pattern and falls
  * back to the content hash in {@link stableOccurrenceKey}, same as a
- * module-scope site with no enclosing declaration at all.
+ * module-scope site with no enclosing declaration at all. Partial coverage is
+ * therefore explicit: an unmatched line has an UNKNOWN owner and the hash
+ * alone is the key, never a guessed name.
  */
 const DECLARATION_PATTERN =
 	/^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\s*\*?\s+|class\s+)([A-Za-z_$][\w$]*)|^(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*[:=]/;
 
+/**
+ * Per-file memo for {@link findEnclosingSymbol}. The key is the `lines` array
+ * the caller already holds for one file, so the entry lives exactly as long
+ * as that scan: this is request-local derived state, not a cross-request
+ * cache, and the `WeakMap` lets a finished scan's arrays be collected.
+ */
+const ENCLOSING_OWNER_INDEX = new WeakMap<
+	readonly string[],
+	readonly (string | undefined)[]
+>();
+
+/**
+ * One forward pass over the comment/string-BLANKED lines, recording for every
+ * index the nearest column-0 declaration STRICTLY ABOVE it (`undefined` when
+ * there is none). The array is memoised per `lines` identity; see
+ * {@link ENCLOSING_OWNER_INDEX}.
+ *
+ * Ownership is lexical: the text goes through the shared {@link stripSource}
+ * seam (`strings: "blank"`) before matching. A declaration-shaped line inside
+ * a multi-line block comment or template literal is blanked to spaces and is
+ * never an owner, while a real column-0 declaration is untouched. The strip
+ * preserves length, line count and column layout, so a blanked index is the
+ * same raw index the flagged line's own hash uses.
+ */
+function enclosingOwnerIndex(
+	lines: readonly string[],
+): readonly (string | undefined)[] {
+	const cached = ENCLOSING_OWNER_INDEX.get(lines);
+	if (cached !== undefined) return cached;
+	const blanked = stripSource(lines.join("\n")).split("\n");
+	const owners: (string | undefined)[] = new Array(lines.length);
+	let owner: string | undefined;
+	for (let i = 0; i < lines.length; i++) {
+		// Assigned BEFORE matching line i, so a flagged occurrence that itself
+		// reads as `const x = ...` (the eviction idiom's own shape) never
+		// resolves to ITSELF as its own "enclosing" declaration.
+		owners[i] = owner;
+		const match = DECLARATION_PATTERN.exec(blanked[i] ?? "");
+		if (match) owner = match[1] ?? match[2];
+	}
+	ENCLOSING_OWNER_INDEX.set(lines, owners);
+	return owners;
+}
+
+/**
+ * Nearest named function/class/const-or-let declaration STRICTLY ABOVE
+ * `lineIndex` (0-based) that is real CODE. The text is matched after
+ * {@link stripSource} blanks comments and string/template contents, so a
+ * declaration-shaped interior line is never an owner. `lineIndex` must be a
+ * valid index into `lines` (`0 <= lineIndex < lines.length`); an out-of-range
+ * index returns `undefined`.
+ *
+ * Contract: the caller must not mutate `lines` after the first call. The owner
+ * index is memoised on the array's identity, so an in-place edit makes a later
+ * call return the pre-edit owner. Every production caller builds the array
+ * once and only reads it.
+ */
 export function findEnclosingSymbol(
 	lines: readonly string[],
 	lineIndex: number,
-	maxLookback = 400,
 ): string | undefined {
-	// Starts ABOVE lineIndex, never on it: a flagged occurrence that itself
-	// happens to read as `const x = ...` (the eviction idiom's own shape) must
-	// never resolve to ITSELF as its own "enclosing" declaration.
-	const floor = Math.max(0, lineIndex - maxLookback);
-	for (let i = lineIndex - 1; i >= floor; i--) {
-		const match = DECLARATION_PATTERN.exec(lines[i] ?? "");
-		if (match) return match[1] ?? match[2];
-	}
-	return undefined;
+	return enclosingOwnerIndex(lines)[lineIndex];
 }
 
 /**
@@ -827,6 +1452,12 @@ export function findEnclosingSymbol(
  * built to close, one layer down. `auditRegistry`'s `requireUniqueFlagged`
  * (default on) is the backstop: it fails loud on any duplicate flagged key
  * rather than let a caller of this function rely on the hash alone.
+ *
+ * The enclosing-symbol lookup is distance-independent (#3938): see
+ * {@link findEnclosingSymbol}. An insert ABOVE the declaration, an insert
+ * between the declaration and the flagged line, and an insert directly at the
+ * flagged line are three different keys: the first two leave the key
+ * unchanged, the third changes the content hash.
  */
 export function stableOccurrenceKey(
 	relPath: string,

@@ -1,0 +1,19 @@
+{
+	"typescript": "Existing measured idle-eviction behavior from the TypeScript client path.",
+	"python": "PR #3622 measured transparent release and next-request respawn for Pyright.",
+	"marksman": "PR #3622 measured transparent release and next-request respawn for Marksman.",
+	"opengrep": "PR #3622 measured transparent release and next-request respawn for Opengrep.",
+	"bash": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~110 MB resident, ~1.18 s cold (docs/lsp-idle-eviction.md).",
+	"clojure": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~179 MB resident, ~0.73 s cold (docs/lsp-idle-eviction.md).",
+	"cpp": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~82 MB resident, ~0.48 s cold (docs/lsp-idle-eviction.md).",
+	"css": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~82 MB resident, ~1.06 s cold (docs/lsp-idle-eviction.md).",
+	"deno": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~282 MB resident, ~0.93 s cold (docs/lsp-idle-eviction.md).",
+	"fish": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~148 MB resident, ~0.92 s cold (docs/lsp-idle-eviction.md).",
+	"html": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~125 MB resident, ~1.24 s cold (docs/lsp-idle-eviction.md).",
+	"php": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~191 MB resident, ~0.89 s cold (docs/lsp-idle-eviction.md).",
+	"prisma": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~104 MB resident, ~0.76 s cold (docs/lsp-idle-eviction.md).",
+	"yaml": "Nightly runs 36860553809/37002646707/37118101220: eligible x3, respawn=ok, coverage=preserved; ~96 MB resident, ~1.02 s cold (docs/lsp-idle-eviction.md).",
+	"docker": "Nightly measurement (#3989): eligible, respawn ok and findings preserved on 2 consecutive runs, idle RSS 64 MB, cold start 566 ms.",
+	"json": "Nightly measurement (#3989): eligible, respawn ok and findings preserved on 2 consecutive runs, idle RSS 67 MB, cold start 1116 ms.",
+	"python-jedi": "Nightly measurement (#3989): eligible, respawn ok and findings preserved on 2 consecutive runs, idle RSS 51 MB, cold start 1796 ms."
+}

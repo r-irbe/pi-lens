@@ -14,6 +14,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setPlatform } from "../support/platform-stub.js";
 
 type SpawnFn = (...args: unknown[]) => unknown;
 let fakeSpawn: SpawnFn = () => makeFakeChild({ stdout: "" });
@@ -32,6 +33,12 @@ vi.mock("node:child_process", async (importOriginal) => {
 		},
 	};
 });
+
+// #3917 opt-in: the module under test. The setup's default scope answers the
+// orphan backstop's `Name`-filtered query with an empty table; this suite pins
+// that very query's rails (`node:child_process` is mocked above, so the real
+// table is never read).
+vi.unmock("../../clients/process-snapshot.js");
 
 const { queryProcessTable } = await import("../../clients/process-snapshot.js");
 
@@ -73,13 +80,6 @@ function makeFakeChild(opts: {
 		handlers.get("close")?.(opts.code ?? 0, null);
 	});
 	return child;
-}
-
-function setPlatform(platform: NodeJS.Platform): void {
-	Object.defineProperty(process, "platform", {
-		value: platform,
-		configurable: true,
-	});
 }
 
 const realPlatform = process.platform;

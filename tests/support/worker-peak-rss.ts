@@ -72,6 +72,35 @@ export function peakRssProblem(
 		: `${file} peaked at ${peakRssMb} MB, over the ${WORKER_PEAK_RSS_BUDGET_MB} MB per-worker budget that scripts/lib/worker-budget.mjs divides the runner's memory by to pick maxWorkers (#3058). Cut the file's footprint, or add a measured admission with a reason to tests/support/worker-peak-rss.ts.`;
 }
 
+/**
+ * #3565: how close to its ceiling a file may peak before its record carries a
+ * warning. Over 18 CI runs `vi-mock-export-sweep` peaked at 2,026-2,049 MB
+ * and `index-integration` at 1,873-2,052 MB against the 2,048 MB budget, and
+ * each went red on a commit that touched nothing it loads. 200 MB is above the
+ * largest same-code spread measured on CI (`index-integration`, 1,873-2,065
+ * MB), so a file that can go red on noise warns on its ordinary runs first.
+ */
+export const PEAK_RSS_HEADROOM_WARN_MB = 200;
+
+/**
+ * The GitHub Actions annotation for a file that passed but peaked inside the
+ * headroom band, or `undefined`. A file over its ceiling gets no warning: it
+ * fails outright with `peakRssProblem`'s text. The runner turns a `::warning`
+ * line on stderr into an annotation on the run, the same route
+ * `scripts/notify-tool-smoke-red.mjs` uses, so the warning surfaces without
+ * anyone reading the log.
+ */
+export function peakRssHeadroomWarning(
+	file: string,
+	peakRssMb: number,
+	admissions: Readonly<Record<string, PeakRssAdmission>> = PEAK_RSS_ADMISSIONS,
+): string | undefined {
+	const ceiling = admissions[file]?.peakRssMb ?? WORKER_PEAK_RSS_BUDGET_MB;
+	if (peakRssMb <= ceiling - PEAK_RSS_HEADROOM_WARN_MB) return undefined;
+	if (peakRssMb > ceiling) return undefined;
+	return `::warning title=peak-RSS headroom::${file} peaked at ${peakRssMb} MB, within ${PEAK_RSS_HEADROOM_WARN_MB} MB of its ${ceiling} MB ceiling (tests/support/worker-peak-rss.ts, #3565). Cut its footprint before GC timing alone takes it over.\n`;
+}
+
 export interface PeakRssReport {
 	/** Repo-relative POSIX path of the file that just finished. */
 	file: string;
@@ -107,6 +136,8 @@ export function reportPeakRss(report: PeakRssReport): void {
 		`[mem-file] peakRssMb=${peakRssMb} heapUsedMb=${heapUsedMb} externalMb=${externalMb} ${file}\n`,
 	);
 	if ((report.platform ?? process.platform) !== "linux") return;
+	const warning = peakRssHeadroomWarning(file, peakRssMb, report.admissions);
+	if (warning) write(warning);
 	const problem = peakRssProblem(file, peakRssMb, report.admissions);
 	if (problem) throw new Error(problem);
 }

@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 // flake-shape: raw-timer-wait — poll the real child extension-log writer after session_end
 /**
  * Real MCP session-end telemetry probe (#2800).

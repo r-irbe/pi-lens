@@ -24,6 +24,36 @@ function formatDiagnostic(d: Diagnostic): string {
 }
 
 /**
+ * #3218: why a delta-promoted unused finding blocks. The promotion seam
+ * (`promoteDeltaUnusedToBlockers`) stamps this on the promoted diagnostic as
+ * `Diagnostic.promotionNote`; the STOP renderers collect it through
+ * {@link formatPromotionNotes}.
+ *
+ * It lives here, beside the renderer, because the demotion path
+ * (`clients/demoted-finding-render.ts`) must recognize the exact rendered row
+ * to DROP it (#3748 item 3): once the record is demoted it no longer blocks,
+ * so the note's tier argument is false and must not ride along.
+ */
+export const DELTA_UNUSED_PROMOTION_NOTE =
+	"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.";
+
+/**
+ * #3218: the one-line rationale beneath a STOP block when the delta-mode
+ * promotion seam raised at least one finding to `blocking`. Several promoted
+ * findings share one note, so the reason renders once, never as per-item
+ * boilerplate. The seam owns the text (`Diagnostic.promotionNote`); this helper
+ * only collects it, so no renderer re-detects which findings were promoted.
+ */
+export function formatPromotionNotes(diagnostics: Diagnostic[]): string {
+	const notes = new Set<string>();
+	for (const d of diagnostics) {
+		if (d.promotionNote) notes.add(d.promotionNote);
+	}
+	if (notes.size === 0) return "";
+	return [...notes].map((note) => `  ℹ️ ${note}\n`).join("");
+}
+
+/**
  * Format a group of diagnostics with semantic header
  */
 export function formatDiagnostics(
@@ -51,6 +81,12 @@ export function formatDiagnostics(
 	if (diagnostics.length > maxDisplay) {
 		output += `  ... and ${diagnostics.length - maxDisplay} more\n`;
 	}
+
+	// #3218: promotion notes ride only on blocking diagnostics (the promotion
+	// seam sets one with `semantic: "blocking"`), so there is no semantic guard
+	// to make; collecting unconditionally is the same output for every
+	// reachable input and one fewer unreachable branch.
+	output += formatPromotionNotes(diagnostics);
 
 	return output;
 }

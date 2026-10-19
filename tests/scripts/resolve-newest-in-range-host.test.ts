@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	pickNewestInRange,
 	readPeerRange,
@@ -22,10 +22,26 @@ const REPO_ROOT = path.resolve(
 const CLI = path.join(REPO_ROOT, "scripts/resolve-newest-in-range-host.mjs");
 const tempDirs: string[] = [];
 
+// Recurrence: #4088. `execFileSync` copies the child's stderr to THIS process's
+// stderr unless `stdio` is given, so the stubbed exhaustion test printed a real
+// `::error::infra: registry unreachable` line that GitHub rendered as a
+// `##[error]` annotation on a passing job. The CLI still emits the annotation
+// (the exit-3 test asserts it on the captured `e.stderr`); no test may re-echo
+// it into the host log.
+beforeEach(() => {
+	vi.spyOn(process.stderr, "write");
+});
+
 afterEach(() => {
+	const echoed = vi
+		.mocked(process.stderr.write)
+		.mock.calls.map(([chunk]) => String(chunk))
+		.join("");
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+	expect(echoed).not.toMatch(/^::(?:error|warning|notice)/m);
 });
 
 // Pure selection logic — no live registry, no fs, no child_process (#2613).
@@ -187,6 +203,7 @@ function runCli(
 			...extraEnv,
 		},
 		encoding: "utf-8",
+		stdio: "pipe",
 	});
 }
 
@@ -228,6 +245,7 @@ describe("resolve-newest-in-range-host.mjs CLI (#2613)", () => {
 				cwd: root,
 				env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
 				encoding: "utf-8",
+				stdio: "pipe",
 			});
 			expect.unreachable("expected the CLI to exit nonzero");
 		} catch (err) {

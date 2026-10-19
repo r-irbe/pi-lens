@@ -13,6 +13,7 @@ export interface SelfScanFinding {
 export interface SelfScanResult {
 	ruleIds: string[];
 	findings: SelfScanFinding[];
+	advisoryFindings: SelfScanFinding[];
 	scannedFileCount: number | undefined;
 	effectiveRuleCount: number | undefined;
 	stderr: string;
@@ -33,3 +34,21 @@ export function writeBaseline(
 	signatures: Iterable<string>,
 	root?: string,
 ): string;
+
+export function changedFilesSince(base: string, cwd?: string): Set<string>;
+
+export function findingsInChangedFiles(
+	findings: SelfScanFinding[],
+	changed: Set<string>,
+	root?: string,
+): SelfScanFinding[];
+
+export function trackedSelfScanFileSet(
+	root?: string,
+	roots?: string[],
+): Set<string> | undefined;
+
+export function findingsInTrackedFiles(
+	findings: SelfScanFinding[],
+	tracked: Set<string> | undefined,
+): SelfScanFinding[];

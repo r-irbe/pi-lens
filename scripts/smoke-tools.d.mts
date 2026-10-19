@@ -57,6 +57,13 @@ export interface LspFixture {
 	/** Why this gate-eligible fixture cannot opt in (#3217). Mutually exclusive
 	 *  with `lspGate`; the reason is asserted, not just the key's presence. */
 	lspGateExempt?: string;
+	expectDiagnosticCode?: string;
+	/** The one fixture the nightly `lens_diagnostics mode=full` row drives
+	 *  (#2780), mirroring `lspGate`. */
+	lensFull?: boolean;
+	/** #4320/#4346: the created-module witness the clean gate runs on this
+	 *  fixture once its server is up (`runCreatedModuleWitness`). */
+	createdModuleWitness?: CreatedModuleWitness;
 	lombokJar?: boolean;
 	expectNoMessageMatch?: string;
 	/** A diagnostic message that MUST arrive. The lane's default verdict passes
@@ -150,6 +157,30 @@ export function classifyLspGateResult(
 	fixture: Pick<LspFixture, "serverHint">,
 	unavailable?: boolean,
 ): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
+/** Classify the official Docker BuildKit-rule witness (#3939). */
+export function classifyOfficialDockerGateResult(
+	result: unknown,
+	buildxAvailable: boolean,
+	expectedCode?: string,
+): { state: "pass" | "skip" | "fail"; detail: string; diags: number };
+/** How a fixture's server reports an import the witness creates (#4346). */
+export interface CreatedModuleWitness {
+	ext: string;
+	importerText: (name: string) => string;
+	moduleText: string;
+	reportsMissing: (text: string, name: string) => boolean;
+}
+/** Create a module through pi-lens's write path and from outside it; one row
+ *  per case, failing while the importer still reports it (#4320/#4346). */
+export function runCreatedModuleWitness(
+	fixture: LspFixture | undefined,
+	options: {
+		workspace: string;
+		execute: (...args: never[]) => Promise<unknown>;
+		/** The LSP service whose `touchFile` syncs the pi-written module. */
+		getLSPService: () => unknown;
+	},
+): Promise<SmokeRow[]>;
 /** Run the production LSP clean-gate layer, optionally with test seams. */
 export function runLspGate(options?: {
 	langs?: string[];
@@ -157,10 +188,34 @@ export function runLspGate(options?: {
 	verbose?: boolean;
 	deps?: unknown;
 }): Promise<number>;
+/** The fixtures the nightly `lens_diagnostics mode=full` row drives (#2780). */
+export function lensFullPopulation(fixtures?: LspFixture[]): LspFixture[];
+/** Classify one real `lens_diagnostics mode=full` LSP-primary-finding result. */
+export function classifyLensFullResult(
+	result: unknown,
+	fixture: Pick<LspFixture, "serverHint">,
+): { state: "pass" | "fail"; detail: string; diags: number };
+/** Run the nightly `lens_diagnostics mode=full` row, optionally with test seams. */
+export function runLensFull(options?: {
+	langs?: string[];
+	install?: boolean;
+	verbose?: boolean;
+	deps?: unknown;
+}): Promise<number>;
 /** One reported row from a smoke lane, as far as the pass floor is concerned. */
 export interface SmokeRow {
+	lang?: string;
+	runner?: string;
 	state: "pass" | "fail" | "skip" | "setup-failed";
+	detail?: string;
+	diags?: number;
 }
+/** Render a smoke lane report and return its failure count. */
+export function report(
+	rows: SmokeRow[],
+	title: string,
+	options?: { failOnSkipOnly?: boolean },
+): number;
 /**
  * The message for a run that passed fewer than `minPass` rows, or null when the
  * floor holds. Exported so the floor is testable without a live tool install.
@@ -299,3 +354,52 @@ export const LSP_FIXTURES: LspFixture[];
 export const LSP_DIAGNOSTICS_WAIT_MS: number;
 export const FORMAT_FIXTURES: FormatFixture[];
 export const AUTOFIX_FIXTURES: AutofixFixture[];
+
+/** Run a fixture's `setup` step in its copied workspace (#530); bounded. */
+export function runFixtureSetup(
+	setup: string | string[],
+	cwd: string,
+	verbose: boolean,
+): { ok: boolean; detail?: string };
+/** Copy the cached lombok.jar into a fixture workspace, downloading it once. */
+export function ensureSmokeLombokJar(
+	workspace: string,
+	verbose: boolean,
+): Promise<string>;
+/** One resolution-layer case (#1513): a stub planted in a project-local bin dir. */
+export interface ResolutionCase {
+	id: string;
+	source: string;
+	seam: "formatter" | "runner";
+	tool: string;
+	bin: string;
+	file?: string;
+}
+/** The production modules the resolution layer drives (dist in the nightly). */
+export interface ResolutionDeps {
+	formatters: Record<
+		string,
+		{ resolveCommand?(file: string, cwd: string): Promise<unknown> }
+	>;
+	createVenvFinder: (
+		command: string,
+	) => (cwd: string) => Promise<{ path: string; rung: string }>;
+}
+/** The project-local resolution rungs the nightly pins (venv, vendor/bin, node_modules/.bin). */
+export const RESOLUTION_CASES: readonly ResolutionCase[];
+/** Write each case's stub executable (and its nested start dir) under `root`. */
+export function plantResolutionFixture(
+	root: string,
+	cases?: readonly ResolutionCase[],
+): void;
+/** Evaluate one resolution case into one smoke row. */
+export function evaluateResolutionCase(
+	deps: ResolutionDeps,
+	root: string,
+	c: ResolutionCase,
+): Promise<Required<SmokeRow>>;
+/** Run the nightly resolution layer; returns its failure count. */
+export function runResolutionSmoke(options?: {
+	verbose?: boolean;
+	deps?: ResolutionDeps;
+}): Promise<number>;

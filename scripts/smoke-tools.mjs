@@ -32,11 +32,18 @@
  * means the expected formatter was selected and actually reformatted a
  * deliberately mis-formatted file. The lint dispatch path never runs formatters.
  *
+ * Resolution layer (--resolution, #1513): plants stub binaries in a scratch
+ * project's `.venv/bin`, `vendor/bin` and `node_modules/.bin` and asserts the
+ * production resolvers return THAT path.
+ * No install, no network. See `runResolutionSmoke`.
+ *
  * Usage:
  *   node scripts/smoke-tools.mjs [lang ...] [--step2] [--tier1] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --lsp-gate [lang ...] [--install] [--verbose]
+ *   node scripts/smoke-tools.mjs --lens-full [lang ...] [--install] [--verbose]
  *   node scripts/smoke-tools.mjs --format [lang ...] [--install] [--verbose]
+ *   node scripts/smoke-tools.mjs --resolution [--verbose]
  *   node scripts/smoke-tools.mjs --install --install-registry --installer-root=<path>
  *
  * Requires a built dist/ (run `npm run build:dist` first).
@@ -142,6 +149,110 @@ export function classifyLspGateResult(result, fx, unavailable = false) {
 		state: "fail",
 		detail: `lsp_diagnostics returned ${diags} diagnostic(s) but 0 primary findings (auxiliary=${details.auxiliaryDiagnosticsCount ?? 0})`,
 		diags,
+	};
+}
+
+/**
+ * Classify the official Docker server's BuildKit-backed smoke row (#3939).
+ * An empty result is only an honest skip when the runner cannot provide the
+ * BuildKit check command; otherwise it is a regression in the rule witness.
+ */
+export function classifyOfficialDockerGateResult(
+	result,
+	buildxAvailable,
+	expectedCode = "JSONArgsRecommended",
+) {
+	const diagnostics = result?.details?.diagnostics ?? [];
+	if (result?.details?.unavailable) {
+		return {
+			state: "skip",
+			detail: result.details.unavailable,
+			diags: diagnostics.length,
+		};
+	}
+	if (diagnostics.some((diagnostic) => diagnostic?.code === expectedCode)) {
+		return {
+			state: "pass",
+			detail: `official Docker server returned ${expectedCode}`,
+			diags: diagnostics.length,
+		};
+	}
+	if (!buildxAvailable) {
+		return {
+			state: "skip",
+			detail: "buildx unavailable",
+			diags: diagnostics.length,
+		};
+	}
+	return {
+		state: "fail",
+		detail: `official Docker server did not return ${expectedCode}`,
+		diags: diagnostics.length,
+	};
+}
+
+function hasDockerBuildx() {
+	try {
+		execFileSync("docker", ["buildx", "version"], {
+			stdio: "ignore",
+			timeout: 5000,
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The nightly `lens_diagnostics mode=full` row's fixture population (#2780).
+ * `lens_diagnostics` is the tool agents call by default and its verdict
+ * shaping mirrors `lsp_diagnostics`', so ONE cheap seeded fixture is enough to
+ * catch a divergence between the two handlers. Opt-in via `lensFull: true`,
+ * mirroring `lspGate`; `tests/config/lsp-gate-population.test.ts` pins that
+ * exactly one gate-eligible fixture opts in.
+ */
+export function lensFullPopulation(fixtures = LSP_FIXTURES) {
+	return fixtures.filter((f) => f.lensFull === true);
+}
+
+/**
+ * Classify the nightly `lens_diagnostics mode=full` row (#2780). Mirrors
+ * `classifyLspGateResult`: it counts the fresh LSP sweep's PRIMARY bucket
+ * (`lspPrimaryDiagnosticsCount`) so an auxiliary-only result (ast-grep,
+ * opengrep, ...) cannot be mistaken for the configured primary answering —
+ * exactly the #2776 provenance shape. Handshake availability is admitted by
+ * the census in `runLensFull`, before this classifier is called.
+ */
+export function classifyLensFullResult(result, fx) {
+	if (!result) {
+		return {
+			state: "fail",
+			detail: "lens_diagnostics mode=full returned no result",
+			diags: 0,
+		};
+	}
+	const details = result.details ?? {};
+	const primary = Number(details.lspPrimaryDiagnosticsCount ?? 0);
+	const auxiliary = Number(details.lspAuxiliaryDiagnosticsCount ?? 0);
+	const projectFindings =
+		Number(details.totalBlocking ?? 0) + Number(details.totalErrors ?? 0);
+	const renderedText = result.content?.[0]?.text ?? "";
+	const renderedMessage = fx.expectedMessage;
+	const renderedMessageMissing =
+		typeof renderedMessage === "string" &&
+		renderedMessage.length > 0 &&
+		!renderedText.includes(renderedMessage);
+	if (primary > 0 && projectFindings > 0 && !renderedMessageMissing) {
+		return {
+			state: "pass",
+			detail: `lens_diagnostics mode=full returned ${primary} primary finding${primary === 1 ? "" : "s"}`,
+			diags: primary + auxiliary,
+		};
+	}
+	return {
+		state: "fail",
+		detail: `lens_diagnostics mode=full returned ${projectFindings} finding(s) but ${primary} primary LSP findings (auxiliary=${auxiliary}, lspFilesUnconfirmed=${details.lspFilesUnconfirmed ?? 0}, auxPartial=${details.lspFilesPartiallyCovered ?? 0}${renderedMessageMissing ? `, rendered text missing expected message "${renderedMessage}"` : ""})`,
+		diags: primary + auxiliary,
 	};
 }
 
@@ -483,6 +594,12 @@ const LSP_FIXTURES = [
 		expectServerId: "typescript",
 		lspGate: true,
 		lspGateMarker: '"not a number"',
+		expectedMessage: "Type 'string' is not assignable to type 'number'.",
+		// The single fixture the nightly `lens_diagnostics mode=full` row drives
+		// (#2780). Cheap (typescript-language-server, no toolchain setup) and
+		// seeded with a type error only the real LSP can see, so a zero primary
+		// bucket means the tool's verdict shaping diverged.
+		lensFull: true,
 	},
 	{
 		// #2777: the nested package marker must become the LSP root for this file.
@@ -517,6 +634,15 @@ const LSP_FIXTURES = [
 		tools: ["pyright"],
 		disableServers: ["python-jedi"],
 		expectServerId: "python",
+		// #4320/#4346: `runCreatedModuleWitness` (pyright caches a failed import
+		// lookup, measured on #4320 and #4346).
+		createdModuleWitness: {
+			ext: ".py",
+			importerText: (name) => `import ${name}\n\nprint(${name}.VALUE)\n`,
+			moduleText: "VALUE = 1\n",
+			reportsMissing: (text, name) =>
+				text.includes(`Import "${name}" could not be resolved`),
+		},
 	},
 	// Clean (no-diagnostic) counterpart — bench-only signal for the clean-file edit
 	// path (#240). Every other fixture is intentionally broken, which masks how long
@@ -587,6 +713,20 @@ const LSP_FIXTURES = [
 		tools: ["bash-language-server"],
 	},
 	{
+		lang: "shuck",
+		serverId: "shuck",
+		// #3968: real zsh-only constructs a bash-semantic analyzer misreports,
+		// plus the seeded C006 error the gate looks for. `tools: []` — shuck has
+		// no managed install (brew/cargo distribution, #3968 AC 5 non-goal); on
+		// a host without the binary the row discloses `unavailable` and skips.
+		lspGate: true,
+		lspGateMarker: "echo $undefined_var",
+		dir: "tests/fixtures/tool-smoke/shuck",
+		file: "bad.zsh",
+		serverHint: "shuck",
+		tools: [],
+	},
+	{
 		lang: "css",
 		dir: "tests/fixtures/tool-smoke/css",
 		file: "bad.css",
@@ -606,12 +746,29 @@ const LSP_FIXTURES = [
 	},
 	{
 		lang: "dockerfile",
+		serverId: "docker",
 		lspGate: true,
 		lspGateMarker: "COPY only-one-argument",
 		dir: "tests/fixtures/tool-smoke/dockerfile",
 		file: "Dockerfile",
 		serverHint: "docker-langserver",
 		tools: ["dockerfile-language-server-nodejs"],
+		expectServerId: "docker",
+	},
+	{
+		// #3939: BuildKit owns this official server's Dockerfile diagnostics. The
+		// binary is provisioned by the nightly workflow, not the installer registry.
+		lang: "dockerfile-official",
+		serverId: "docker-official",
+		lspGate: true,
+		lspGateMarker: "CMD ls",
+		dir: "tests/fixtures/tool-smoke/dockerfile-official",
+		file: "Dockerfile",
+		serverHint: "docker-language-server (official)",
+		tools: [],
+		disableServers: ["docker"],
+		expectServerId: "docker-official",
+		expectDiagnosticCode: "JSONArgsRecommended",
 	},
 	{
 		lang: "toml",
@@ -628,6 +785,7 @@ const LSP_FIXTURES = [
 		lspGateMarker: "var.does_not_exist_gate_seed",
 		dir: "tests/fixtures/tool-smoke/terraform",
 		file: "bad.tf",
+		smokeHintPlaceholder: undefined,
 		serverHint: "terraform-ls",
 		tools: ["terraform-ls"],
 	},
@@ -806,6 +964,25 @@ const LSP_FIXTURES = [
 		file: "Bad.kt",
 		serverHint: "kotlin-language-server",
 		tools: ["kotlin-language-server"],
+	},
+	{
+		// #4119: the Lean 4 language server is `lake serve`, supplied by the
+		// project's elan/Lake toolchain. pi-lens does not install or manage Lean
+		// (see docs/dependencies.md), and the nightly runner carries no elan, so
+		// the gate cannot drive a primary finding; the committed Lake project
+		// keeps the row durable so a provisioned host completes the handshake.
+		// The launch executes the project's `lakefile.lean` (project code) under
+		// host trust — the shared field for that class is #4269, not a
+		// Lean-specific branch, so this row stays exempt with the same
+		// availability limit elixir/rust record (#3311).
+		lspGateExempt:
+			"availability limit: `lake serve` comes from a user-managed elan/Lake toolchain the nightly runner does not provision (no installer-registry entry; docs/dependencies.md PATH-only Lean row), so the gate cannot drive a primary finding; the fixture stays durable for a provisioned host; see #4119, #4269",
+		lspGateMarker: '"not a natural number"',
+		lang: "lean",
+		dir: "tests/fixtures/tool-smoke/lean",
+		file: "Main.lean",
+		serverHint: "lake serve (Lean 4)",
+		tools: [],
 	},
 	{
 		lang: "swift",
@@ -1604,7 +1781,9 @@ function parseArgs(argv) {
 	let install = false;
 	let lsp = false;
 	let lspGate = false;
+	let lensFull = false;
 	let format = false;
+	let resolution = false;
 	let autofix = false;
 	let tier1 = false;
 	let minPass = null;
@@ -1617,7 +1796,9 @@ function parseArgs(argv) {
 		else if (arg === "--install") install = true;
 		else if (arg === "--lsp") lsp = true;
 		else if (arg === "--lsp-gate") lspGate = true;
+		else if (arg === "--lens-full") lensFull = true;
 		else if (arg === "--format") format = true;
+		else if (arg === "--resolution") resolution = true;
 		else if (arg === "--tier1") tier1 = true;
 		else if (arg === "--install-registry") installRegistry = true;
 		else if (arg.startsWith("--installer-root="))
@@ -1634,7 +1815,9 @@ function parseArgs(argv) {
 		install,
 		lsp,
 		lspGate,
+		lensFull,
 		format,
+		resolution,
 		autofix,
 		tier1,
 		minPass,
@@ -2189,7 +2372,7 @@ export function fixtureDispatchCwd(fixture, workspace) {
 // toward the failure exit code so it can't silently pass the nightly.
 const ICON = { pass: "✓", fail: "✗", skip: "⚠", "setup-failed": "✗" };
 
-function report(rows, title) {
+export function report(rows, title, { failOnSkipOnly = false } = {}) {
 	const pad = (s, n) => String(s).padEnd(n);
 	console.log(`\nLive tool-smoke (#209) — ${title}\n`);
 	console.log(
@@ -2202,13 +2385,112 @@ function report(rows, title) {
 	}
 	const counts = { pass: 0, fail: 0, skip: 0, "setup-failed": 0 };
 	for (const r of rows) counts[r.state]++;
-	console.log(
-		`\n${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)`,
-	);
+	const summary = `${counts.pass} passed · ${counts.fail} failed · ${counts["setup-failed"]} setup-failed · ${counts.skip} skipped (tool/config unavailable)`;
+	const skippedOnly =
+		counts.pass === 0 &&
+		counts.fail === 0 &&
+		counts["setup-failed"] === 0 &&
+		counts.skip > 0;
+	console.log(`\n${skippedOnly ? "SKIPPED: " : ""}${summary}`);
 	console.log(
 		"Legend: ✓ ok  ✗ failure/setup-failed  ⚠ unavailable (not a failure)\n",
 	);
-	return counts.fail + counts["setup-failed"];
+	return failOnSkipOnly && skippedOnly
+		? 1
+		: counts.fail + counts["setup-failed"];
+}
+
+/**
+ * Created-module witness (recurrence: #4320, where a module created after the
+ * language server started stayed unresolved in its importer for the server's
+ * life; #4346 found the same for a module created outside pi-lens). Once the
+ * fixture's server is up, a new module is created twice: through pi-lens's
+ * write path (written, then synced by the LSP service as the post-write
+ * pipeline does) and from outside pi-lens (copied in, no tool call). Each
+ * importer is diagnosed alone before and after; the missing import must be
+ * reported first (else the row proves nothing) and must clear on the next
+ * call. One row per case, reported apart from the clean gate's census.
+ */
+export async function runCreatedModuleWitness(
+	fx,
+	{ workspace, execute, getLSPService },
+) {
+	const witness = fx.createdModuleWitness;
+	const tag = `${process.pid}_${Date.now().toString(36)}`;
+	const diagnose = async (file) => {
+		const result = await execute(
+			`smoke-lsp-created-${fx.lang}`,
+			{ path: file, waitMs: LSP_DIAGNOSTICS_WAIT_MS, serverScope: "primary" },
+			undefined,
+			null,
+			{ cwd: workspace },
+		);
+		return String(result?.content?.[0]?.text ?? "");
+	};
+	const cases = [
+		{
+			label: "pi write",
+			create: async (modulePath) => {
+				fs.writeFileSync(modulePath, witness.moduleText);
+				await getLSPService().touchFile(modulePath, witness.moduleText, {
+					diagnostics: "none",
+					source: "smoke-created-module-witness",
+				});
+			},
+		},
+		{
+			label: "outside pi-lens",
+			create: async (modulePath) => {
+				const staged = `${modulePath}.staged`;
+				fs.writeFileSync(staged, witness.moduleText);
+				fs.copyFileSync(staged, modulePath);
+				fs.rmSync(staged, { force: true });
+			},
+		},
+	];
+	const rows = [];
+	for (const [index, created] of cases.entries()) {
+		const name = `witness_mod_${index}_${tag}`;
+		const importer = path.join(
+			workspace,
+			`witness_user_${index}${witness.ext}`,
+		);
+		const modulePath = path.join(workspace, `${name}${witness.ext}`);
+		const runner = `${fx.serverHint} created (${created.label})`;
+		try {
+			fs.writeFileSync(importer, witness.importerText(name));
+			if (!witness.reportsMissing(await diagnose(importer), name)) {
+				rows.push({
+					lang: fx.lang,
+					runner,
+					state: "fail",
+					detail: `precondition: the missing import of ${name} was not reported before it was created`,
+					diags: 0,
+				});
+				continue;
+			}
+			await created.create(modulePath);
+			const stale = witness.reportsMissing(await diagnose(importer), name);
+			rows.push({
+				lang: fx.lang,
+				runner,
+				state: stale ? "fail" : "pass",
+				detail: stale
+					? `the importer still reports ${name} missing after it was created (#4320/#4346)`
+					: "the importer's missing import cleared on the next call",
+				diags: stale ? 1 : 0,
+			});
+		} catch (err) {
+			rows.push({
+				lang: fx.lang,
+				runner,
+				state: "fail",
+				detail: `witness error: ${err?.message ?? err}`,
+				diags: 0,
+			});
+		}
+	}
+	return rows;
 }
 
 /**
@@ -2247,6 +2529,15 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		));
 		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
 	}
+	const trustEntry = path.join(repoRoot, "dist", "clients", "project-trust.js");
+	const { adoptProjectTrustFromContext } = deps?.adoptProjectTrustFromContext
+		? deps
+		: await import(pathToFileURL(trustEntry).href);
+	// The nightly harness is a standalone host, not pi itself. Its copied
+	// fixtures intentionally represent a trusted project, so the real
+	// lsp_diagnostics path must consume the same host trust seam as the
+	// handshake layer before resolving project-local server configuration.
+	adoptProjectTrustFromContext({ isProjectTrusted: () => true });
 	let ensureTool;
 	let getInstallAttempt;
 	if (deps) {
@@ -2272,6 +2563,7 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 		return 0;
 	}
 	const rows = [];
+	const witnessRows = [];
 	let handshakeCensus = {};
 	const censusPath = process.env.PI_LENS_HOME
 		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
@@ -2342,9 +2634,33 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 				null,
 				{ cwd: workspace },
 			);
-			const verdict = classifyLspGateResult(result, fx);
+			const verdict = fx.expectDiagnosticCode
+				? classifyOfficialDockerGateResult(
+						result,
+						deps?.hasDockerBuildx?.() ?? hasDockerBuildx(),
+						fx.expectDiagnosticCode,
+					)
+				: classifyLspGateResult(result, fx);
 			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
 			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
+			if (fx.createdModuleWitness && verdict.state === "pass") {
+				const getLSPService =
+					deps?.getLSPService ??
+					(
+						await import(
+							pathToFileURL(
+								path.join(repoRoot, "dist", "clients", "lsp", "index.js"),
+							).href
+						)
+					).getLSPService;
+				witnessRows.push(
+					...(await runCreatedModuleWitness(fx, {
+						workspace,
+						execute: (...args) => createLspDiagnosticsTool().execute(...args),
+						getLSPService,
+					})),
+				);
+			}
 		} catch (err) {
 			rows.push({
 				lang: fx.lang,
@@ -2360,9 +2676,13 @@ export async function runLspGate({ langs = [], install, verbose, deps } = {}) {
 	const failures = report(
 		rows,
 		"LSP clean-gate (lsp_diagnostics primary findings)",
+		{ failOnSkipOnly: true },
 	);
 	console.log(formatGateCensus(population, rows, langs));
-	return failures;
+	if (witnessRows.length === 0) return failures;
+	return (
+		failures + report(witnessRows, "LSP created-module witness (#4320/#4346)")
+	);
 }
 
 /**
@@ -2386,6 +2706,182 @@ export function formatGateCensus(population, rows, langs = []) {
 }
 
 /**
+ * Nightly `lens_diagnostics mode=full` row (#2780, recurrence #2776 shape).
+ * The clean gate above drives `lsp_diagnostics`; this drives
+ * `lens_diagnostics`, the tool agents call by default, over ONE cheap seeded
+ * fixture with `mode=full refreshRunners=cheap`. It requires a fresh
+ * LSP-sweep PRIMARY finding, so a divergence between the two handlers'
+ * verdict shaping reds the nightly. One row, not per server: the clean gate
+ * already owns the per-server provenance question.
+ */
+export async function runLensFull({ langs = [], install, verbose, deps } = {}) {
+	const lensToolEntry = path.join(
+		repoRoot,
+		"dist",
+		"tools",
+		"lens-diagnostics.js",
+	);
+	const configEntry = path.join(
+		repoRoot,
+		"dist",
+		"clients",
+		"lsp",
+		"config.js",
+	);
+	const cacheManagerEntry = path.join(
+		repoRoot,
+		"dist",
+		"clients",
+		"cache-manager.js",
+	);
+	if (
+		!deps &&
+		(!fs.existsSync(lensToolEntry) ||
+			!fs.existsSync(configEntry) ||
+			!fs.existsSync(cacheManagerEntry))
+	) {
+		console.error(
+			`dist build missing: ${lensToolEntry}\nRun \`npm run build:dist\` first.`,
+		);
+		process.exit(2);
+	}
+	let createLensDiagnosticsTool;
+	let initLSPConfig;
+	let CacheManager;
+	if (deps) {
+		({ createLensDiagnosticsTool, initLSPConfig, CacheManager } = deps);
+	} else {
+		({ createLensDiagnosticsTool } = await import(
+			pathToFileURL(lensToolEntry).href
+		));
+		({ initLSPConfig } = await import(pathToFileURL(configEntry).href));
+		({ CacheManager } = await import(pathToFileURL(cacheManagerEntry).href));
+	}
+	let ensureTool;
+	let getInstallAttempt;
+	if (deps) {
+		({ ensureTool, getInstallAttempt } = deps);
+	} else {
+		const installerEntry = path.join(
+			repoRoot,
+			"dist",
+			"clients",
+			"installer",
+			"index.js",
+		);
+		({ ensureTool, getInstallAttempt } = await import(
+			pathToFileURL(installerEntry).href
+		));
+	}
+	const population = deps?.population ?? lensFullPopulation();
+	const selected = population.filter(
+		(f) => !langs.length || langs.includes(f.lang),
+	);
+	if (selected.length === 0) {
+		console.log(
+			`No lens_diagnostics mode=full fixture matched: ${langs.join(", ")}`,
+		);
+		return 0;
+	}
+	const rows = [];
+	let handshakeCensus = {};
+	const censusPath = process.env.PI_LENS_HOME
+		? path.join(process.env.PI_LENS_HOME, "lsp-handshake-census.json")
+		: undefined;
+	if (censusPath && fs.existsSync(censusPath)) {
+		try {
+			handshakeCensus = JSON.parse(fs.readFileSync(censusPath, "utf8"));
+		} catch {
+			// A missing or malformed census cannot admit a row.
+		}
+	}
+	for (const fx of selected) {
+		await ensureFixtureTools(
+			fx.tools ?? [],
+			install
+				? ensureTool
+				: (toolId) => ensureTool(toolId, { allowInstall: false }),
+			getInstallAttempt,
+			(toolId, resolved) =>
+				verbose &&
+				console.error(
+					`[${fx.lang}] ensureTool(${toolId}) → ${resolved ?? "UNAVAILABLE"}`,
+				),
+		);
+		const handshakeUnavailable = handshakeCensus[fx.lang]?.state !== "pass";
+		if (handshakeUnavailable) {
+			rows.push({
+				lang: fx.lang,
+				runner: fx.serverHint,
+				state: "skip",
+				detail: `${fx.serverHint} unavailable (handshake did not complete)`,
+				diags: 0,
+			});
+			continue;
+		}
+		let workspace;
+		let absFile;
+		let cleanup;
+		try {
+			({ workspace, absFile, cleanup } = await (
+				deps?.bootstrapFixtureWorkspace ?? bootstrapFixtureWorkspace
+			)(fx, {
+				initLSPConfig,
+				repoRoot,
+				tmpPrefix: "pi-lens-smoke-lens-full-",
+			}));
+			if (fx.setup) {
+				const setupResult = runFixtureSetup(fx.setup, workspace, verbose);
+				if (!setupResult.ok) {
+					rows.push({
+						lang: fx.lang,
+						runner: fx.serverHint,
+						state: "setup-failed",
+						detail: setupResult.detail,
+						diags: 0,
+					});
+					continue;
+				}
+			}
+			const tool = createLensDiagnosticsTool(
+				new CacheManager(false),
+				() => workspace,
+			);
+			const result = await tool.execute(
+				`smoke-lens-full-${fx.lang}`,
+				{
+					mode: "full",
+					refreshRunners: "cheap",
+					paths: [absFile],
+				},
+				undefined,
+				null,
+				{ cwd: workspace },
+			);
+			const verdict = classifyLensFullResult(result, fx);
+			rows.push({ lang: fx.lang, runner: fx.serverHint, ...verdict });
+			if (verbose) console.error(`[${fx.lang}] ${verdict.detail}`);
+		} catch (err) {
+			rows.push({
+				lang: fx.lang,
+				runner: fx.serverHint,
+				state: "fail",
+				detail: `lens_diagnostics error: ${err?.message ?? err}`,
+				diags: 0,
+			});
+		} finally {
+			cleanup?.();
+		}
+	}
+	const failures = report(
+		rows,
+		"lens_diagnostics mode=full (LSP primary findings)",
+		{ failOnSkipOnly: true },
+	);
+	return failures;
+}
+
+/**
  * LSP handshake layer — drives the real `LSPService.touchFile` (same entry the
  * lsp runner uses) per fixture, then asserts the handshake via
  * `getDiagnosticsHealth` (serverCountReady > 0). Returns the failure count.
@@ -2399,6 +2895,16 @@ async function runLspHandshake({ langs, install, verbose }) {
 		process.exit(2);
 	}
 	const { getLSPService } = await import(pathToFileURL(lspEntry).href);
+	const trustEntry = path.join(repoRoot, "dist", "clients", "project-trust.js");
+	const { adoptProjectTrustFromContext } = await import(
+		pathToFileURL(trustEntry).href
+	);
+	// The nightly harness is a standalone host, not pi itself. Its copied
+	// fixtures intentionally represent a trusted project so rows that exercise
+	// project-local executables (custom servers and TS7's local `tsc`) measure
+	// their production behavior. This goes through the same host accessor seam
+	// pi uses; it does not add a pi-lens trust policy or bypass the LSP gate.
+	adoptProjectTrustFromContext({ isProjectTrusted: () => true });
 	const configEntry = path.join(
 		repoRoot,
 		"dist",
@@ -2926,6 +3432,234 @@ export async function runFormatSmoke({ langs, install, verbose, deps }) {
 }
 
 /**
+ * Resolution layer (#1513): which BINARY a project-local tool resolves to.
+ *
+ * Every other layer proves a tool RAN; none proves WHERE it came from. A
+ * regression in the project-local resolvers (a mangled bin-dir list, a broken
+ * walk-up, a dropped rung) silently falls through to PATH or an install, so
+ * the runner is green while every project's own `.venv` / `vendor/bin` /
+ * `node_modules/.bin` binary is ignored. This layer plants a stub executable in
+ * each project-local bin dir of a scratch project and asserts the production
+ * resolvers hand back THAT path (never spawned: the formatter agreement gate
+ * in front of `formatFile` needs project-evidence fixtures that are not this
+ * layer's subject).
+ *
+ * The three rungs are the shared `findLocalBinUpwards` walker's three bin-dir
+ * shapes (`clients/package-manager.ts` `VENV_BIN_DIRS`, `VENDOR_BIN_DIRS`,
+ * `NODE_MODULES_BIN_DIRS`) seen through formatters (ancestor walk, file in a
+ * nested dir) plus the dispatch-runner venv rung (`createVenvFinder`, fixed at
+ * `cwd`, reports `rung: "venv"`). Each chosen formatter's resolver returns
+ * `null` / `FORMATTER_UNAVAILABLE` / a different path when its rung is
+ * disabled and never auto-installs, so a red here is a resolution defect and
+ * never a network failure.
+ *
+ * Deferred rungs, named: the package-manager global-bin walk
+ * (`findGlobalBinary` shells out to the runner's real npm/pnpm/yarn/bun and
+ * answers from the machine, not from a plantable fixture) and the managed
+ * install dir (`ensureTool`'s own tool tree, already exercised by every
+ * `--install` layer above).
+ *
+ * POSIX only: the stubs are `sh` scripts. The nightly runs on ubuntu.
+ */
+const RESOLUTION_STUB = "#!/bin/sh\nexit 0\n";
+const RESOLUTION_CASE_BUDGET_MS = 30_000;
+
+/** @type {ReadonlyArray<{id: string, source: string, seam: "formatter" | "runner", tool: string, bin: string, file?: string}>} */
+export const RESOLUTION_CASES = [
+	{
+		id: "formatter-venv",
+		source: "venv",
+		seam: "formatter",
+		tool: "sqlfluff",
+		bin: path.join(".venv", "bin", "sqlfluff"),
+		file: path.join("src", "deep", "query.sql"),
+	},
+	{
+		id: "formatter-vendor-bin",
+		source: "vendor/bin",
+		seam: "formatter",
+		tool: "php-cs-fixer",
+		bin: path.join("vendor", "bin", "php-cs-fixer"),
+		file: path.join("src", "deep", "index.php"),
+	},
+	{
+		id: "formatter-node-modules-bin",
+		source: "node_modules/.bin",
+		seam: "formatter",
+		tool: "oxfmt",
+		bin: path.join("node_modules", ".bin", "oxfmt"),
+		file: path.join("src", "deep", "index.js"),
+	},
+	{
+		id: "runner-venv",
+		source: "venv",
+		seam: "runner",
+		tool: "ruff",
+		bin: path.join(".venv", "bin", "ruff"),
+	},
+];
+
+/** Write each case's stub executable (and its nested start dir) under `root`. */
+export function plantResolutionFixture(root, cases = RESOLUTION_CASES) {
+	for (const c of cases) {
+		const bin = path.join(root, c.bin);
+		fs.mkdirSync(path.dirname(bin), { recursive: true });
+		fs.writeFileSync(bin, RESOLUTION_STUB, { mode: 0o755 });
+		if (c.file)
+			fs.mkdirSync(path.dirname(path.join(root, c.file)), { recursive: true });
+	}
+}
+
+async function withResolutionDeadline(promise, label) {
+	let timer;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((_, reject) => {
+				timer = setTimeout(
+					() =>
+						reject(
+							new Error(`${label} exceeded ${RESOLUTION_CASE_BUDGET_MS}ms`),
+						),
+					RESOLUTION_CASE_BUDGET_MS,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+const sameFile = (a, b) => {
+	try {
+		return fs.realpathSync(a) === fs.realpathSync(b);
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * One case → one smoke row. `deps` = `{ formatters: {<tool>: FormatterInfo},
+ * createVenvFinder }` (the dist modules in production).
+ */
+export async function evaluateResolutionCase(deps, root, c) {
+	const row = (state, detail) => ({
+		state,
+		lang: c.source,
+		runner: `${c.seam}:${c.tool}`,
+		diags: 0,
+		detail,
+	});
+	const expected = path.join(root, c.bin);
+	try {
+		if (c.seam === "runner") {
+			const found = await withResolutionDeadline(
+				deps.createVenvFinder(c.tool)(root),
+				c.id,
+			);
+			if (found.rung !== "venv" || !sameFile(found.path, expected)) {
+				return row(
+					"fail",
+					`expected ${c.bin} via rung "venv", got ${JSON.stringify(found.path)} via rung "${found.rung}"`,
+				);
+			}
+			return row("pass", `${c.bin} via rung "venv"`);
+		}
+		const formatter = deps.formatters[c.tool];
+		const file = path.join(root, c.file);
+		const argv = await withResolutionDeadline(
+			formatter.resolveCommand(file, path.dirname(file)),
+			c.id,
+		);
+		const resolved = Array.isArray(argv) ? argv[0] : undefined;
+		if (!resolved || !sameFile(resolved, expected)) {
+			return row(
+				"fail",
+				`expected ${c.bin} (walk-up from ${path.dirname(c.file)}), resolver returned ${JSON.stringify(argv)}`,
+			);
+		}
+		return row(
+			"pass",
+			`${c.bin} resolved by walk-up from ${path.dirname(c.file)}`,
+		);
+	} catch (err) {
+		return row("fail", `${err instanceof Error ? err.message : String(err)}`);
+	}
+}
+
+/** Resolution layer entry. Returns the failure count. */
+export async function runResolutionSmoke({ verbose, deps } = {}) {
+	if (process.platform === "win32") {
+		console.error("resolution layer is POSIX-only (sh stubs); skipped.");
+		return 0;
+	}
+	let resolved = deps;
+	if (!resolved) {
+		// #4300/#4301: like the handshake and diagnostics layers, this harness is a
+		// standalone host, not pi, and its fixtures represent a trusted project.
+		// Without this the #4268 gate refuses every project-local resolver rung.
+		const trustEntry = path.join(
+			repoRoot,
+			"dist",
+			"clients",
+			"project-trust.js",
+		);
+		const { adoptProjectTrustFromContext } = await import(
+			pathToFileURL(trustEntry).href
+		);
+		adoptProjectTrustFromContext({ isProjectTrusted: () => true });
+		const formattersEntry = path.join(
+			repoRoot,
+			"dist",
+			"clients",
+			"formatters.js",
+		);
+		const helpersEntry = path.join(
+			repoRoot,
+			"dist",
+			"clients",
+			"dispatch",
+			"runners",
+			"utils",
+			"runner-helpers.js",
+		);
+		for (const e of [formattersEntry, helpersEntry]) {
+			if (!fs.existsSync(e)) {
+				console.error(
+					`dist build missing: ${e}\nRun \`npm run build:dist\` first.`,
+				);
+				process.exit(2);
+			}
+		}
+		const fmt = await import(pathToFileURL(formattersEntry).href);
+		const helpers = await import(pathToFileURL(helpersEntry).href);
+		resolved = {
+			formatters: {
+				sqlfluff: fmt.sqlfluffFormatter,
+				"php-cs-fixer": fmt.phpCsFixerFormatter,
+				oxfmt: fmt.oxfmtFormatter,
+			},
+			createVenvFinder: helpers.createVenvFinder,
+		};
+	}
+	const root = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), `${TMP_PREFIX}resolution-`)),
+	);
+	try {
+		plantResolutionFixture(root);
+		const rows = [];
+		for (const c of RESOLUTION_CASES) {
+			const r = await evaluateResolutionCase(resolved, root, c);
+			if (verbose) console.error(`[resolution] ${c.id}: ${r.state}`);
+			rows.push(r);
+		}
+		return report(rows, "Resolution (project-local bin dirs → resolved path)");
+	} finally {
+		safeRm(root);
+	}
+}
+
+/**
  * Autofix layer — drives the pipeline's safe-autofix phase (`runAutofix`, what
  * `runPipeline` calls), which applies fixable linters in fix mode (ruff --fix,
  * biome --write, eslint --fix, stylelint/sqlfluff/rubocop/ktlint/rust-clippy)
@@ -3053,7 +3787,9 @@ async function main() {
 		install,
 		lsp,
 		lspGate,
+		lensFull,
 		format,
+		resolution,
 		autofix,
 		tier1,
 		minPass,
@@ -3082,10 +3818,18 @@ async function main() {
 		process.exit((await runLspGate({ langs, install, verbose })) > 0 ? 1 : 0);
 	}
 
+	if (lensFull) {
+		process.exit((await runLensFull({ langs, install, verbose })) > 0 ? 1 : 0);
+	}
+
 	if (format) {
 		process.exit(
 			(await runFormatSmoke({ langs, install, verbose })) > 0 ? 1 : 0,
 		);
+	}
+
+	if (resolution) {
+		process.exit((await runResolutionSmoke({ verbose })) > 0 ? 1 : 0);
 	}
 
 	if (autofix) {
@@ -3264,4 +4008,11 @@ if (invokedDirectly) {
 	});
 }
 
-export { AUTOFIX_FIXTURES, FIXTURES, FORMAT_FIXTURES, LSP_FIXTURES };
+export {
+	AUTOFIX_FIXTURES,
+	ensureSmokeLombokJar,
+	FIXTURES,
+	FORMAT_FIXTURES,
+	LSP_FIXTURES,
+	runFixtureSetup,
+};

@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 
@@ -24,16 +25,17 @@ const mocked = vi.hoisted(() => ({ service: null as unknown }));
 const { getServersForFileWithConfig } = vi.hoisted(() => ({
 	getServersForFileWithConfig: vi.fn(),
 }));
-vi.mock("../../clients/lsp/config.js", () => ({
+vi.mock("../../clients/lsp/config.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/lsp/config.js")>()),
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 	primaryServerId: (fp: string) => getServersForFileWithConfig(fp)[0]?.id,
 }));
 
-vi.mock("../../clients/lsp/index.js", async () => {
+vi.mock("../../clients/lsp/capabilities.js", async () => {
 	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/index.js")
-	>("../../clients/lsp/index.js");
+		typeof import("../../clients/lsp/capabilities.js")
+	>("../../clients/lsp/capabilities.js");
 	return {
 		...actual,
 		getLSPService: () => mocked.service,
@@ -62,7 +64,12 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-diag-cache-"));
-		// Legacy per-project data dir marker so the cache writes inside tmpDir.
+		// Legacy per-project data dir marker: with no PILENS_DATA_DIR override this
+		// makes `getProjectDataDir` resolve the cache INSIDE tmpDir (cleaned up by
+		// afterEach) instead of the real global ~/.pi-lens dir. Under a relocated
+		// PILENS_DATA_DIR the production owner wins, and every fixture path below
+		// is built from `getProjectDataDir(tmpDir)`, so the write and read never
+		// disagree about which data root owns the cache.
 		fs.mkdirSync(path.join(tmpDir, ".pi-lens"));
 		reconcileScanDiagnostics.mockClear();
 		getServersForFileWithConfig.mockReset();
@@ -99,8 +106,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		{ mtimeMs: number; sizeBytes?: number }
 	> {
 		const cacheFile = path.join(
-			tmpDir,
-			".pi-lens",
+			getProjectDataDir(tmpDir),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -140,6 +146,104 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		const entries = cacheEntries();
 		const entry = Object.values(entries)[0];
 		expect(entry?.sizeBytes).toBe(fs.statSync(files[0]!).size);
+	});
+
+	// #3505 class sweep: this path's own-file stat already precedes its read,
+	// but its `scannedAt` (the reference the entry's dependency mtimes are
+	// compared against) was stamped when the entry was recorded, after the
+	// touch. A dependency written during the touch predated the entry.
+	it("stamps the entry's scannedAt before the touch, not when it records (#3505)", async () => {
+		const T_READ = 1_900_000_000_000;
+		const files = writeFiles(["a.ts"]);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			vi.setSystemTime(T_READ);
+			touchFile.mockImplementation(async () => {
+				// The touch takes 1.5 s; the entry is recorded after it.
+				vi.setSystemTime(T_READ + 1500);
+				return { diags: [] };
+			});
+			await runBatch(files);
+		} finally {
+			vi.useRealTimers();
+		}
+		const entry = Object.values(cacheEntries())[0] as
+			| { scannedAt?: number }
+			| undefined;
+		expect(entry?.scannedAt).toBe(T_READ);
+	});
+
+	// #3505 r1 F1: the fresh result's widget row must carry the same read
+	// stamp as its cache entry. Stamped after the touch, a file or dependency
+	// written during the touch predates the row, and the widget's own
+	// mtime gates keep the pre-edit finding.
+	it("observes the fresh widget row at the read, not after the touch (#3505)", async () => {
+		const T_READ = 1_900_000_000_000;
+		const files = writeFiles(["a.ts"]);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			vi.setSystemTime(T_READ);
+			touchFile.mockImplementation(async () => {
+				vi.setSystemTime(T_READ + 1500);
+				return {
+					diags: [
+						{
+							severity: 1,
+							message: "computed on the bytes read at T_READ",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 1 },
+							},
+						},
+					],
+				};
+			});
+			await runBatch(files);
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(reconcileScanDiagnostics).toHaveBeenCalledTimes(1);
+		// (file, diagnostics, confirmed, writeIndex, observedAt)
+		expect(reconcileScanDiagnostics.mock.calls[0]?.[4]).toBe(T_READ);
+	});
+
+	// #3505 r2: the single-file mode (`path`, not `paths`) writes the same
+	// widget row through its own reconcile, and had the same late stamp.
+	it("observes the single-file widget row at the read, not after the touch (#3505)", async () => {
+		const T_READ = 1_900_000_000_000;
+		const [file] = writeFiles(["a.ts"]);
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			vi.setSystemTime(T_READ);
+			touchFile.mockImplementation(async () => {
+				vi.setSystemTime(T_READ + 1500);
+				return {
+					diags: [
+						{
+							severity: 1,
+							message: "computed on the bytes read at T_READ",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 1 },
+							},
+						},
+					],
+				};
+			});
+			const tool = createLspDiagnosticsTool();
+			await tool.execute(
+				"diag-single-file-test",
+				{ path: file, severity: "all", waitMs: 50 },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(reconcileScanDiagnostics).toHaveBeenCalledTimes(1);
+		// (file, diagnostics, confirmed, writeIndex, observedAt)
+		expect(reconcileScanDiagnostics.mock.calls[0]?.[4]).toBe(T_READ);
 	});
 
 	it("a second identical batch call never touches an unchanged file again", async () => {
@@ -193,8 +297,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 	it("fails open on a corrupt cache file: still touches every file instead of throwing", async () => {
 		const files = writeFiles(["a.ts"]);
 		const cacheFile = path.join(
-			tmpDir,
-			".pi-lens",
+			getProjectDataDir(tmpDir),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -374,17 +477,14 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 		touchFile.mockResolvedValueOnce({ diags: [diag] });
 
 		await runBatch(files);
-		// The fresh touch was OBSERVED now → no observation-time override.
 		const freshCall = reconcileScanDiagnostics.mock.calls.find((c) =>
 			String(c[0]).endsWith("a.ts"),
 		);
 		expect(freshCall).toBeDefined();
-		expect(freshCall?.[4]).toBeUndefined();
 
 		// The wall-clock time the cache recorded this scan at.
 		const cacheFile = path.join(
-			tmpDir,
-			".pi-lens",
+			getProjectDataDir(tmpDir),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -392,6 +492,10 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			entries: Record<string, { scannedAt: number }>;
 		};
 		const scannedAt = Object.values(cache.entries)[0]!.scannedAt;
+		// #3505 r1 F1: the fresh touch's row is observed at its read, the same
+		// instant the cache entry is stamped with (it was `undefined`, i.e.
+		// now(), after the touch).
+		expect(freshCall?.[4]).toBe(scannedAt);
 
 		reconcileScanDiagnostics.mockClear();
 		touchFile.mockClear();

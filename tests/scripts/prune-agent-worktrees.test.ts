@@ -25,6 +25,7 @@ import {
 	HOOK_REMOVE_RESERVE_MS,
 	HOOK_TIMEOUT_MARGIN_MS,
 	HOOK_TIMEOUT_MS,
+	liveProcessCwds,
 	MIN_SCAN_BUDGET_MS,
 	RECHECK_TIMEOUT_MS,
 	REMOVE_TIMEOUT_MS,
@@ -42,7 +43,9 @@ import {
 } from "../../scripts/prune-agent-worktrees.mjs";
 import {
 	DEFAULT_MIN_AGE_MS,
+	planMergedWorktreeRemovals,
 	planWorktreePrune,
+	toComparablePath,
 } from "../../scripts/lib/worktree-hygiene.mjs";
 import { gitExecFileSync, gitFixtureEnv } from "../support/git-fixture-env.js";
 
@@ -147,6 +150,203 @@ describe("parseArgs", () => {
 		);
 	});
 });
+
+describe("#3694 live cwd safety rail (planners)", () => {
+	// The planners compare `toComparablePath` KEYS (liveCwdWithin's contract).
+	// The synthetic POSIX fixtures below are raw strings, which on Windows
+	// resolve to a drive-qualified key (`d:/repo/...`) and never matched, so
+	// the rail looked absent and five cases read the wrong way (#4019).
+	const comparableSet = (...paths: string[]) =>
+		new Set(paths.map(toComparablePath));
+	const AGENT = "/repo/.claude/worktrees/agent-a";
+	const agentRow = {
+		path: AGENT,
+		branch: "refs/heads/agent-a",
+		mtimeMs: 0,
+		dirty: false,
+		pushed: true,
+	};
+	const mergedRow = {
+		path: "/repo/elsewhere/merged-a",
+		branch: "refs/heads/merged-a",
+		mtimeMs: 0,
+		clean: true,
+		mergedIntoMaster: true,
+	};
+
+	it("keeps an unselected tree containing a live process cwd", () => {
+		const result = planWorktreePrune({
+			worktrees: [agentRow],
+			nowMs: 10_000_000,
+			minAgeMs: 1,
+			liveProcessCwds: comparableSet(`${AGENT}/src`),
+		});
+		expect(result.remove).toHaveLength(0);
+		expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
+	});
+
+	// Containment, not string prefix: `agent-ab`'s process must not protect
+	// `agent-a`, and a process sitting exactly at the tree root must.
+	it("matches a cwd at or under the tree, never a sibling sharing its name prefix", () => {
+		const plan = (cwd: string) =>
+			planWorktreePrune({
+				worktrees: [agentRow],
+				nowMs: 10_000_000,
+				minAgeMs: 1,
+				liveProcessCwds: comparableSet(cwd),
+			});
+		expect(plan(`${AGENT}b/src`).remove).toHaveLength(1);
+		expect(plan(AGENT).keep[0]).toMatchObject({ reason: "live-cwd" });
+	});
+
+	// F5 (orchestrator decision, PR #3697 round 2): the tree a caller NAMES --
+	// the SubagentStop hook's stopped agent, or a human's `--only` -- is the
+	// one whose leftover processes the sweep exists to reap, exactly as it was
+	// before this rail. The rail protects OTHER trees. Recurrence: round 1 kept
+	// the stopped agent's own tree, so the hook stopped reaping.
+	it("does not protect a tree the caller named from its own leftover processes", () => {
+		const result = planWorktreePrune({
+			worktrees: [agentRow],
+			nowMs: 10_000_000,
+			minAgeMs: 1,
+			only: [AGENT],
+			liveProcessCwds: comparableSet(`${AGENT}/src`),
+		});
+		expect(result.keep).toHaveLength(0);
+		expect(result.remove).toHaveLength(1);
+	});
+
+	it("adds no rail of its own when the cwd scan is unknowable: the age rail decides", () => {
+		const old = planWorktreePrune({
+			worktrees: [agentRow],
+			nowMs: 10_000_000,
+			minAgeMs: 1,
+			liveProcessCwds: null,
+		});
+		expect(old.remove).toHaveLength(1);
+		const young = planWorktreePrune({
+			worktrees: [{ ...agentRow, mtimeMs: 9_999_999 }],
+			nowMs: 10_000_000,
+			minAgeMs: 1_000_000,
+			liveProcessCwds: null,
+		});
+		expect(young.remove).toHaveLength(0);
+		expect(young.keep[0]).toMatchObject({ reason: "too-young" });
+	});
+
+	// F1 (PR #3697 round 2): the merged-branch sweep is the DEFAULT sweep and
+	// had neither the live-cwd rail nor any age rail; its probe killed a live
+	// `sleep` and removed the directory under it, agent-shaped or not.
+	describe("planMergedWorktreeRemovals", () => {
+		it("keeps a merged clean tree that holds a live process cwd", () => {
+			const result = planMergedWorktreeRemovals({
+				candidates: [mergedRow],
+				nowMs: 10_000_000,
+				liveProcessCwds: comparableSet("/repo/elsewhere/merged-a/src"),
+			});
+			expect(result.remove).toHaveLength(0);
+			expect(result.keep[0]).toMatchObject({ reason: "live-cwd" });
+		});
+
+		// Round 3, finding B (#3694 "or modified within N minutes"): the rail
+		// holds whatever the cwd scan answered. Recurrence: round 2 applied it
+		// only to an unknowable scan, so a fresh merged tree with no process
+		// inside was removable while liveness was known; before that, round 1's
+		// unknowable scan kept everything (F6).
+		it("keeps a recently active unnamed tree and removes a quiet one, whatever the cwd scan says", () => {
+			for (const liveProcessCwds of [
+				new Set(["/somewhere/else"]),
+				null,
+				undefined,
+			]) {
+				const recent = planMergedWorktreeRemovals({
+					candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+					nowMs: 10_000_000,
+					minAgeMs: 1_000_000,
+					liveProcessCwds,
+				});
+				expect(recent.remove).toHaveLength(0);
+				expect(recent.keep[0]).toMatchObject({ reason: "too-young" });
+				const quiet = planMergedWorktreeRemovals({
+					candidates: [mergedRow],
+					nowMs: 10_000_000,
+					minAgeMs: 1_000_000,
+					liveProcessCwds,
+				});
+				expect(quiet.remove).toHaveLength(1);
+			}
+		});
+
+		it("does not protect a named tree from its own leftover processes", () => {
+			const named = comparableSet("/repo/elsewhere/merged-a");
+			const result = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				selectedKeys: named,
+				liveProcessCwds: comparableSet("/repo/elsewhere/merged-a/src"),
+			});
+			expect(result.remove).toHaveLength(1);
+			const unknown = planMergedWorktreeRemovals({
+				candidates: [{ ...mergedRow, mtimeMs: 9_999_999 }],
+				nowMs: 10_000_000,
+				minAgeMs: 1_000_000,
+				selectedKeys: named,
+				liveProcessCwds: null,
+			});
+			expect(unknown.remove).toHaveLength(1);
+		});
+	});
+});
+
+// lane: ubuntu Unit tests (a /proc fixture built from symlinks); dev-box-only
+// on Windows, where the function returns null before reading anything.
+describe.skipIf(process.platform === "win32")(
+	"liveProcessCwds (#3694 F6)",
+	() => {
+		let procRoot = "";
+		beforeEach(() => {
+			procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-proc-"));
+		});
+		afterEach(() => {
+			fs.rmSync(procRoot, { recursive: true, force: true });
+		});
+		const addProc = (pid: string, cwd: string) => {
+			fs.mkdirSync(path.join(procRoot, pid));
+			fs.symlinkSync(cwd, path.join(procRoot, pid, "cwd"), "dir");
+		};
+
+		it.skipIf(process.platform !== "linux")(
+			"sees this very process through the real /proc",
+			() => {
+				const cwds = liveProcessCwds();
+				expect(cwds).toBeInstanceOf(Set);
+				expect(cwds?.has(toComparablePath(process.cwd()))).toBe(true);
+			},
+		);
+
+		it("returns null when the scan cannot see its own cwd (hidepid, foreign pid namespace, EACCES)", () => {
+			addProc("101", os.tmpdir());
+			expect(liveProcessCwds(procRoot)).toBeNull();
+			expect(liveProcessCwds(path.join(procRoot, "absent"))).toBeNull();
+		});
+
+		it("returns every cwd it read, as comparable keys, once it has seen itself", () => {
+			addProc("101", os.tmpdir());
+			addProc("102", process.cwd());
+			// /proc also holds non-pid entries (self, sys...); only digits are pids.
+			addProc("self", path.join(os.tmpdir(), "decoy-self"));
+			addProc("12x", path.join(os.tmpdir(), "decoy-12x"));
+			const cwds = liveProcessCwds(procRoot);
+			expect(cwds).toEqual(
+				new Set([
+					toComparablePath(os.tmpdir()),
+					toComparablePath(process.cwd()),
+				]),
+			);
+		});
+	},
+);
 
 describe("worktreePathFromHookPayload", () => {
 	const repoRoot = path.resolve("/repo");
@@ -1031,6 +1231,27 @@ function createSubagentStopFixture(agentId: string) {
 	}
 
 	/**
+	 * Make the process-listing seam return its real failure shape without
+	 * relying on how quickly a Windows PowerShell spawn fails. The old
+	 * `SystemRoot` setup could let a fast runner complete the listing inside
+	 * the 400ms ceiling, so the `listing-failed` record was never produced
+	 * (#4019).
+	 */
+	function patchProcessScanFailure() {
+		fs.renameSync(processScanPath, realProcessScanPath);
+		fs.writeFileSync(
+			processScanPath,
+			[
+				'export * from "./process-scan-real.mjs";',
+				"export function snapshotProcesses() {",
+				"\treturn Promise.resolve({ rows: [], ok: false });",
+				"}",
+				"",
+			].join("\n"),
+		);
+	}
+
+	/**
 	 * #2519: the same module-substitution hook as `patchProcessScan`, but
 	 * DETERMINISTIC rather than wall-clock-timed. `snapshotProcesses` is
 	 * only ever called from `readProcessTable`, itself only reached AFTER
@@ -1211,6 +1432,7 @@ function createSubagentStopFixture(agentId: string) {
 		cli,
 		git,
 		patchProcessScan,
+		patchProcessScanFailure,
 		patchRecheck,
 		patchProcessScanAppendRows,
 		addNodeModulesJunction,
@@ -1228,6 +1450,7 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 	let ledgerDir = "";
 	let worktree = "";
 	let cli = "";
+	let patchProcessScanFailure: () => void;
 	// #2519 round 2, S4: exposed by the builder rather than redeclared here
 	// -- the exact describe-private duplicate of the builder's own `git`
 	// this finding flagged.
@@ -1235,7 +1458,8 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 
 	beforeEach(() => {
 		fixture = createSubagentStopFixture(AGENT_ID);
-		({ root, repo, ledgerDir, worktree, cli, git } = fixture);
+		({ root, repo, ledgerDir, worktree, cli, git, patchProcessScanFailure } =
+			fixture);
 	});
 
 	afterEach(() => {
@@ -1317,12 +1541,25 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		records.map((record) => record.event);
 
 	it("leaves both candidate kinds untouched in dry-run and at --max 0", () => {
+		// `--min-age 0` throughout: these fresh trees are the subject of the cap,
+		// not of the merged sweep's recent-activity rail (#3694 round 3).
 		const candidates = fixture.addCapCandidates(5);
 		const before = [candidates.registered[0], candidates.unregistered[0]].map(
 			(entry) => ({ entry, stat: fs.statSync(entry) }),
 		);
 		const dryRun = JSON.parse(
-			runCli(["--max", "2", "--dry-run", "--no-orphan-sweep", "--json"], ""),
+			runCli(
+				[
+					"--max",
+					"2",
+					"--dry-run",
+					"--no-orphan-sweep",
+					"--json",
+					"--min-age",
+					"0",
+				],
+				"",
+			),
 		) as { remove: unknown[]; unregistered: { remove: unknown[] } };
 		expect(dryRun.remove).toHaveLength(2);
 		expect(dryRun.unregistered.remove).toHaveLength(0);
@@ -1333,7 +1570,10 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		}
 
 		const zero = JSON.parse(
-			runCli(["--max", "0", "--no-orphan-sweep", "--json"], ""),
+			runCli(
+				["--max", "0", "--no-orphan-sweep", "--json", "--min-age", "0"],
+				"",
+			),
 		) as {
 			remove: unknown[];
 			deferred: string[];
@@ -1359,8 +1599,13 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 			// the operator's one explicit deletion budget. Five candidates in each
 			// population with --max 2 must remove exactly two total, then defer the
 			// other eight from the same raw combined plan.
+			// `--min-age 0`: the fresh trees are the subject of the cap, not of the
+			// merged sweep's recent-activity rail (#3694 round 3).
 			const candidates = fixture.addCapCandidates(5);
-			const out = runCli(["--max", "2", "--no-orphan-sweep", "--json"], "");
+			const out = runCli(
+				["--max", "2", "--no-orphan-sweep", "--json", "--min-age", "0"],
+				"",
+			);
 			const plan = JSON.parse(out) as {
 				remove: { path: string }[];
 				deferred: string[];
@@ -1396,7 +1641,7 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 
 			// The deferred candidates use the same raw plan on the next run. This
 			// also drives both execution paths and their distinct ledger records.
-			runCli(["--max", "10", "--no-orphan-sweep"], "");
+			runCli(["--max", "10", "--no-orphan-sweep", "--min-age", "0"], "");
 			const records = ledgerRecords();
 			expect(
 				records.filter((record) => record.event === "hygiene.worktree-removed"),
@@ -1436,20 +1681,248 @@ describe("SubagentStop hook, end to end (#2486)", () => {
 		},
 	);
 
+	/**
+	 * A live process whose cwd is `dir` (#3694). ONE spawn site for every case
+	 * below. libuv's spawn returns only after the child has exec'd, so its cwd
+	 * is already `dir` when this returns.
+	 */
+	function holdCwd(dir: string) {
+		return spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+			cwd: dir,
+			stdio: "ignore",
+		});
+	}
+	const isAlive = (pid: number | undefined) => {
+		try {
+			process.kill(pid as number, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	type Dry = {
+		remove: { path: string }[];
+		keep: { path: string; reason: string }[];
+		mergedKeep: { path: string; reason: string }[];
+	};
+	const dryRun = (...extra: string[]) =>
+		JSON.parse(
+			runCli(["--dry-run", "--no-orphan-sweep", "--json", ...extra], ""),
+		) as Dry;
+	const planned = (dry: Dry, target: string) =>
+		dry.remove.some(
+			(entry) => toComparablePath(entry.path) === toComparablePath(target),
+		);
+	const keptAs = (list: Dry["keep"], target: string) =>
+		list.find(
+			(entry) => toComparablePath(entry.path) === toComparablePath(target),
+		)?.reason;
+	// lane: ubuntu Unit tests. Liveness is read from Linux /proc only; on
+	// macOS and Windows the scan is unknowable and only `--min-age` protects a
+	// tree, so these `--min-age 0` cases have no subject there.
+	const linuxOnly = it.skipIf(process.platform !== "linux");
+
+	// F1 (PR #3697 round 2). The DEFAULT sweep is the merged-branch pass, and
+	// round 1 put the live-cwd rail only in the age planner. The reviewer's
+	// probe: a merged clean tree with a live process inside it was planned for
+	// removal and the process was killed. Drives the whole CLI so that dropping
+	// `liveProcessCwds` from main()'s merged call (mutation M10b) reds.
+	// `--min-age 0` throughout, so the live-cwd rail is the only one left.
+	linuxOnly(
+		"keeps a merged clean tree that a live process is using, and never kills that process (#3694 F1)",
+		{ timeout: 90_000 },
+		() => {
+			const merged = path.join(repo, "merged-candidates", "live-0");
+			fs.mkdirSync(path.dirname(merged), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "pr-9300", merged], repo);
+			// Positive control: with nothing inside it, this exact tree IS removable,
+			// so the keep below is the rail and not some other rule.
+			expect(planned(dryRun("--min-age", "0"), merged)).toBe(true);
+
+			const holder = holdCwd(merged);
+			try {
+				const dry = dryRun("--min-age", "0");
+				expect(planned(dry, merged)).toBe(false);
+				expect(keptAs(dry.mergedKeep, merged)).toBe("live-cwd");
+				runCli(["--no-orphan-sweep", "--json", "--min-age", "0"], "");
+				expect(fs.existsSync(merged)).toBe(true);
+				expect(isAlive(holder.pid)).toBe(true);
+			} finally {
+				holder.kill();
+			}
+		},
+	);
+
+	// F6 through main(): when the cwd scan is unknowable (macOS, Windows, a
+	// hidden pid namespace -- forced here with a proc root that does not exist)
+	// prune must not become a no-op. A recently active merged tree is kept; a
+	// quiet one (`--min-age 0`) is removed. Kills main() dropping `minAgeMs`
+	// from the merged call (M27) and the null-means-keep-everything regression.
+	it(
+		"with an unknowable cwd scan, keeps recently active merged trees and removes quiet ones (#3694 F6)",
+		{ timeout: 90_000 },
+		() => {
+			const merged = path.join(repo, "merged-candidates", "unknown-0");
+			fs.mkdirSync(path.dirname(merged), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "pr-9302", merged], repo);
+			const unknownScan = {
+				PI_LENS_PRUNE_PROC_ROOT: path.join(root, "no-proc"),
+			};
+			const run = (...extra: string[]) =>
+				JSON.parse(
+					runCli(
+						["--dry-run", "--no-orphan-sweep", "--json", ...extra],
+						"",
+						unknownScan,
+					),
+				) as Dry;
+			const recent = run();
+			expect(planned(recent, merged)).toBe(false);
+			expect(keptAs(recent.mergedKeep, merged)).toBe("too-young");
+			expect(planned(run("--min-age", "0"), merged)).toBe(true);
+		},
+	);
+
+	// Round 3, finding B: "or modified within N minutes" holds whatever the
+	// cwd scan says. Recurrence: round 2 applied the rail only when liveness
+	// was unknowable, so a fixer tree cut at origin/master a moment ago --
+	// merged, clean, and with no process inside at the instant of the sweep
+	// (agent shells reset their cwd between calls) -- was removed at the
+	// default --min-age. Both shapes: an agent tree and any other tree.
+	it(
+		"keeps a fresh merged tree with no process inside at the default --min-age (#3694 round 3)",
+		{ timeout: 90_000 },
+		() => {
+			const fresh = path.join(repo, "merged-candidates", "fresh-fixer");
+			fs.mkdirSync(path.dirname(fresh), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "fresh-fixer", fresh], repo);
+			const agent = fixture.addSiblingWorktree("a0000000000000004");
+			// Positive control: both ARE merged-sweep removals once quiet.
+			const quiet = dryRun("--min-age", "0");
+			expect(planned(quiet, fresh)).toBe(true);
+			expect(planned(quiet, agent)).toBe(true);
+
+			const dry = dryRun();
+			for (const tree of [fresh, agent]) {
+				expect(planned(dry, tree)).toBe(false);
+				expect(keptAs(dry.mergedKeep, tree)).toBe("too-young");
+			}
+		},
+	);
+
+	// Round 3, finding C: the proc-root handle is not conservative-only -- a
+	// missing, empty or crafted root drops the live-cwd rail, and with
+	// `--min-age 0` the sweep then removes a live tree and kills its process.
+	// Recurrence: round 2 honoured it in every environment. Both directions:
+	// under Vitest the handle works (the tree is planned), outside it the real
+	// /proc is read and the tree is kept.
+	linuxOnly(
+		"honours PI_LENS_PRUNE_PROC_ROOT only under Vitest (#3694 round 3)",
+		{ timeout: 90_000 },
+		() => {
+			const merged = path.join(repo, "merged-candidates", "proc-root-0");
+			fs.mkdirSync(path.dirname(merged), { recursive: true });
+			git(["worktree", "add", "-q", "-b", "pr-9303", merged], repo);
+			const holder = holdCwd(merged);
+			try {
+				const withRoot = (vitest: string) =>
+					JSON.parse(
+						runCli(
+							["--dry-run", "--no-orphan-sweep", "--json", "--min-age", "0"],
+							"",
+							{
+								PI_LENS_PRUNE_PROC_ROOT: path.join(root, "no-proc"),
+								VITEST: vitest,
+							},
+						),
+					) as Dry;
+				expect(planned(withRoot("true"), merged)).toBe(true);
+				const outside = withRoot("");
+				expect(planned(outside, merged)).toBe(false);
+				expect(keptAs(outside.mergedKeep, merged)).toBe("live-cwd");
+				expect(isAlive(holder.pid)).toBe(true);
+			} finally {
+				holder.kill();
+			}
+		},
+	);
+
+	// The age planner's own signature: a pushed-but-UNMERGED agent tree is
+	// invisible to the merged pass ("unmerged"), so only main()'s call into
+	// planWorktreePrune can keep it (mutation M10a).
+	linuxOnly(
+		"keeps a pushed, unmerged agent tree that a live process is using (#3694 F1)",
+		{ timeout: 90_000 },
+		() => {
+			const other = fixture.addSiblingWorktree("a0000000000000002", "pr-9301");
+			fs.writeFileSync(path.join(other, "work.txt"), "committed work\n");
+			git(["add", "work.txt"], other);
+			git(["commit", "-qm", "work"], other);
+			git(["push", "-q", "-u", "origin", "pr-9301"], other);
+			expect(planned(dryRun("--min-age", "0"), other)).toBe(true);
+
+			const holder = holdCwd(other);
+			try {
+				const dry = dryRun("--min-age", "0");
+				expect(planned(dry, other)).toBe(false);
+				expect(keptAs(dry.keep, other)).toBe("live-cwd");
+				runCli(["--no-orphan-sweep", "--json", "--min-age", "0"], "");
+				expect(fs.existsSync(other)).toBe(true);
+				expect(isAlive(holder.pid)).toBe(true);
+			} finally {
+				holder.kill();
+			}
+		},
+	);
+
+	// F5 (orchestrator decision): the live-cwd rail protects OTHER trees. The
+	// stopped agent's own tree is reaped WITH its leftover process, as before
+	// #3694 -- a hook that refuses to reap its own agent is the #2486 regression.
+	//
+	// Linux only: the leftover is a `node -e` whose command line never names the
+	// tree, so only a procfs cwd read can find it (`enrichCwd`, "absent on
+	// Windows and macOS, where command-line matching is the sole signal"). On
+	// Windows the process is unreachable by design, `git worktree remove` hits
+	// its held cwd and the tree stays: that is the documented platform limit,
+	// not a regression (#4019).
+	linuxOnly(
+		"still reaps the stopped agent's own tree, and its leftover process, on SubagentStop (#3694 F5)",
+		{ timeout: 90_000 },
+		async () => {
+			const sibling = fixture.addSiblingWorktree("a0000000000000003");
+			const bystander = holdCwd(sibling);
+			const leftover = holdCwd(worktree);
+			try {
+				const exited = new Promise((resolve) => leftover.once("exit", resolve));
+				runCli(registeredArgv(), subagentStopPayload(AGENT_ID));
+				expect(fs.existsSync(worktree)).toBe(false);
+				await exited;
+				// ...and the sibling agent's tree, with its own live process, is untouched.
+				expect(fs.existsSync(sibling)).toBe(true);
+				expect(isAlive(bystander.pid)).toBe(true);
+			} finally {
+				leftover.kill();
+				bystander.kill();
+			}
+		},
+	);
+
 	// lane: windows-vitest
 	it.skipIf(process.platform !== "win32")(
 		"reaps under the registered argv when the listing itself fails (#2486's own reason)",
 		{ timeout: 90_000 },
 		() => {
-			// The exact reason string from the reported hygiene.log, driven by
-			// a ceiling the REAL listing cannot meet: measured on this box the
-			// Windows listing costs ~524ms at its floor (~208ms powershell
-			// startup + ~316ms projected WQL query) and 584-707ms in practice,
-			// so a 400ms ceiling times the spawn out and `ok` comes back
-			// false. Windows-only because POSIX `ps` answers in ~15ms — the
-			// portable case above drives the same degraded state through the
-			// `skipped` branch instead (both yield listingOk=false and an
-			// empty table; only the reason string differs).
+			// The exact reason string from the reported hygiene.log. The listing
+			// failure is forced through the fixture's copy of the real process-scan
+			// seam, rather than by relying on how quickly a missing PowerShell
+			// executable reports its spawn error. The old setup raced a fast listing
+			// and never produced the record (#4019). `--scan-timeout-ms 400` stays
+			// because it is the ceiling the record reports. The forced seam makes the
+			// case platform-neutral; it stays Windows-gated only for its win32 lane
+			// membership (tests/config/win32-gate-lane.test.ts). The portable case above drives the
+			// same degraded state through the `skipped` branch instead (both yield
+			// listingOk=false and an empty table; only the reason string differs).
+			patchProcessScanFailure();
 			runCli(
 				[...registeredArgv(), "--scan-timeout-ms", "400"],
 				subagentStopPayload(AGENT_ID),

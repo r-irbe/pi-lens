@@ -19,6 +19,12 @@ name: install-smoke
 #            (`get_commands` lists its lens-* commands; `extension_error` would
 #            fire on failure). Also model-free.
 #
+# - npm-strict: the release-blocking npm cell (#1185). Packs the current repo and
+#            installs the tarball through the PINNED npm under
+#            --strict-allow-scripts into a root modelled on pi's generated one,
+#            then runs the selftest with NO soft allowance and runs the ast-grep
+#            executable.
+#
 # Together they reproduce the #285 (pnpm symlink store) / #335 (nested npm)
 # conditions end to end. Resolution failures are hard failures; the build-script
 # assets pnpm/bun skip (ast-grep CLI, tree-sitter grammars) are soft-warned.
@@ -42,14 +48,13 @@ on:
   schedule:
     - cron: "0 6 * * *" # nightly 06:00 UTC
   workflow_dispatch: {}
-  repository_dispatch:
-    types: [merge-train-post-merge]
   push:
     branches: [master]
     paths: &install-smoke-paths
       - "package.json"
       - "package-lock.json"
       - "scripts/install-selftest.mjs"
+      - "scripts/lib/web-tree-sitter-dir.mjs" # #1185: the selftest's grammar probe
       - "scripts/rpc-load-check.mjs"
       - "scripts/resolve-newest-in-range-host.mjs"
       - "scripts/lib/resolve-newest-in-range-host.mjs"
@@ -81,12 +86,9 @@ on:
     branches: [master]
     paths: *install-smoke-paths
 
-# A merge made with GITHUB_TOKEN suppresses its push event. Replayed
-# repository_dispatch runs validate the exact merge commit, and duplicate
-# events for that commit must not run concurrently.
 concurrency:
-  group: install-smoke-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
-  cancel-in-progress: true
+  group: install-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
@@ -102,84 +104,17 @@ env:
   # maintainer explicitly routed to the ADVISORY nightly lane instead).
   # scripts/resolve-newest-in-range-host.mjs intersects this repo-owned
   # ceiling with the declared peer range, so the wildcard case stays bounded
-  # regardless of what that range says. BUMP BY HAND when the peer range
-  # narrows to something tighter, or when a new minor (currently untested
-  # past 0.85.x) is verified and should be admitted.
-  PI_HOST_SUPPORTED_RANGE: ">=0.80.10 <0.86.0"
+  # regardless of what that range says. Since #3805 pi-tui's peer is "*" too
+  # (pi's rule for host-provided peers, #2682), so this is the ONLY place the
+  # supported window is stated; tests/packaging.test.ts pins it against the
+  # release-qa verified hosts. BUMP BY HAND, together with that list, only
+  # after release-qa has run on the newer host. P1 is one verified host per
+  # minor line from 0.86 onward; 0.81-0.83 are in-window without a dedicated
+  # host. The ratchet also records 0.80, 0.84, and 0.85, so an unrun minor
+  # cannot be silently admitted by a higher ceiling.
+  PI_HOST_SUPPORTED_RANGE: ">=0.80.10 <1.2.0"
 
 jobs:
-  validate-merge-train-dispatch:
-    name: Validate merge-train dispatch
-    runs-on: ubuntu-latest
-    # refs #3123: bounds a hang against GitHub's 360-min default.
-    # Measured max over last 10 successful master runs: 4s; timeout = floor of 10 min.
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: github.event_name == 'repository_dispatch'
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Validate merge-train dispatch ancestry
-        if: github.event_name == 'repository_dispatch'
-        env:
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ github.token }}
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-          PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
-        run: node scripts/lib/merge-train-dispatch-validation.mjs
-
-  record-post-merge-validation:
-    name: Record post-merge validation
-    if: always() && github.event_name == 'repository_dispatch' && needs.validate-merge-train-dispatch.result == 'success'
-    needs:
-      [validate-merge-train-dispatch, smoke, pi-load, mise-repro, host-range-smoke]
-    runs-on: ubuntu-latest
-    # refs #3123: bounds a hang against GitHub's 360-min default.
-    # No successful run found (job requires github.event_name ==
-    # 'repository_dispatch'; its 3 runs all failed on a 403 from the comment
-    # POST, fixed in #3151) -- defaulted to the floor of 10 min for this
-    # single-step job.
-    timeout-minutes: 10
-    permissions:
-      # #3151: the comment target is a pull request; `issues: write` alone
-      # was refused with 403 "Resource not accessible by integration".
-      pull-requests: write
-    steps:
-      - name: Record exact-SHA terminal state
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-          PAYLOAD_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
-          SMOKE_RESULT: ${{ needs.smoke.result }}
-          PI_LOAD_RESULT: ${{ needs.pi-load.result }}
-          MISE_RESULT: ${{ needs.mise-repro.result }}
-          HOST_RANGE_RESULT: ${{ needs.host-range-smoke.result }}
-        run: |
-          set -euo pipefail
-          state=succeeded
-          unknown=0
-          for result in "$SMOKE_RESULT" "$PI_LOAD_RESULT" "$MISE_RESULT" "$HOST_RANGE_RESULT"; do
-            case "$result" in
-              success) ;;
-              failure) state=failed ;;
-              *) unknown=1 ;;
-            esac
-          done
-          if [[ "$state" != failed && "$unknown" == 1 ]]; then exit 0; fi
-          marker="<!-- merge-train-post-merge:sha=$PAYLOAD_SHA:workflow=install-smoke.yml:state=$state -->"
-          body="Post-merge validation $state for $PAYLOAD_SHA.\n\n$marker"
-          curl --fail-with-body --silent --show-error \
-            --request POST \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PAYLOAD_PR_NUMBER/comments" \
-            --data "$(jq -n --arg body "$body" '{body:$body}')"
-
   smoke:
     name: ${{ matrix.os }} · ${{ matrix.pm }}
     # #3043's shape, swept (2026-09-15 retro F2): this job carried
@@ -200,7 +135,6 @@ jobs:
     # The `os` list stays a literal array so the macOS-reachability sweep in
     # tests/support/workflow-shell-portability.ts still sees this job as
     # macOS-capable; the PR-time narrowing is done with `exclude`.
-    needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max leg over last 10 successful master runs (220 matrix legs):
@@ -220,33 +154,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
 
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "$(printf '%s' "$PAYLOAD_SHA" | tr '[:upper:]' '[:lower:]')" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -318,6 +230,118 @@ jobs:
           echo "running: bun $SELFTEST"
           bun "$SELFTEST" --allow-soft
 
+  # #1185: the release-blocking STRICT npm cell. The `smoke` cells above soft-
+  # allow what pnpm/bun block (`--allow-soft`) and the npm cell installs through
+  # the runner's bundled npm, which neither enforces nor even knows
+  # `allowScripts`. This job packs the current repo and installs the tarball
+  # through the PINNED npm under --strict-allow-scripts, with no soft allowance
+  # for a required artifact, so a lifecycle script the policy does not decide
+  # (or a required native asset that did not materialize) fails here.
+  #
+  # npm's root-policy semantics decide the fixture: `allowScripts` is read from
+  # the install ROOT's package.json, never from an installed dependency's. pi
+  # installs `npm:pi-lens` into a generated root, `{"name":"pi-extensions",
+  # "private":true}` (`PackageManager#ensureNpmProject`), with `npm install
+  # <spec> --prefix <root> --legacy-peer-deps` (`getNpmInstallArgs`), and writes
+  # no `allowScripts` there. The first step pins that consequence: strict
+  # install into pi's unmodified root FAILS CLOSED on @ast-grep/cli. The second
+  # installs into a root that carries pi-lens's own declared approvals, which is
+  # what pi's installer would have to materialize; that gap is an upstream pi
+  # follow-up (named in #1185), not something this repo can fix.
+  #
+  # The `file:<tarball>: false` entry is a fixture artifact: npm treats the
+  # `prepare` of a tarball-installed dependency as an unreviewed script, which a
+  # registry install (what users get) never runs.
+  npm-strict:
+    name: npm strict lifecycle policy · packed tarball
+    runs-on: ubuntu-latest
+    # refs #3123: bounds a hang against GitHub's 360-min default. New job, so no
+    # master history to measure yet; the 10 min floor is the repo minimum.
+    # Local probe of the same sequence: install 8 s, pack and installs under 60 s.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
+      - name: Build + pack the current repo (pinned npm, strict policy)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          test "$(npx -y "npm@${npm_pin}" --version)" = "${npm_pin}"
+          # OUR OWN install: `prepare` (dist build + grammar download) must run
+          # for the pack below, and strict mode must still accept it.
+          npx -y "npm@${npm_pin}" ci --strict-allow-scripts --no-audit --no-fund
+          TARBALL="$(npx -y "npm@${npm_pin}" pack --silent | tail -1)"
+          echo "TARBALL=$PWD/$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Strict install into pi's unmodified root fails closed
+        shell: bash
+        run: |
+          set -uxo pipefail
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          ROOT="$RUNNER_TEMP/pi-extensions-unapproved"
+          mkdir -p "$ROOT"
+          printf '{"name":"pi-extensions","private":true}\n' > "$ROOT/package.json"
+          # `shell: bash` runs with -e, so capture the expected failure explicitly.
+          STATUS=0
+          OUT="$(npx -y "npm@${npm_pin}" install "$TARBALL" --prefix "$ROOT" --legacy-peer-deps --strict-allow-scripts --no-audit --no-fund 2>&1)" || STATUS=$?
+          echo "$OUT"
+          test "$STATUS" -ne 0 || { echo "::error::strict install into a root with no allowScripts policy succeeded"; exit 1; }
+          grep -q "ESTRICTALLOWSCRIPTS" <<<"$OUT" || { echo "::error::strict install failed, but not with ESTRICTALLOWSCRIPTS"; exit 1; }
+          grep -q "@ast-grep/cli@" <<<"$OUT" || { echo "::error::the strict failure does not name @ast-grep/cli"; exit 1; }
+
+      - name: Install the tarball under strict policy (root carries the declared approvals)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          ROOT="$RUNNER_TEMP/pi-extensions"
+          mkdir -p "$ROOT"
+          node -e '
+            const { execFileSync } = require("node:child_process");
+            const fs = require("node:fs");
+            const tarball = process.env.TARBALL;
+            const shipped = JSON.parse(
+              execFileSync("tar", ["xzOf", tarball, "package/package.json"], { encoding: "utf8" }),
+            );
+            const root = {
+              name: "pi-extensions",
+              private: true,
+              allowScripts: { ...shipped.allowScripts, ["file:" + tarball]: false },
+            };
+            fs.writeFileSync(process.argv[1], JSON.stringify(root, null, 2));
+          ' "$ROOT/package.json"
+          npx -y "npm@${npm_pin}" install "$TARBALL" --prefix "$ROOT" --legacy-peer-deps --strict-allow-scripts --no-audit --no-fund
+
+      # No --allow-soft: a missing ast-grep binary or core grammar is a hard
+      # failure here, which is the point of this cell.
+      - name: Selftest the installed tarball (no soft allowances)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          node "$RUNNER_TEMP/pi-extensions/node_modules/pi-lens/scripts/install-selftest.mjs"
+
+      # The selftest line for a tool that is not a dependency of the install is
+      # a PASS ("skipped"), so the executable is asserted here as well, against
+      # the exact version the tarball pins.
+      - name: Positively verify the ast-grep executable
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/pi-extensions"
+          pinned="$(node -p "require('$ROOT/node_modules/pi-lens/package.json').dependencies['@ast-grep/cli']")"
+          test "$("$ROOT/node_modules/.bin/ast-grep" --version)" = "ast-grep ${pinned}"
+
   # Faithful end-to-end: install pi the way users do, then `pi install npm:pi-lens`
   # through pi's own installer + npmCommand, and positively confirm it loaded via
   # RPC. npmCommand is derived from the install method, so the pnpm cell drives
@@ -334,7 +358,6 @@ jobs:
     # `os` list stays a literal array so the macOS-reachability sweep in
     # tests/support/workflow-shell-portability.ts still sees this job as
     # macOS-capable; the PR-time narrowing is done with `exclude`.
-    needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max leg over last 10 successful master runs (80 matrix legs):
@@ -354,33 +377,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # for the RPC driver
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
 
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "$(printf '%s' "$PAYLOAD_SHA" | tr '[:upper:]' '[:lower:]')" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -518,7 +519,6 @@ jobs:
     # EXECUTE the edited lines and put them in a log a reviewer can read, not
     # to gate the merge. `os` stays a literal array for the macOS
     # portability sweep; the narrowing is done with `exclude`.
-    needs: validate-merge-train-dispatch
     runs-on: ${{ matrix.os }}
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max leg over last 10 successful master runs (40 matrix legs):
@@ -539,30 +539,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 # RPC driver
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
           persist-credentials: false
-
-
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "$(printf '%s' "$PAYLOAD_SHA" | tr '[:upper:]' '[:lower:]')" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
 
       - name: Install mise (pinned + checksum-verified)
         shell: bash
@@ -711,7 +688,6 @@ jobs:
   # master, in which case it is upstream drift instead.
   host-range-smoke:
     name: host range · ${{ matrix.pi_host }}
-    needs: validate-merge-train-dispatch
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max leg over last 10 successful master runs (20 matrix legs):
@@ -727,32 +703,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.ref }}
+          ref: ${{ github.ref }}
           persist-credentials: false
 
-      - name: Validate merge-train dispatch payload
-        if: github.event_name == 'repository_dispatch'
-        env:
-          PAYLOAD_REPOSITORY: ${{ github.event.client_payload.repository }}
-          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$PAYLOAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
-            echo "::error::repository_dispatch repository does not match this repository"
-            exit 1
-          fi
-          if [[ ! "$PAYLOAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::repository_dispatch SHA must be a 40-hex commit"
-            exit 1
-          fi
-          checked_sha="$(git rev-parse --verify HEAD)"
-          if [[ "${PAYLOAD_SHA,,}" != "$checked_sha" ]]; then
-            echo "::error::checkout does not match the repository_dispatch SHA"
-            exit 1
-          fi
-
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -905,16 +860,27 @@ jobs:
     # Only 1 successful master run in the window; measured 40s; timeout = floor
     # of 10 min.
     timeout-minutes: 10
+    # #4077: read-only, so a dispatch on any ref runs the smoke. The tracking
+    # issue is written by `host-latest-notify` below, from these outcomes.
     permissions:
       contents: read
-      issues: write # file/refresh/close the drift tracking issue
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      resolve: ${{ steps.resolve.outcome }}
+      install_ci: ${{ steps.install_ci.outcome }}
+      install_deps: ${{ steps.install_deps.outcome }}
+      grammars: ${{ steps.grammars.outcome }}
+      build_dist: ${{ steps.build_dist.outcome }}
+      pack: ${{ steps.pack.outcome }}
+      install_tarball: ${{ steps.install_tarball.outcome }}
+      selftest: ${{ steps.selftest.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -1004,6 +970,30 @@ jobs:
           SELFTEST="$(node -e 'console.log(require.resolve("pi-lens/scripts/install-selftest.mjs"))')"
           bun "$SELFTEST" --allow-soft
 
+  # The only writer (#4077). It runs on the schedule and on master (a branch
+  # dispatch keeps the smoke above and writes nothing), and it keeps the old
+  # step's `always()`: the notifier also CLOSES the tracker on a clean run.
+  # `result != 'skipped'` keeps it off the push and pull_request events that
+  # skip the smoke job.
+  host-latest-notify:
+    name: host latest notify (advisory)
+    needs: host-latest-smoke
+    if: always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') && needs.host-latest-smoke.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # file/refresh/close the drift tracking issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
       # Runs every time (always()), success or failure: on drift it files or
       # refreshes the tracker; on a clean run it CLOSES an existing tracker
       # (#2613 acceptance: "closed when green again"). See
@@ -1011,20 +1001,19 @@ jobs:
       # report mapping and scripts/lib/install-smoke-drift.mjs for the pure
       # body-building logic (tested in tests/scripts/).
       - name: Notify install drift (file/refresh on failure, close on green)
-        if: always()
         # Tracker maintenance must not mask the advisory smoke lane's own
         # verdict; the notifier's gh failure is non-gating at this step.
         continue-on-error: true
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RESOLVED_VERSION: ${{ steps.resolve.outputs.version }}
-          RESOLVE_OUTCOME: ${{ steps.resolve.outcome }}
-          INSTALL_CI_OUTCOME: ${{ steps.install_ci.outcome }}
-          INSTALL_DEPS_OUTCOME: ${{ steps.install_deps.outcome }}
-          GRAMMARS_OUTCOME: ${{ steps.grammars.outcome }}
-          BUILD_DIST_OUTCOME: ${{ steps.build_dist.outcome }}
-          PACK_OUTCOME: ${{ steps.pack.outcome }}
-          INSTALL_TARBALL_OUTCOME: ${{ steps.install_tarball.outcome }}
-          SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
+          RESOLVED_VERSION: ${{ needs.host-latest-smoke.outputs.version }}
+          RESOLVE_OUTCOME: ${{ needs.host-latest-smoke.outputs.resolve }}
+          INSTALL_CI_OUTCOME: ${{ needs.host-latest-smoke.outputs.install_ci }}
+          INSTALL_DEPS_OUTCOME: ${{ needs.host-latest-smoke.outputs.install_deps }}
+          GRAMMARS_OUTCOME: ${{ needs.host-latest-smoke.outputs.grammars }}
+          BUILD_DIST_OUTCOME: ${{ needs.host-latest-smoke.outputs.build_dist }}
+          PACK_OUTCOME: ${{ needs.host-latest-smoke.outputs.pack }}
+          INSTALL_TARBALL_OUTCOME: ${{ needs.host-latest-smoke.outputs.install_tarball }}
+          SELFTEST_OUTCOME: ${{ needs.host-latest-smoke.outputs.selftest }}
         run: node scripts/notify-install-smoke-drift.mjs

@@ -3,19 +3,17 @@
 		"runner": "shellcheck",
 		"tool": "shellcheck",
 		"version": "0.11.0",
-		"command": "shellcheck --format json --shell bash --severity info bad.sh",
+		"command": "shellcheck --format json --severity info bad.sh",
 		"argv": [
 			"--format",
 			"json",
-			"--shell",
-			"bash",
 			"--severity",
 			"info",
 			"bad.sh"
 		],
 		"workspace": "tests/fixtures/tool-smoke/shell",
-		"platform": "win32-x64",
-		"capturedAt": "2026-08-21"
+		"platform": "darwin-arm64",
+		"capturedAt": "2026-10-04"
 	},
 	"file": "bad.sh",
 	"exitCode": 1,

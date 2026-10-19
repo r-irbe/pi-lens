@@ -4,8 +4,15 @@ if [ -n "$PI_LENS_SKIP_HOOKS" ]; then
 fi
 
 # Bounds how long a push waits on the shared machine-wide test-suite lock
-# (#1101, ~10 agents can share one dev machine). pre-push-targeted-tests.mjs
-# treats a lock timeout as "let the push proceed, CI is authoritative" —
-# never as a hard failure.
-export PI_LENS_TEST_LOCK_TIMEOUT_MS=120000
+# (#1101, ~10 agents can share one dev machine). A wait that reaches the bound
+# FAILS the push (#3717); pre-push-targeted-tests.mjs owns that decision and the
+# named PI_LENS_PREPUSH_LOCK_SKIP=1 opt-out. The bound may be raised or lowered
+# with a positive integer; empty, 0, garbage or negative values fall back to
+# 120000, because with-test-lock.mjs reads them as "wait forever".
+case "$PI_LENS_TEST_LOCK_TIMEOUT_MS" in
+  ''|*[!0-9]*|0*) PI_LENS_TEST_LOCK_TIMEOUT_MS=120000 ;;
+esac
+export PI_LENS_TEST_LOCK_TIMEOUT_MS
+# The ast-grep self-scan runs inside the wrapper after its build (#3886), so an
+# unbuilt tree builds before the scan imports compiled clients/ modules.
 node scripts/pre-push-targeted-tests.mjs

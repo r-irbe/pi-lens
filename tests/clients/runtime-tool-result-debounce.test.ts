@@ -145,6 +145,45 @@ describe("tool_result debounce (#115)", () => {
 		}
 	});
 
+	it("a debounced tool_result keeps the session it entered in (#3596)", async () => {
+		// Recurrence: #3596 finding G. `scheduleDebounced` kept the deps but not
+		// the session the handler captured at entry, so the re-entry captured
+		// whichever session was live when the timer or the flush fired, and a
+		// session-1 edit was dispatched and credited in session 2.
+		process.env.PI_LENS_TOOL_RESULT_DEBOUNCE_MS = "5000";
+		const env = setupTestEnvironment("pi-lens-debounce-session-");
+		try {
+			const filePath = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			fs.utimesSync(filePath, longAgo, longAgo);
+			const cacheManager = new CacheManager(false);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "debounce-session" });
+			runtime.beginTurn();
+
+			const pending = handleToolResult(
+				makeDeps(filePath, runtime, cacheManager, {
+					readGuard: runtime.readGuard,
+				}),
+			);
+			// `/new` while the edit waits in the debounce window.
+			runtime.resetForSession();
+			runtime.beginTurn();
+			await flushDebouncedToolResults();
+			await pending;
+
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			expect({
+				dispatched: vi.mocked(runPipeline).mock.calls.length,
+				verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+			}).toEqual({ dispatched: 0, verdict: "block" });
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("runs immediately when the debounce env var is unset or zero", async () => {
 		delete process.env.PI_LENS_TOOL_RESULT_DEBOUNCE_MS;
 		const env = setupTestEnvironment("pi-lens-debounce-disabled-");

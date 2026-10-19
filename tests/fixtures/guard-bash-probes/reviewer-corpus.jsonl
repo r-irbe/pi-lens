@@ -1,0 +1,570 @@
+{"command":"npm ci --dry-run","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"env npm ci --dry-run","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"env FOO=1 npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"command npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"sudo npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"exec npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"(npm ci)","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"( cd {{LINKED}} && npm ci )","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"{ npm ci; }","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"/usr/bin/npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"./node_modules/.bin/npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx -y npm@11 ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx --yes npm@latest ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx -p npm@11 npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx --package=npm@11 -- npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx --prefix {{LINKED}} npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"time npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"\"npm\" ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"'npm' ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"n\\pm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"npm ci | tee x","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"true && npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"if true; then npm ci; fi","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"for x in 1; do npm ci; done","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"echo $(npm ci)","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"echo `npm ci`","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ci &","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"NODE_ENV=production npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ci # c","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --ignore-scripts ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm -s ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"env -i npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"sudo -E npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"bash -c \"npm ci\"","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"bash -c 'npm ci --dry-run'","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"sh -c 'npm ci'","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"xargs npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"echo ci | xargs npm","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"/usr/bin/env npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"corepack npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"corepack npm@9 ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"npm exec -- npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"npm x -- npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"timeout 30 npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"nice npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"nohup npm ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"node $(which npm) ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"eval \"npm ci\"","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"$(echo npm) ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"NPM=npm; $NPM ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"npx -p npm@11 -c 'npm ci'","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"npm --audit false ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --fund false ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --ignore-scripts false ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --fetch-retries 3 ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --maxsockets 3 ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --audit-level high ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --lockfile-version 3 install","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"npm --proxy http://x ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (3) F4"}
+{"command":"pnpm install","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § npm launchers and verbs (pnpm / yarn / bun)"}
+{"command":"yarn install","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § npm launchers and verbs (pnpm / yarn / bun)"}
+{"command":"yarn","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § npm launchers and verbs (pnpm / yarn / bun)"}
+{"command":"pnpm i --frozen-lockfile","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § npm launchers and verbs (pnpm / yarn / bun)"}
+{"command":"bun install","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § npm launchers and verbs (pnpm / yarn / bun)"}
+{"command":"npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm clean-install","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm cit","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm install-test","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm i","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm add x","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm uninstall x","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm rm x","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm update","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm up","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm prune","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm dedupe","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm rebuild","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm link","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm audit fix","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ls","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm run build","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm test","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm audit","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm cache clean --force","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm config set prefix /x","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm version","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm pkg get name","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm init -y","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm shrinkwrap","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm run ci","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm run install","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm exec ci","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm exec install","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm x ci","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm install -g x","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm i x -g","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm i --location=global x","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm i -gD x","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm explore a -- rm -rf .","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} exec -- npm ci","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} --global ci","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --workspace={{LINKED}} ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm -C {{LINKED}} ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"rm node_modules && npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"unlink node_modules; npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules && npm ci --ignore-scripts","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"npm --prefix {{LINKED}} ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix={{LINKED}} ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ci --prefix={{LINKED}}","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ci --prefix {{LINKED}}","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix \"{{LINKED}}\" ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix='{{LINKED}}' ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix={{LANELINK}} ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}}/sub/../ ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} install-test","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} i","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} up","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} audit fix","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{REAL}} ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}}/scripts ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm_config_prefix={{LINKED}} npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"NPM_CONFIG_PREFIX={{LINKED}} npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"env npm_config_prefix={{LINKED}} npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"export npm_config_prefix={{LINKED}}; npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix ~/x ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"P={{LINKED}}; npm --prefix $P ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix \"$PWD/../lane\" ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix {{LINKED}} ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix={{LINKED}} ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ci --prefix={{LINKED}}","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm ci --prefix {{LINKED}}","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix \"{{LINKED}}\" ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix='{{LINKED}}' ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix={{LANELINK}} ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}}/sub/../ ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} install-test","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} i","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} up","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}} audit fix","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{REAL}} ci","lane":"real","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix {{LINKED}}/scripts ci","lane":"real","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm_config_prefix={{LINKED}} npm ci","lane":"real","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"NPM_CONFIG_PREFIX={{LINKED}} npm ci","lane":"real","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"env npm_config_prefix={{LINKED}} npm ci","lane":"real","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"export npm_config_prefix={{LINKED}}; npm ci","lane":"real","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix ~/x ci","lane":"real","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"P={{LINKED}}; npm --prefix $P ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix \"$PWD/../lane\" ci","lane":"real","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix ../lane ci","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npm --prefix=../lane ci","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"cd {{LINKED}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}}; npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LANELINK}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LANELINK}}/scripts && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd \"{{LINKED}}\" && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"(cd {{LINKED}} && npm ci)","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}}/node_modules && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}}/node_modules/a && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}} || true; npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"pushd {{LINKED}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -- {{LINKED}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -P {{LINKED}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -L {{LINKED}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"builtin cd {{LINKED}} && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"X={{LINKED}}; cd \"$X\" && npm ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}} && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}}; npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LANELINK}} && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LANELINK}}/scripts && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd \"{{LINKED}}\" && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"(cd {{LINKED}} && npm ci)","lane":"real","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd {{LINKED}}/node_modules && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}}/node_modules/a && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{LINKED}} || true; npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"pushd {{LINKED}} && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -- {{LINKED}} && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -P {{LINKED}} && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -L {{LINKED}} && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"builtin cd {{LINKED}} && npm ci","lane":"real","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"X={{LINKED}}; cd \"$X\" && npm ci","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd ../lane && npm ci","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd scripts && npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"(cd {{REAL}}; npm ci); npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"(cd $(foo); true); npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $HOME/x && npm ci","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"cd $(foo) && npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd \"$X\" && npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $UNSET && npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"popd; npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd - ; npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"pushd; npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd `pwd` && npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(pwd) && npm ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && rm -rf node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd \"$X\" && rm -rf node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $UNSET && rm -rf node_modules/*","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"popd; rm -rf node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd - ; rm -rf node_modules/*","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && find node_modules/ -delete","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && npm --prefix {{LINKED}} ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"rm -rf {{LINKED}}/node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"cd $(foo) && npm run build","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && npm ls","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && rm -rf node_modules","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && rm -rf dist/","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"(cd {{LINKED}} && true); npm ci","lane":"real","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $UNSET && npm ci","lane":"real","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd $(foo) && npm ci","lane":"real","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"cd \"$X\" && npm ci","lane":"real","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"popd; npm ci","lane":"real","expect":"allow","source":"verify-4054-r3.md § (1) null-cwd mapping"}
+{"command":"rm -rf node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/.","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ./node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ./node_modules/*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/a","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/a/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -r node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -r -- node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf -- node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf -- ./node_modules/*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf \"node_modules/\"","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf 'node_modules'/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules//","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/./","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/../node_modules/","lane":"linked","expect":"deny","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"rm -rf dist/../node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf {{LANELINK}}/node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/\\*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/{a,b}","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf dist/ node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm node_modules/a","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rmdir node_modules/a","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"unlink node_modules/a","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rmdir node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"sudo rm -rf node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"env rm -rf node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"command rm -rf node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"/bin/rm -rf node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"\\rm -rf node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rfv node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm --recursive --force node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf --preserve-root node_modules/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/ && npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -mindepth 1 -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/* -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/a -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find -L node_modules -delete","lane":"linked","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -H node_modules -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -exec rm {} +","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -exec rm -rf {} \\;","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -exec /bin/rm {} +","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -ok rm {} \\;","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ \\( -name a \\) -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ ! -name a -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"cd node_modules && rm -rf *","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd node_modules && rm -rf ./*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd node_modules && rm -rf .","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd node_modules && find . -delete","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd node_modules/a && rm -rf ../*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd node_modules/a && rm -rf *","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd {{REAL}} && cd {{LINKED}}/node_modules && rm -rf *","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -P node_modules && rm -rf *","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"cd -- node_modules && rm -rf *","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"pushd node_modules && rm -rf *","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"rm -rf node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf -- node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"unlink node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf dist/../node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf {{LINKED}}/node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ../lane/node_modules","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules -delete","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules -mindepth 1","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules -mindepth 1 -maxdepth 1 -exec rm -rf {} +","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find . -delete","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find . -path ./node_modules/x -delete","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ..","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"ls node_modules/","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"cat node_modules/a/package.json","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"echo rm -rf node_modules/","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"git commit -m \"rm -rf node_modules/\"","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"grep -r \"npm ci\" docs","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf */","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"rm -rf ./*/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"rm -rf */*","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"rm -rf node_m*/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -L . -delete","lane":"linked","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find . -follow -delete","lane":"linked","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find node_modules -follow -delete","lane":"linked","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -L . -name f -delete","lane":"linked","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -L . -exec rm -rf {} +","lane":"linked","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find . -mindepth 1 -delete","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ./*","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"git clean -fdx","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rsync --delete /dev/null/ node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf \"$D/\"*","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"D={{LINKED}}/node_modules; rm -rf \"$D/\"*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"export D=node_modules; rm -rf \"$D/\"*","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf $PWD/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf ${PWD}/node_modules/*","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf \"$PWD/node_modules/\"*","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf $PWD/scripts/../node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf $(pwd)/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-3"}
+{"command":"rm -rf ~/x/node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf \"$(git rev-parse --show-toplevel)/node_modules/\"","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-3"}
+{"command":"S=$(pwd); rm -rf $S/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-3"}
+{"command":"D=node_modules; rm -rf $D/","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"export NM=$PWD/node_modules; rm -rf $NM/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"A=$PWD; B=$A/..; rm -rf $B/lane/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"find node_modules/ -exec sh -c 'rm -rf {}' \\;","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find node_modules/ -exec shred {} \\;","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"shred node_modules/a","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"mv node_modules/a /x","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"cp -r node_modules/ /x","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"xargs rm -rf < f","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F5 (launcher blind spots)"}
+{"command":"busybox rm -rf node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"builtin rm -rf node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"trash node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"npx rimraf node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"npx rimraf node_modules/*","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"node -e 'require(\"fs\").rmSync(\"node_modules/\",{recursive:true})'","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"python3 -c 'import shutil'","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"npm run clean","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"rm -rf -- -x/node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ./-x/node_modules/","lane":"linked","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf $PWD/node_modules","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf $PWD/dist/","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix $PWD/scripts ci","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm ci --prefix=$PWD/dist","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf ~/dist/","lane":"linked","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf dist/","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf scripts/","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -f package.json","lane":"linked","expect":"allow","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find -L dist -delete","lane":"linked","expect":"allow","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -L . -name f -print","lane":"linked","expect":"allow","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find . -follow -name f","lane":"linked","expect":"allow","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"npm ci --prefix $PWD","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix=$PWD ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix \"$PWD\" ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix ${PWD} ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"P={{LINKED}}; npm --prefix $P ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"rm -rf ./*","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf *","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf .","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ./","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ../node_modules/*","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf a","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find . -delete","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"find -delete","lane":"linked","cwd":"{{LINKED}}/node_modules","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ../node_modules/","lane":"linked","cwd":"{{LINKED}}/scripts","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf ../node_modules/*","lane":"linked","cwd":"{{LINKED}}/scripts","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"npm ci","lane":"linked","cwd":"{{LINKED}}/scripts","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"rm -rf node_modules/","lane":"linked","cwd":"{{LANELINK}}","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"rm -rf node_modules/*","lane":"linked","cwd":"{{LANELINK}}","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"npm ci","lane":"linked","cwd":"{{LANELINK}}","expect":"deny","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"rm -rf ../lane/node_modules/","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"cd ../lane && rm -rf node_modules/*","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"find -L {{LINKED}} -delete","lane":"real","expect":"deny","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -L .. -delete","lane":"real","expect":"allow","reason":"documented not-handled limit (review-4054.md F1/F5; header of scripts/hooks/guard-bash.mjs); allow is the pinned design","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find -L . -delete","lane":"real","expect":"allow","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"find . -follow -delete","lane":"real","expect":"allow","source":"review-4054.md § F1 (deletes that reach the link target)"}
+{"command":"rm -rf $PWD/node_modules/","lane":"real","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm ci --prefix $PWD","lane":"real","expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"X={{LINKED}}; cd \"$X\" && rm -rf node_modules/","lane":"real","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"rm -rf ~/node_modules/","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf ~/node_modules/*","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf $HOME/node_modules/","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix ~ ci","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix=~ ci","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm --prefix $HOME ci","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"cd ~ && npm ci","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"cd && npm ci","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"cd ~/scripts && npm ci","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"deny","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf ~/dist/","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"rm -rf ~/node_modules","lane":"linked","cwd":"{{OTHER}}","env":{"HOME":"{{LINKED}}"},"expect":"allow","source":"verify-4054-r3.md § (2) logical resolution"}
+{"command":"npm ci","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm ci --ignore-scripts --dry-run","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm run build","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm ls","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm install -g typescript","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm install","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm i left-pad","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm update","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm uninstall x","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npx -y npm@11 ci","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"rm -rf node_modules","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"rm -rf node_modules/","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"rm -rf node_modules/*","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"rm -rf dist/","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"rm -rf dist","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"find node_modules -delete","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"find node_modules/ -delete","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"find . -name '*.log' -delete","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"cd {{REAL}} && npm ci","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm --prefix \"$(pwd)\" ci","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm ci --prefix=$(pwd)","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"rm -rf \"$(pwd)/node_modules/\"","lane":"real","expect":"allow","source":"verify-4054-r3.md § NEW FINDINGS R3-3"}
+{"command":"npm --prefix $UNSET ci","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"find node_modules/.. -name x -print","lane":"real","expect":"allow","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"rm -rf {{LINKED}}/node_modules/","lane":"real","expect":"deny","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm ci --dry-run","lane":"real","expect":"allow","source":"review-4054.md § False-positive set in a real-node_modules worktree"}
+{"command":"npm --prefix \"$(mktemp -d)\" ci","lane":"real","expect":"allow","source":"review-4054.md § Bypass matrix, npm launchers and verbs / --prefix and env"}
+{"command":"rm -rf node_modules/..","lane":"real","expect":"allow","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"cd node_modules && rm -rf ../x","lane":"real","expect":"allow","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"npm --prefix \"$(pwd)\" ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"npm ci --prefix=$(pwd)","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"npm ci --prefix \"$(git rev-parse --show-toplevel)\"","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"npm ci --prefix `pwd`","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"npm --prefix \"$(mktemp -d)\" ci","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"D=$(mktemp -d) && npm --prefix $D ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"S=$(pwd); npm --prefix $S ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, deletes"}
+{"command":"cd \"$(mktemp -d)\" && npm ci","lane":"linked","expect":"deny","source":"review-4054.md § Bypass matrix, cd forms"}
+{"command":"npm --prefix $TMPDIR/s ci","lane":"linked","expect":"allow","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"cd $TMPDIR/s && npm ci","lane":"linked","expect":"allow","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"npm ci --prefix \"$(echo scratch)\"","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"npm ci --prefix $UNSET_X/x","lane":"linked","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-1"}
+{"command":"find node_modules/.. -delete","lane":"linked","expect":"deny","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"rm -rf node_modules/../x","lane":"linked","expect":"deny","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"cd node_modules && rm -rf ../x","lane":"linked","expect":"deny","source":"fix-4054-r4.md § New in this round (kernel lands in main/)"}
+{"command":"npm --prefix {{LINKED}}/node_modules ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"fix-4054-r4.md § State table (N10b)"}
+{"command":"npm --prefix {{LINKED}}/node_modules/a ci","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"fix-4054-r4.md § State table (N10b)"}
+{"command":"rm -rf ../lnk/../node_modules/","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-2"}
+{"command":"rm -rf ../lnk/../node_modules/*","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-2"}
+{"command":"cd ../lnk && rm -rf ../node_modules/","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-2"}
+{"command":"cd ../lnk && npm ci","lane":"linked","cwd":"{{SIB}}","expect":"deny","source":"verify-4054-r3.md § NEW FINDINGS R3-2"}
+{"command":"npm --prefix ../lnk/.. ci","lane":"linked","cwd":"{{SIB}}","expect":"allow","source":"verify-4054-r3.md § NEW FINDINGS R3-2"}
+{"command":"npm --prefix {{CH1}} ci","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"cd {{CH1}} && npm ci","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"cd {{CH1}}/scripts && npm ci","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"rm -rf {{CH1}}/node_modules/","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"rm -rf {{CH1}}/node_modules/*","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"cd {{CH1}} && rm -rf node_modules/","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"find -L {{CH1}} -delete","lane":"real","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"rm -rf {{CH1}}/node_modules","lane":"real","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (symlink chain)"}
+{"command":"cd {{LINKED}}/node_modules && npm i x","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (cd inside the link)"}
+{"command":"cd {{LINKED}}/node_modules && npm ci --dry-run","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (cd inside the link)"}
+{"command":"cd {{LINKED}}/node_modules && npm ls","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (cd inside the link)"}
+{"command":"cd {{REAL}}/node_modules && npm ci","lane":"real","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (cd inside a REAL node_modules)"}
+{"command":"npm --prefix {{LINKED}}/node_modules/.. ci","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix node_modules ci","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix ./node_modules/ ci","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix {{REAL}}/node_modules ci","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix {{LINKED}}/scripts ci","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix {{LINKED}}/packages/p1 ci","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix {{LNK}} ci","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"npm --prefix {{LNK}}/.. ci","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (--prefix through a link)"}
+{"command":"cd {{LINKED}}/node_modules && find .. -delete","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (landing via .. from inside the link)"}
+{"command":"cd {{LINKED}}/node_modules && rm -rf ../*","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (landing via .. from inside the link)"}
+{"command":"cd {{LINKED}}/node_modules && rm -rf ../x","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (landing via .. from inside the link)"}
+{"command":"find node_modules/.. -name x -delete","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (landing via .. from inside the link)"}
+{"command":"rm -rf node_modules/../*","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (landing via .. from inside the link)"}
+{"command":"find node_modules/.. -type f -print","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (landing via .. from inside the link)"}
+{"command":"rm -rf packages/*/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf \"$D/node_modules/\"","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf \"$(mktemp -d)/node_modules/\"","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf ~user/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"find -L $UNSET -delete","lane":"linked","expect":"deny","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf \"$D/node_modules\"","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf $TMPDIR/x","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf \"$(mktemp -d)\"","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf $UNSET/dist","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"find \"$(mktemp -d)\" -delete","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf packages/p1/node_modules/","lane":"linked","expect":"allow","source":"verify-4054-r4.md § (2) Attacks on the one rule (unknown holders in a lane)"}
+{"command":"rm -rf `pwd`/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-3 COVERED"}
+{"command":"rm -rf \"$UNSET/node_modules/\"","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-3 COVERED"}
+{"command":"rm -rf ~+/node_modules/","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-3 COVERED"}
+{"command":"find \"$(pwd)/node_modules/\" -delete","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-3 COVERED"}
+{"command":"rm -rf node_modules/../x","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"find node_modules/.. -delete","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm --prefix {{REAL}}/node_modules ci","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm --prefix node_modules ci","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"cd node_modules && npm ci","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"rm -rf packages/*/node_modules/","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"rm -rf \"$UNSET/node_modules/\"","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm ci --prefix \"$(pwd)\"","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm ci --prefix \"$(git rev-parse --show-toplevel)\"","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm ci --prefix ~+","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm ci --prefix \"\"","lane":"real","expect":"allow","source":"verify-4054-r4.md § (3) real worktree allows"}
+{"command":"npm --prefix \"\" ci","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-1 FIXED"}
+{"command":"npm ci --prefix=","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-1 FIXED"}
+{"command":"npm ci --prefix","lane":"linked","expect":"deny","source":"verify-4054-r4.md § R3-1 FIXED"}
+{"command":"HUSKY=0 git commit -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"PI_LENS_SKIP_HOOKS=1 git push origin y","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"env HUSKY=0 git commit -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"HUSKY=0 git $(:) commit -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git worktree remove \"$(cat f)\"","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git worktree remove $(echo linked)","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git worktree remove `echo linked`","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git worktree remove -- \"$(echo linked)\"","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git stash$(true)","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git reset --hard$(:)","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git push --force$(:) origin x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git commit --no-verify$(:) -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"$(:) git stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"sudo $(:) git stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"env $(:) git stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git -C . $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git `:` stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"npm$(:) run lint; git$(:) commit -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"mktemp $(:)-d /tmp/x.XXXX","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git worktree add /tm$(:)p/wt","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git clone r /tm$(:)p/x","lane":"real","expect":"deny","source":"verify-3997-r4.md § Real-hook before/after (c0184f1 vs 6384cac)"}
+{"command":"git stash","lane":"both","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (the 5 guarded actions, plain)"}
+{"command":"git reset --hard","lane":"both","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (the 5 guarded actions, plain)"}
+{"command":"git push --force origin x","lane":"both","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (the 5 guarded actions, plain)"}
+{"command":"git rebase main","lane":"both","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (the 5 guarded actions, plain)"}
+{"command":"git commit --no-verify -m x","lane":"both","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (the 5 guarded actions, plain)"}
+{"command":"true && git $(echo) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(:) reset --hard","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git `:` reset --hard","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"true && git $(echo) reset --hard","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(:) push --force origin x","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git `:` push --force origin x","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"true && git $(echo) push --force origin x","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(:) rebase main","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git `:` rebase main","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"true && git $(echo) rebase main","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(:) commit --no-verify -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git `:` commit --no-verify -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"true && git $(echo) commit --no-verify -m x","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(true) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(printf '') stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(echo $(:)) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(: \")\") stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(: ')') stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(: $(: )) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(: \"$(: )\") stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $( : ) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"git $(: ; : ) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"true; git $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"(git $(:) stash)","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"if true; then git $(:) stash; fi","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"sudo git $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"command git $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"time git $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"echo x | git $(:) stash","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"for i in 1; do git $(:) stash; done","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"{ git $(:) stash; }","lane":"real","expect":"deny","source":"verify-3997-r4.md § (1) Two-reading rule attack (substitution spellings and shapes, 5 actions x 26 spellings x 44 shapes; representative subset)"}
+{"command":"bash -c \"git stash $(:)\"","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"sh -c 'git stash' $(:)","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"eval \"git stash\" $(:)","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"nohup git stash $(:)","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"xargs $(:) git stash </dev/null","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"git ${NOSUCH} stash","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"git stash${NOSUCH}","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"${NOSUCH:-} git stash","lane":"real","expect":"allow","reason":"master blind spot (eval, bash -c, nohup, xargs, unset-variable word); not from the #3997 rule","source":"verify-3997-r4.md § (1) Head allows that master also allows (documented blind spots)"}
+{"command":"git $(case x in x) : ;; esac) stash","lane":"real","expect":"deny","gap":"#4060","source":"verify-3997-r4.md § (1) lexRegions span defects"}
+{"command":"$(: $'\\'' ) git stash","lane":"real","expect":"deny","gap":"#4060","source":"verify-3997-r4.md § (1) lexRegions span defects"}
+{"command":"git $(printf stash)","lane":"real","expect":"deny","gap":"#4025","source":"verify-3997-r4.md § (1) (#4025 output-built words are untouched by the round)"}
+{"command":"$(printf 'git stash')","lane":"real","expect":"deny","gap":"#4025","source":"verify-3997-r4.md § (1) (#4025 output-built words are untouched by the round)"}
+{"command":"git `printf stash`","lane":"real","expect":"deny","gap":"#4025","source":"verify-3997-r4.md § (1) (#4025 output-built words are untouched by the round)"}
+{"command":"git worktree remove hop/../lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical"}
+{"command":"git worktree remove {{HOP}}/../lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical"}
+{"command":"git -C hop worktree remove ../lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical"}
+{"command":"git -C hop/.. worktree remove lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical"}
+{"command":"cd hop && git worktree remove ../lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical"}
+{"command":"git -C {{OTHER}}/hop/.. worktree remove lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical"}
+{"command":"git worktree remove ../lane","lane":"linked","cwd":"{{HOP}}","expect":"deny","source":"verify-3997-r4.md § (3) Physical vs logical (payload cwd inside the link)"}
+{"command":"cd hop/.. && git worktree remove lane","lane":"linked","cwd":"{{OTHER}}","expect":"allow","source":"verify-3997-r4.md § (3) Physical vs logical (cd is logical in bash)"}
+{"command":"cd -P hop/.. && git worktree remove lane","lane":"linked","cwd":"{{OTHER}}","expect":"deny","gap":"#4060","source":"verify-3997-r4.md § (3) Physical vs logical residual (a) cd -P"}
+{"command":"git worktree remove --force $(printf linked)","lane":"both","expect":"deny","source":"review-4078.md § F4 (round-1 row 48, labelled a #4025 gap but master denies it)"}
+{"command":"rm -rf node_modules/..","lane":"linked","expect":"deny","source":"review-4054.md \u00a7 Bypass matrix, deletes / verify-4054-r4.md \u00a7 (1); decision on PR #4078 comment 6038238221","reason":"over-denial accepted: GNU rm refuses `..` operands anyway"}
+{"command":"rm -rf node_modules/a/..","lane":"linked","expect":"deny","source":"review-4054.md \u00a7 Bypass matrix, deletes / verify-4054-r4.md \u00a7 (1); decision on PR #4078 comment 6038238221","reason":"over-denial accepted: GNU rm refuses `..` operands anyway"}
+{"command":"npm ci","lane":"linked","cwd":"{{CHAIN}}","expect":"deny","source":"verify-4054-r4.md \u00a7 (2) R4-2 (two-hop chain lane3 -> inner -> main)"}
+{"command":"rm -rf node_modules/","lane":"linked","cwd":"{{CHAIN}}","expect":"deny","source":"verify-4054-r4.md \u00a7 (2) R4-2 (two-hop chain lane3 -> inner -> main)"}
+{"command":"rm -rf node_modules/*","lane":"linked","cwd":"{{CHAIN}}","expect":"deny","source":"verify-4054-r4.md \u00a7 (2) R4-2 (two-hop chain lane3 -> inner -> main)"}

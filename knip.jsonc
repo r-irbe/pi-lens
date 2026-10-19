@@ -46,13 +46,15 @@
 		// The Windows CI job invokes this population source directly, and the
 		// governance test imports it as the same executable seam.
 		"scripts/lib/win32-gate-population.mjs",
-		// scripts/lib/merge-train-dispatch-validation.mjs — the one
-		// scripts/lib/*.mjs a workflow `run:` step invokes directly — is
-		// NOT listed here despite that: it's already reached through
-		// tests/scripts/merge-train-warden.test.ts's import (knip's own
-		// "redundant entry pattern" hint caught this). Every other
-		// scripts/lib/*.mjs is reached the same way import graphs normally
-		// work: via a scripts/*.mjs entry's own import, or a test's.
+		// The Windows CI job invokes this parser directly from its summary step.
+		"scripts/lib/windows-vitest-failure-count.mjs",
+		// #3531: Stryker's `buildCommand` invokes this by file path
+		// (`node scripts/lib/mutation-touch-build.mjs`) from the mutation
+		// lane's generated per-run config -- a string in a JSON-serialized
+		// object, never a static import knip's graph can trace.
+		"scripts/lib/mutation-touch-build.mjs",
+		// Every other scripts/lib/*.mjs is reached the way import graphs
+		// normally work: via a scripts/*.mjs entry's own import, or a test's.
 		// Doesn't exist yet (#2697 item 1 adds it); the glob costs nothing
 		// today and needs no follow-up edit once hook scripts land there.
 		"scripts/hooks/**/*.mjs",
@@ -165,6 +167,17 @@
 		// npm-installable.
 		"mkfifo",
 		"netstat",
-		"ss"
+		"ss",
+		// tests/clients/instance-reaper-pid-reuse.test.ts (#3538 R4-F1) runs
+		// the reaper confined under util-linux `unshare --pid --time` -- a
+		// system binary, never npm-installable; the case skips when absent.
+		"unshare",
+		// tests/clients/lsp/lean-real-smoke.test.ts launches the Lean language
+		// server as `lake serve` and probes `elan show`; both come from a
+		// user-managed elan/Lake toolchain (docs/dependencies.md's PATH-only Lean
+		// row) -- system tools, never npm packages, so no dependency could
+		// provide them. The case skips when the toolchain is absent.
+		"elan",
+		"lake"
 	]
 }

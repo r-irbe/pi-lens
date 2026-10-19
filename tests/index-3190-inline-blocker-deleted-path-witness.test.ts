@@ -236,6 +236,9 @@ async function witnessTurn(
 }> {
 	const { chartRoot, template, values } = createChart(name);
 	const logFile = diagnosticLogPath();
+	// Drain before the offset: a row still queued from setup would land after
+	// it and be read as this turn's (#4381).
+	await getDiagnosticLogger().flush();
 	const logOffset = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
 	spawnRouter.state.helmLintStdout = HELM_LINT_OUTPUT;
 	if (deleteValues) fs.rmSync(values);

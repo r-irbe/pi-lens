@@ -5,6 +5,11 @@ import type { ActionableWarningsReport } from "../../clients/actionable-warnings
 import { CacheManager } from "../../clients/cache-manager.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolvePiLensFlag } from "../../clients/lens-config.js";
+import {
+	type LspMutationContext,
+	recordLspMutation,
+} from "../../clients/lsp-mutation.js";
+import { recordMutationThroughSeam } from "../../clients/mutation-bridge.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
@@ -13,6 +18,7 @@ import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { getLastLoggedPhase } from "../../clients/latency-logger.js";
 import * as latencyLogger from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import type { LineageHandle } from "../../clients/session-scope.js";
 import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
 import {
 	createTempFile,
@@ -57,10 +63,84 @@ vi.mock("../../clients/pipeline.js", async (importOriginal) => {
 	return { ...actual, runPipeline: vi.fn() };
 });
 
+// #3785 review r1 F1: the #3521 format cases run the real FormatService,
+// whose FileTime shared the read guard's; only the formatter child is
+// doubled there, per case. Every other case doubles the service itself.
+vi.mock("../../clients/formatters.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/formatters.js")>();
+	return {
+		...actual,
+		getFormattersForFile: vi.fn(actual.getFormattersForFile),
+		formatFile: vi.fn(actual.formatFile),
+	};
+});
+import { getFormatService } from "../../clients/format-service.js";
+import { HOOK_WALL_BUDGET_MS } from "../../clients/hook-budgets.js";
+import {
+	type FormatterInfo,
+	formatFile as runFormatter,
+	getFormattersForFile,
+} from "../../clients/formatters.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
+
 describe("runtime-agent-end deferred formatting", () => {
 	const cleanupAgentEndTemps = async () => {
 		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-");
 	};
+
+	// Recurrence: a run that dies between a read's tool_call and its
+	// tool_execution_end (a throw in pi's agent loop takes handleRunFailure,
+	// which emits agent_end and no tool_execution_end) left the capture to
+	// license an edit in the next run (#4185 R2-3; the per-call release is
+	// handleToolExecutionEnd since round 4, this is its backstop).
+	it("releases a capture its run left open at the real agent-settled handler (#4185 R2-3)", async () => {
+		const env = setupTestEnvironment("pi-lens-blocked-read-turn-end-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"blocked.ts",
+				"export const value = 1;\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall({
+					event: {
+						toolName: "read",
+						toolCallId: "blocked-read",
+						input: { path: filePath },
+					},
+					ctx: { cwd: env.tmpDir },
+					lensEnabled: true,
+					getFlag: (name: string) =>
+						name === "no-lsp" || name === "no-complexity",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as never),
+			);
+			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([
+				expect.objectContaining({ provisional: true }),
+			]);
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: () => {},
+				dbg: () => {},
+				runtime,
+				cacheManager: new CacheManager(false),
+				getFormatService: () => ({ recordRead: () => {} }) as never,
+			});
+			expect(runtime.readGuard.getReadHistory(filePath)).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
 
 	afterEach(cleanupAgentEndTemps);
 	afterAll(cleanupAgentEndTemps);
@@ -1138,6 +1218,15 @@ describe("runtime-agent-end deferred formatting", () => {
 					paths: [filePath.replace(/\\/g, "/")],
 				}),
 			);
+			expect(emit).toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.objectContaining({
+					v: 1,
+					source: "pi-lens",
+					fileCount: 1,
+					paths: [filePath.replace(/\\/g, "/")],
+				}),
+			);
 		} finally {
 			resetFormatEventsPublish();
 			if (previousDataDir === undefined) {
@@ -1147,6 +1236,142 @@ describe("runtime-agent-end deferred formatting", () => {
 			}
 			env.cleanup();
 		}
+	});
+
+	it("keeps the format lifecycle matchable and waits for an abandoned formatter write (#4213)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-bus-format-identity-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setSessionLifecycle({ sessionId: "session-4213" });
+			runtime.deferFormat(
+				filePath,
+				env.tmpDir,
+				"edit",
+				env.tmpDir,
+				"session-4213",
+			);
+			let releaseLate!: () => void;
+			const abandoned = new Promise<void>((resolve) => {
+				releaseLate = resolve;
+			});
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			const drain = handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				currentSessionId: "session-4213",
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: vi.fn(async () => ({
+							filePath,
+							formatters: [{ name: "biome", success: true, changed: true }],
+							anyChanged: true,
+							allSucceeded: true,
+							abandoned,
+						})) as any,
+					}) as any,
+			});
+			await drain;
+			expect(emit).not.toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.anything(),
+			);
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			releaseLate();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const done = emit.mock.calls.find(
+				([name]) => name === "pilens:format:done",
+			);
+			expect(done?.[1]).toMatchObject({
+				ownerSessionId: "session-4213",
+				turnIndex: expect.any(Number),
+				batchId: expect.any(String),
+			});
+		} finally {
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("publishes one bounded unsettled terminal for a formatter that never settles (#4213)", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const env = setupTestEnvironment("pi-lens-agent-end-format-unsettled-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { getDegradationSummary, resetDegradationLedger } =
+			await import("../../clients/degradation-ledger.js");
+		resetDegradationLedger();
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			const never = new Promise<never>(() => {});
+			const drain = handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: () => never }) as any,
+			});
+			await vi.advanceTimersByTimeAsync(
+				HOOK_WALL_BUDGET_MS.agent_settled + 30_000 + 1,
+			);
+			await drain;
+			const done = emit.mock.calls.filter(
+				([name]) => name === "pilens:format:done",
+			);
+			expect(done).toHaveLength(1);
+			expect(done[0]?.[1]).toMatchObject({
+				settled: false,
+				paths: [filePath.replace(/\\/g, "/")],
+				fileCount: 1,
+			});
+			expect(
+				getDegradationSummary().filter(
+					(entry) => entry.kind === "deferred-format-unsettled",
+				),
+			).toEqual([
+				expect.objectContaining({
+					kind: "deferred-format-unsettled",
+				}),
+			]);
+		} finally {
+			resetDegradationLedger();
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps fallback batch ids unique across same-clock coordinator reloads (#4213)", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_700_000_000_000);
+		const a = new RuntimeCoordinator();
+		const b = new RuntimeCoordinator();
+		expect(a.telemetrySessionId).not.toBe(b.telemetrySessionId);
+		a.resetForSession(1_700_000_000_000);
+		expect(a.telemetrySessionId).not.toBe(b.telemetrySessionId);
+		vi.useRealTimers();
 	});
 
 	it("does not publish pilens:format:start when there is nothing queued (#673)", async () => {
@@ -1184,6 +1409,49 @@ describe("runtime-agent-end deferred formatting", () => {
 			} else {
 				process.env.PILENS_DATA_DIR = previousDataDir;
 			}
+			env.cleanup();
+		}
+	});
+
+	it("publishes pilens:format:done with no paths when formatting changes no bytes (#673)", async () => {
+		const env = setupTestEnvironment(
+			"pi-lens-agent-end-bus-format-done-empty-",
+		);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+			const emit = vi.fn();
+			wireFormatEventsBusEmitter(emit);
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: vi.fn(async () => ({
+							filePath,
+							formatters: [],
+							anyChanged: false,
+							allSucceeded: true,
+						})),
+					}) as any,
+			});
+			expect(emit).toHaveBeenCalledWith(
+				"pilens:format:done",
+				expect.objectContaining({ fileCount: 0, paths: [] }),
+			);
+		} finally {
+			resetFormatEventsPublish();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	});
@@ -1338,6 +1606,157 @@ describe("runtime-agent-end deferred formatting", () => {
 			resetBusPublish();
 			applyConservativeActionableWarningFixesMock.mockReset();
 			env.cleanup();
+		}
+	});
+
+	// #4187 R4-4 (probe L4): the quickfix drain is the third writer that credits
+	// authorship over bytes the agent never saw, and it was the one drain with no
+	// pre-write retire: the format and autofix drains both call
+	// `retireChangedAuthorshipBeforeDrain` before they rewrite. Recurrence: the
+	// drain's `recordWritten` re-baselined the authorship over another writer's
+	// line, so the next positional edit of that line was allowed.
+	it("ends an authorship another writer broke before the LSP quickfix drain rewrites it (#4187 R4-4)", async () => {
+		const fixture = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+		for (const foreign of [true, false]) {
+			const env = setupTestEnvironment(
+				`pi-lens-agent-end-quickfix-retire-${foreign}-`,
+			);
+			try {
+				const filePath = createTempFile(env.tmpDir, "src/app.ts", fixture);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.seedProjectSequence(1);
+				// The agent's own bash write authored the file, without a read.
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					toolCallId: "call-4187-quickfix-bash",
+				});
+				if (foreign) {
+					const lines = fixture.split("\n");
+					lines[1] = "const external = 2;";
+					fs.writeFileSync(filePath, lines.join("\n"));
+				}
+				const report: ActionableWarningsReport = {
+					generatedAt: new Date().toISOString(),
+					scope: "turn_delta",
+					sessionId: "s1",
+					turnIndex: 1,
+					projectSeqEnd: 1,
+					deltaOnly: true,
+					includeLspCodeActions: true,
+					files: [
+						{
+							filePath,
+							displayPath: "src/app.ts",
+							// #3676: the entries the credit epoch is read from; without
+							// them the drain stamps no read guard at all.
+							branchEpoch: runtime.readGuard.currentBranchEpoch,
+							branchScope: runtime.readGuard.lineageKey,
+							warnings: [
+								{
+									id: "aw:4187",
+									filePath,
+									displayPath: "src/app.ts",
+									severity: "warning",
+									tool: "typescript",
+									message: "unused var",
+									suppressed: false,
+									origin: "dispatch",
+									actions: [
+										{
+											title: "Remove unused var",
+											hasEdit: true,
+											hasCommand: false,
+											autoFixEligible: true,
+										},
+									],
+								},
+							],
+						},
+					],
+					summary: {
+						warnings: 1,
+						unsuppressed: 1,
+						suppressed: 0,
+						files: 1,
+						actions: 1,
+						autoFixEligible: 1,
+					},
+				};
+				// The real fix pass applies a code action and bookkeeps it through
+				// the context the drain built, so drive that seam: rewrite line 1,
+				// then `recordLspMutation` with the drain's own `mutationContext`.
+				applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+					async (args: { mutationContext: LspMutationContext }) => {
+						const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+						lines[0] = "const fixed = 1;";
+						fs.writeFileSync(filePath, lines.join("\n"));
+						recordLspMutation(args.mutationContext, {
+							results: [
+								{
+									descriptions: [],
+									files: [filePath],
+									operationTotal: 1,
+									appliedOperationTotal: 1,
+									appliedOperationIndexes: [0],
+									operationCounts: {
+										textEdits: 1,
+										create: 0,
+										rename: 0,
+										delete: 0,
+									},
+									fileDetails: [
+										{
+											filePath,
+											range: { start: 1, end: 1 },
+											importsChanged: false,
+										},
+									],
+								},
+							],
+						});
+						return {
+							considered: 1,
+							applied: 1,
+							changedFiles: [filePath],
+							skipped: [],
+						};
+					},
+				);
+
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+
+				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+				if (foreign) {
+					const verdict = runtime.readGuard.checkEdit(filePath, [2, 2]);
+					expect(verdict.action).toBe("block");
+					expect(verdict.reason).toContain("File modified since your write");
+				} else {
+					// No other writer: the drain's own rewrite keeps the authorship,
+					// so the fix costs no re-read.
+					expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+						"allow",
+					);
+				}
+			} finally {
+				applyConservativeActionableWarningFixesMock.mockReset();
+				env.cleanup();
+			}
 		}
 	});
 
@@ -1836,22 +2255,24 @@ describe("runtime-agent-end deferred formatting", () => {
 				runtime.projectRoot = env.tmpDir;
 				const toolCallId = "call-origin-mismatch";
 
-				await handleToolCall({
-					event: {
-						toolCallId,
-						toolName: "write",
-						input: { path: "src/app.ts", content: "const x=1" },
-					},
-					ctx: { cwd: worktreeRoot },
-					lensEnabled: true,
-					getFlag: (name: string) => name === "no-lsp",
-					dbg: () => {},
-					runtime,
-					cacheManager: new CacheManager(false),
-					ensureLSPConfigInitialized: async () => {},
-					updateLspStatus: () => {},
-					resetLSPService: () => {},
-				} as any);
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall({
+						event: {
+							toolCallId,
+							toolName: "write",
+							input: { path: "src/app.ts", content: "const x=1" },
+						},
+						ctx: { cwd: worktreeRoot },
+						lensEnabled: true,
+						getFlag: (name: string) => name === "no-lsp",
+						dbg: () => {},
+						runtime,
+						cacheManager: new CacheManager(false),
+						ensureLSPConfigInitialized: async () => {},
+						updateLspStatus: () => {},
+						resetLSPService: () => {},
+					} as any),
+				);
 
 				await handleToolResult({
 					event: {
@@ -2279,5 +2700,955 @@ describe("runtime-agent-end deferred formatting", () => {
 				env.cleanup();
 			}
 		});
+	});
+});
+
+// #3521 review F1 (catalog shape 22): pi marks the run inactive before it
+// awaits the agent_settled handlers, so a /tree can land while this drain
+// awaits a formatter, an autofix client or an LSP quick fix. The drain's
+// `recordWritten` must then not credit the file to the new branch. Each case
+// moves the branch from INSIDE the awaited writer, the way the host
+// interleaves, and backdates the written file so the pre-#3520 mtime
+// fallback (a separate, named residual) cannot answer instead of the fence.
+describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+	const settle = (filePath: string, content: string) => {
+		fs.writeFileSync(filePath, content);
+		fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+	};
+	const zeroRead = (runtime: RuntimeCoordinator, filePath: string) =>
+		runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+
+	afterEach(async () => {
+		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-branch-");
+	});
+
+	for (const moved of [true, false]) {
+		it(`${moved ? "does not credit" : "credits"} a deferred format write ${moved ? "that lands after" : "with no"} /tree`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-fmt-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+				const { getDegradationSummary, resetDegradationLedger } =
+					await import("../../clients/degradation-ledger.js");
+				resetDegradationLedger();
+				vi.mocked(getFormattersForFile).mockResolvedValueOnce([
+					{ name: "biome" } as FormatterInfo,
+				]);
+				vi.mocked(runFormatter).mockImplementationOnce(async (fp: string) => {
+					if (moved) runtime.readGuard.retainBranch(new Set());
+					settle(fp, "const x = 1;\n");
+					return { success: true, changed: true, outcome: "formatted" };
+				});
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: () => {},
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: () => {} } as any,
+					// As `index.ts` builds it for the drain: the guard's session id.
+					getFormatService: () =>
+						getFormatService(runtime.telemetrySessionId, true),
+				});
+				// #3525: the agent never saw these bytes: authorship, not FileTime.
+				expect(runtime.readGuard.fileTimeMoved(filePath)).toBe(true);
+				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
+				// The refused write leaves one counted, discriminating record.
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-write-after-branch-move",
+					)?.count,
+				).toBe(moved ? 1 : undefined);
+				// The move is branch-scoped: the session's change log keeps the
+				// drain's record either way.
+				expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+					{ source: "format", filePath },
+				]);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+
+		it(`${moved ? "does not credit" : "credits"} a deferred autofix write ${moved ? "that lands after" : "with no"} /tree`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-fix-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"src/app.ts",
+					"let value=1\n",
+				);
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
+				fs.writeFileSync(
+					path.join(env.tmpDir, "package.json"),
+					JSON.stringify({ devDependencies: { "@biomejs/biome": "^1.0.0" } }),
+				);
+				fs.writeFileSync(
+					path.join(env.tmpDir, "package-lock.json"),
+					JSON.stringify({
+						packages: { "node_modules/@biomejs/biome": { version: "1.0.0" } },
+					}),
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferMutation(
+					filePath,
+					env.tmpDir,
+					"edit",
+					env.tmpDir,
+					"autofix",
+				);
+				const biomeClient = {
+					isSupportedFile: () => true,
+					ensureAvailable: async () => true,
+					fixFileAsync: async (fp: string) => {
+						if (moved) runtime.readGuard.retainBranch(new Set());
+						settle(fp, "const value=1\n");
+						return { success: true, changed: true, fixed: 1 };
+					},
+				};
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					biomeClient: biomeClient as any,
+					ruffClient: {} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+				// #3525: the agent never saw these bytes: authorship, not FileTime.
+				expect(runtime.readGuard.fileTimeMoved(filePath)).toBe(true);
+				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it(`${moved ? "does not credit" : "credits"} an actionable-warning quick fix ${moved ? "that lands after" : "with no"} /tree`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"src/app.ts",
+					"const x = 1;\n",
+				);
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.seedProjectSequence(1);
+				const report: ActionableWarningsReport = {
+					generatedAt: new Date().toISOString(),
+					scope: "turn_delta",
+					sessionId: "s1",
+					turnIndex: 1,
+					projectSeqEnd: 1,
+					deltaOnly: true,
+					includeLspCodeActions: true,
+					files: [
+						{
+							filePath,
+							displayPath: "src/app.ts",
+							// #3676: the quick fix credits the epoch its entry was built on.
+							branchEpoch: runtime.readGuard.currentBranchEpoch,
+							branchScope: runtime.readGuard.lineageKey,
+							warnings: [
+								{
+									id: "aw:3521",
+									filePath,
+									displayPath: "src/app.ts",
+									severity: "warning",
+									tool: "typescript",
+									message: "unused var",
+									suppressed: false,
+									origin: "dispatch",
+									actions: [
+										{
+											title: "Remove unused var",
+											hasEdit: true,
+											hasCommand: false,
+											autoFixEligible: true,
+										},
+									],
+								},
+							],
+						},
+					],
+					summary: {
+						warnings: 1,
+						unsuppressed: 1,
+						suppressed: 0,
+						files: 1,
+						actions: 1,
+						autoFixEligible: 1,
+					},
+				};
+				applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+					async (args: {
+						mutationContext: {
+							readGuard?: { recordWritten: (filePath: string) => void };
+						};
+					}) => {
+						if (moved) runtime.readGuard.retainBranch(new Set());
+						settle(filePath, "const x = 2;\n");
+						args.mutationContext.readGuard?.recordWritten(filePath);
+						return {
+							considered: 1,
+							applied: 1,
+							changedFiles: [filePath],
+							skipped: [],
+						};
+					},
+				);
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+				// #3525: the agent never saw these bytes: authorship, not FileTime.
+				expect(runtime.readGuard.fileTimeMoved(filePath)).toBe(true);
+				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
+			} finally {
+				applyConservativeActionableWarningFixesMock.mockReset();
+				env.cleanup();
+			}
+		});
+	}
+
+	// #3521 round-3 verify F-B, reshaped by #3676 (F-A): a /tree that lands
+	// before the drain starts must still refuse the quick fix's write. The
+	// report was built before the move, so it carries the old epoch; a drain
+	// that credited the epoch current at its own entry would credit it to the
+	// new branch.
+	it("does not credit a quick fix whose report predates a /tree that landed before the drain started", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-entry-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/app.ts",
+				"const x = 1;\n",
+			);
+			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.seedProjectSequence(1);
+			const report: ActionableWarningsReport = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [
+					{
+						filePath,
+						displayPath: "src/app.ts",
+						branchEpoch: runtime.readGuard.currentBranchEpoch,
+						branchScope: runtime.readGuard.lineageKey,
+						warnings: [
+							{
+								id: "aw:3521-entry",
+								filePath,
+								displayPath: "src/app.ts",
+								severity: "warning",
+								tool: "typescript",
+								message: "unused var",
+								suppressed: false,
+								origin: "dispatch",
+								actions: [
+									{
+										title: "Remove unused var",
+										hasEdit: true,
+										hasCommand: false,
+										autoFixEligible: true,
+									},
+								],
+							},
+						],
+					},
+				],
+				summary: {
+					warnings: 1,
+					unsuppressed: 1,
+					suppressed: 0,
+					files: 1,
+					actions: 1,
+					autoFixEligible: 1,
+				},
+			};
+			applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+				async (args: {
+					mutationContext: {
+						readGuard?: { recordWritten: (filePath: string) => void };
+					};
+				}) => {
+					settle(filePath, "const x = 2;\n");
+					args.mutationContext.readGuard?.recordWritten(filePath);
+					return {
+						considered: 1,
+						applied: 1,
+						changedFiles: [filePath],
+						skipped: [],
+					};
+				},
+			);
+			// The report was built at epoch 0; the /tree lands while the sweep awaits.
+			runtime.readGuard.retainBranch(new Set());
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
+				notify: vi.fn(),
+				dbg: vi.fn(),
+				runtime,
+				cacheManager: {
+					readCache: () => ({ data: report }),
+					addModifiedRange: vi.fn(),
+				} as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+			expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+			expect(zeroRead(runtime, filePath)).toBe("block");
+		} finally {
+			applyConservativeActionableWarningFixesMock.mockReset();
+			env.cleanup();
+		}
+	});
+
+	// #3676. The quick fix is credited with the oldest branch epoch among the
+	// entries it fixes. Recurrence: a cache file written before the stamp
+	// existed (readable for ten minutes), a malformed epoch, or one entry older
+	// than its neighbours must not be credited to whichever branch the settle
+	// runs on. The fix is still applied; only its credit is withheld, and the
+	// row says why. The probed file is `a`; `b` is a neighbour in the same pass.
+	// `scopes` overrides the guard lineage each entry was built under (default:
+	// the live guard's), `neighbour` makes `b` something the pass cannot fix.
+	const quickFixPass = async (
+		epochs: readonly [unknown, unknown],
+		opts: {
+			moved?: boolean;
+			scopes?: readonly [unknown, unknown];
+			neighbour?: "fixable" | "not eligible" | "suppressed";
+			/** The pid the process presents when the pass runs (a resume elsewhere). */
+			pidAtSettle?: number;
+		} = {},
+	) => {
+		const { moved = true, neighbour = "fixable" } = opts;
+		const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-pass-");
+		try {
+			const a = createTempFile(env.tmpDir, "src/a.ts", "const x = 1;\n");
+			const b = createTempFile(env.tmpDir, "src/b.ts", "const y = 1;\n");
+			for (const file of [a, b]) fs.utimesSync(file, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.seedProjectSequence(1);
+			if (moved) runtime.readGuard.retainBranch(new Set());
+			const { getDegradationSummary, resetDegradationLedger } =
+				await import("../../clients/degradation-ledger.js");
+			resetDegradationLedger();
+			const scopes = opts.scopes ?? [
+				runtime.readGuard.lineageKey,
+				runtime.readGuard.lineageKey,
+			];
+			const entry = (
+				filePath: string,
+				branchEpoch: unknown,
+				branchScope: unknown,
+				kind: "fixable" | "not eligible" | "suppressed" = "fixable",
+			) => ({
+				filePath,
+				displayPath: path.basename(filePath),
+				branchEpoch,
+				branchScope,
+				warnings: [
+					{
+						id: `aw:3676:${path.basename(filePath)}`,
+						filePath,
+						displayPath: path.basename(filePath),
+						severity: "warning",
+						tool: "typescript",
+						message: "unused var",
+						suppressed: kind === "suppressed",
+						origin: "dispatch",
+						actions: [
+							{
+								title: "Remove unused var",
+								hasEdit: true,
+								hasCommand: false,
+								autoFixEligible: kind !== "not eligible",
+							},
+						],
+					},
+				],
+			});
+			const report = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [
+					entry(a, epochs[0], scopes[0]),
+					entry(b, epochs[1], scopes[1], neighbour),
+				],
+				summary: {
+					warnings: 2,
+					unsuppressed: 2,
+					suppressed: 0,
+					files: 2,
+					actions: 2,
+					autoFixEligible: 2,
+				},
+			} as unknown as ActionableWarningsReport;
+			applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+				async (args: {
+					mutationContext: {
+						readGuard?: { recordWritten: (filePath: string) => void };
+					};
+				}) => {
+					settle(a, "const x = 2;\n");
+					args.mutationContext.readGuard?.recordWritten(a);
+					return {
+						considered: 1,
+						applied: 1,
+						changedFiles: [a],
+						skipped: [],
+					};
+				},
+			);
+			// `process.pid` is a data property, so `vi.spyOn(process, "pid", "get")`
+			// has no getter to spy on: swap the descriptor and restore it below.
+			const pidDescriptor = Object.getOwnPropertyDescriptor(process, "pid")!;
+			if (opts.pidAtSettle !== undefined)
+				Object.defineProperty(process, "pid", {
+					...pidDescriptor,
+					value: opts.pidAtSettle,
+				});
+			try {
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+			} finally {
+				Object.defineProperty(process, "pid", pidDescriptor);
+			}
+			expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+			expect(fs.readFileSync(a, "utf8")).toBe("const x = 2;\n");
+			return {
+				verdict: zeroRead(runtime, a),
+				rows: getDegradationSummary().filter(
+					(group) => group.kind === "actionable-warnings-quickfix-uncredited",
+				),
+				subject: env.tmpDir,
+			};
+		} finally {
+			applyConservativeActionableWarningFixesMock.mockReset();
+			env.cleanup();
+		}
+	};
+
+	for (const [label, epoch] of [
+		["no branchEpoch", undefined],
+		["a negative branchEpoch", -1],
+		["a fractional branchEpoch", 1.5],
+		["a string branchEpoch", "1"],
+	] as const) {
+		it(`applies a quick fix from an entry with ${label} and credits it to no branch`, async () => {
+			const { verdict, rows, subject } = await quickFixPass([epoch, 1]);
+			expect(verdict).toBe("block");
+			expect(rows).toEqual([
+				expect.objectContaining({
+					count: 1,
+					latestReasons: [expect.objectContaining({ subject })],
+				}),
+			]);
+		});
+	}
+
+	// F10/F11. Recurrence (#3912 review r1 F2): a new guard restarts the epoch at
+	// 0, so an entry another guard stamped 0 equals the live 0 of a fork, a /new
+	// session or a resume. The live epoch is 0 here, as in a fresh guard.
+	for (const [label, scope] of [
+		["another process's guard", `${process.pid + 1}:${1}`],
+		["another scope of this process", "scope-from-a-dead-guard"],
+		["no scope (a cache file from before the stamp)", undefined],
+	] as const) {
+		it(`applies a quick fix from an entry built under ${label} and credits it to no branch`, async () => {
+			const { verdict, rows, subject } = await quickFixPass([0, 0], {
+				moved: false,
+				scopes: [scope, scope],
+			});
+			expect(verdict).toBe("block");
+			expect(rows).toEqual([
+				expect.objectContaining({
+					count: 1,
+					latestReasons: [expect.objectContaining({ subject })],
+				}),
+			]);
+		});
+	}
+
+	// F11, the pid term of `lineageKey`. A resume in another process presents the
+	// same guard ticket (the counter restarts at 1 in each process) and the same
+	// epoch 0; only the pid differs. The report is built under the real pid, then
+	// the process presents another one when the pass runs.
+	it("applies a quick fix from an entry the same ticket and epoch stamped in another process and credits it to no branch", async () => {
+		const { verdict, rows, subject } = await quickFixPass([0, 0], {
+			moved: false,
+			pidAtSettle: process.pid + 1,
+		});
+		expect(verdict).toBe("block");
+		expect(rows).toEqual([
+			expect.objectContaining({
+				count: 1,
+				latestReasons: [expect.objectContaining({ subject })],
+			}),
+		]);
+	});
+
+	it("credits a quick fix pass whose entries were built under the live guard at epoch 0", async () => {
+		expect((await quickFixPass([0, 0], { moved: false })).verdict).toBe(
+			"allow",
+		);
+	});
+
+	// M12/M13. The pass is credited over the entries it can fix. A neighbour it
+	// cannot fix (no eligible action, or suppressed) is not part of the evidence,
+	// however old: crediting over every enabled entry would withhold a credit the
+	// probed file's own entry earns.
+	for (const neighbour of ["not eligible", "suppressed"] as const) {
+		it(`ignores an older neighbour entry the pass cannot fix (${neighbour})`, async () => {
+			expect((await quickFixPass([1, 0], { neighbour })).verdict).toBe("allow");
+		});
+	}
+
+	// The live epoch is 1 (a /tree ran). The pass is credited with the oldest of
+	// its entries' epochs, in whichever order they come, and an entry without
+	// one withholds the credit however many of its neighbours have one.
+	for (const [label, epochs, verdict] of [
+		["both entries on the live branch", [1, 1], "allow"],
+		["an older neighbour after it", [1, 0], "block"],
+		["an older neighbour before it", [0, 1], "block"],
+		["an unstamped neighbour after it", [1, undefined], "block"],
+		["an unstamped neighbour before it", [undefined, 1], "block"],
+	] as const) {
+		it(`credits a quick fix pass with its oldest entry: ${label}`, async () => {
+			expect((await quickFixPass(epochs)).verdict).toBe(verdict);
+		});
+	}
+});
+
+// #3521 round-2 verify R2-F1 (catalog shape 22): the branch epoch was taken
+// when a settle started, not when the work was queued. A record the branch-X
+// run queued, and that an aborted or failed drain put back in the queue, was
+// then drained at the next settle on branch Y with Y's epoch and credited as
+// authored on Y. The common trigger: /tree while the agent streams, because
+// pi's selector awaits abort() first and the aborted settle requeues every
+// pending record. Each case queues on X, lets a first settle requeue the
+// record, moves the branch, and drains at a second settle that passes the
+// epoch it captured at entry, exactly as onAgentSettled does. The files are
+// backdated so the pre-#3520 mtime fallback cannot answer instead of the fence.
+describe("runtime-agent-end deferred records queued before a /tree (#3521 R2-F1)", () => {
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+	const settle = (filePath: string, content: string) => {
+		fs.writeFileSync(filePath, content);
+		fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+	};
+	type Base = Omit<Parameters<typeof handleAgentEnd>[0], "runtime">;
+
+	afterEach(async () => {
+		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-requeue-");
+	});
+
+	/** The zero-read edit verdict on the branch the second settle runs on. */
+	async function acrossSettles(args: {
+		/** Queue the record on X and run whatever first settle requeues it. */
+		onX: (
+			runtime: RuntimeCoordinator,
+			filePath: string,
+			base: Base,
+			cwd: string,
+		) => Promise<void>;
+		moved: boolean;
+		/** Runs on Y, after the move and before Y's settle. */
+		onY?: (runtime: RuntimeCoordinator, filePath: string, cwd: string) => void;
+		secondSettle?: Partial<Parameters<typeof handleAgentEnd>[0]>;
+	}): Promise<string> {
+		const env = setupTestEnvironment("pi-lens-agent-end-requeue-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const base: Base = {
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: () => {},
+				dbg: () => {},
+				cacheManager: { addModifiedRange: () => {} } as any,
+				getFormatService: () =>
+					({
+						recordRead: () => {},
+						formatFile: async (fp: string) => {
+							settle(fp, "const x = 1;\n");
+							return {
+								filePath: fp,
+								formatters: [{ name: "biome", success: true, changed: true }],
+								anyChanged: true,
+								allSucceeded: true,
+							};
+						},
+					}) as any,
+			};
+			await args.onX(runtime, filePath, base, env.tmpDir);
+			if (args.moved) runtime.readGuard.retainBranch(new Set());
+			args.onY?.(runtime, filePath, env.tmpDir);
+			await handleAgentEnd({
+				...base,
+				runtime,
+				...args.secondSettle,
+			});
+			return runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	}
+
+	/** Branch X queues a format, and an ESC-aborted settle requeues it. */
+	const abortedOnX = async (
+		runtime: RuntimeCoordinator,
+		filePath: string,
+		base: Base,
+		cwd: string,
+	) => {
+		runtime.deferFormat(filePath, cwd, "edit", cwd);
+		const aborted = new AbortController();
+		aborted.abort();
+		await handleAgentEnd({
+			...base,
+			runtime,
+			signal: aborted.signal,
+		});
+		expect(runtime.pendingDeferredMutationCount).toBe(1);
+	};
+
+	/** Branch X queues a format, and a settle whose formatter throws requeues it. */
+	const formatFailedOnX = async (
+		runtime: RuntimeCoordinator,
+		filePath: string,
+		base: Base,
+		cwd: string,
+	) => {
+		runtime.deferFormat(filePath, cwd, "edit", cwd);
+		await handleAgentEnd({
+			...base,
+			runtime,
+			getFormatService: () =>
+				({
+					recordRead: () => {},
+					formatFile: async () => {
+						throw new Error("formatter crashed");
+					},
+				}) as any,
+		});
+		expect(runtime.pendingDeferredMutationCount).toBe(1);
+	};
+
+	/** Branch X queues an autofix, and a settle without clients requeues it. */
+	const clientsUnavailableOnX = async (
+		runtime: RuntimeCoordinator,
+		filePath: string,
+		base: Base,
+		cwd: string,
+	) => {
+		runtime.deferMutation(filePath, cwd, "edit", cwd, "autofix");
+		await handleAgentEnd({
+			...base,
+			runtime,
+		});
+		expect(runtime.pendingDeferredMutationCount).toBe(1);
+	};
+	const autofixClients = {
+		biomeClient: {
+			isSupportedFile: () => true,
+			ensureAvailable: async () => true,
+			fixFileAsync: async (fp: string) => {
+				settle(fp, "const x = 1;\n");
+				return { success: true, changed: true, fixed: 1 };
+			},
+		} as any,
+		ruffClient: {} as any,
+	};
+	const withBiomeProject = (cwd: string) => {
+		fs.writeFileSync(path.join(cwd, "biome.json"), "{}\n");
+		fs.writeFileSync(
+			path.join(cwd, "package.json"),
+			JSON.stringify({ devDependencies: { "@biomejs/biome": "^1.0.0" } }),
+		);
+		fs.writeFileSync(
+			path.join(cwd, "package-lock.json"),
+			JSON.stringify({
+				packages: { "node_modules/@biomejs/biome": { version: "1.0.0" } },
+			}),
+		);
+	};
+
+	for (const moved of [true, false]) {
+		const verdict = moved ? "block" : "allow";
+		const where = moved ? "after a /tree" : "with no /tree";
+
+		it(`drains an abort-requeued format ${where} as ${verdict}`, async () => {
+			expect(await acrossSettles({ onX: abortedOnX, moved })).toBe(verdict);
+		});
+
+		it(`drains a format-failed requeued format ${where} as ${verdict}`, async () => {
+			expect(await acrossSettles({ onX: formatFailedOnX, moved })).toBe(
+				verdict,
+			);
+		});
+
+		it(`drains a clients-unavailable requeued autofix ${where} as ${verdict}`, async () => {
+			expect(
+				await acrossSettles({
+					onX: async (runtime, filePath, base, cwd) => {
+						withBiomeProject(cwd);
+						await clientsUnavailableOnX(runtime, filePath, base, cwd);
+					},
+					moved,
+					secondSettle: autofixClients,
+				}),
+			).toBe(verdict);
+		});
+
+		it(`drains a secondary's stale-orphan format ${where} as ${verdict}`, async () => {
+			expect(
+				await acrossSettles({
+					onX: async (runtime, filePath, _base, cwd) => {
+						runtime.deferFormat(filePath, cwd, "edit", cwd, "secondary");
+					},
+					moved,
+					// The primary's settle claims the secondary's record as a stale
+					// orphan (any age is stale here; same origin).
+					secondSettle: { currentSessionId: "primary", staleAfterMs: -1 },
+				}),
+			).toBe(verdict);
+		});
+	}
+
+	// Coalesce (catalog shape 55): a merged record carries the NEWER epoch.
+	// Y's own touch of F came after every older-branch write to F, so Y has
+	// seen the bytes the drain rewrites; keeping X's epoch would be a false
+	// block.
+	it("credits a requeued format that branch Y queued again after the /tree", async () => {
+		expect(
+			await acrossSettles({
+				onX: abortedOnX,
+				moved: true,
+				onY: (runtime, filePath, cwd) =>
+					runtime.deferFormat(filePath, cwd, "edit", cwd),
+			}),
+		).toBe("allow");
+	});
+
+	/** A settled-sweep replay of F through the bridge, carrying its epoch. */
+	const sweepReplay = (
+		runtime: RuntimeCoordinator,
+		filePath: string,
+		cwd: string,
+		readGuardBranchEpoch: number,
+		lineage?: LineageHandle,
+	) =>
+		expect(
+			recordMutationThroughSeam(
+				{ filePath, kind: "write", readGuardBranchEpoch, lineage },
+				{
+					getRuntime: () => runtime as never,
+					getCacheManager: () => ({ addModifiedRange: () => {} }),
+					getProjectRoot: () => cwd,
+					getDispatchCwd: () => cwd,
+					countFileLines: () => 1,
+					isRecordable: () => true,
+					dbg: () => {},
+				},
+			),
+		).toBe(true);
+
+	it("credits Y's queued format when a pre-move sweep replay re-touches it", async () => {
+		expect(
+			await acrossSettles({
+				onX: async () => {},
+				moved: true,
+				onY: (runtime, filePath, cwd) => {
+					runtime.deferFormat(filePath, cwd, "edit", cwd);
+					// The settle that captured epoch 0 replays drift on F after the move.
+					sweepReplay(runtime, filePath, cwd, 0);
+				},
+			}),
+		).toBe("allow");
+	});
+
+	// #3677 round 3 (verify r2 V2): a settle that captured epoch 2 replays drift
+	// after `resetForSession`, whose new guard restarts at 0. Round 2 queued that
+	// dead session's write at the CURRENT epoch, so this drain credited it to the
+	// new session one hop after the bridge's own stamp refused it. The settle
+	// hands over the lineage it captured with the epoch (S3, #3759), which is
+	// what refuses the replay since #3763 item 5.
+	const deadSessionReplay = (
+		runtime: RuntimeCoordinator,
+		filePath: string,
+		cwd: string,
+		queueFirst: boolean,
+	) => {
+		runtime.readGuard.retainBranch(new Set());
+		runtime.readGuard.retainBranch(new Set());
+		const captured = runtime.readGuard.currentBranchEpoch;
+		const lineage = runtime.captureSessionGeneration();
+		runtime.resetForSession();
+		expect(runtime.readGuard.currentBranchEpoch).toBeLessThan(captured);
+		if (queueFirst) runtime.deferFormat(filePath, cwd, "edit", cwd);
+		sweepReplay(runtime, filePath, cwd, captured, lineage);
+	};
+
+	it("drains nothing a dead session's sweep replay queued after a session reset", async () => {
+		expect(
+			await acrossSettles({
+				onX: async () => {},
+				moved: false,
+				onY: (runtime, filePath, cwd) =>
+					deadSessionReplay(runtime, filePath, cwd, false),
+			}),
+		).toBe("block");
+	});
+
+	// The #3677 poison: the dead session's epoch must not reach the `Math.max`
+	// merge of a record the new session queued itself, or its own write is
+	// refused.
+	it("credits the new session's queued format when a dead session's sweep replay re-touches it", async () => {
+		expect(
+			await acrossSettles({
+				onX: async () => {},
+				moved: false,
+				onY: (runtime, filePath, cwd) =>
+					deadSessionReplay(runtime, filePath, cwd, true),
+			}),
+		).toBe("allow");
+	});
+
+	// T6: the settled sweep's entries are created inside the settle, after its
+	// awaits. A /tree can land first; the deferred record the replay queues must
+	// carry the epoch the settle captured, not the one current at queue time.
+	for (const moved of [true, false]) {
+		it(`drains a format a settled-sweep replay queued ${moved ? "after a /tree" : "with no /tree"} as ${moved ? "block" : "allow"}`, async () => {
+			expect(
+				await acrossSettles({
+					onX: async () => {},
+					moved,
+					onY: (runtime, filePath, cwd) =>
+						sweepReplay(runtime, filePath, cwd, 0),
+				}),
+			).toBe(moved ? "block" : "allow");
+		});
+	}
+
+	// The inverse merge: X's record is requeued into one that branch Y queued
+	// while X's drain awaited its formatter (the /tree landed in between).
+	it("credits an older requeued format merged into a record branch Y queued meanwhile", async () => {
+		expect(
+			await acrossSettles({
+				onX: async (runtime, filePath, base, cwd) => {
+					runtime.deferFormat(filePath, cwd, "edit", cwd);
+					await handleAgentEnd({
+						...base,
+						runtime,
+						getFormatService: () =>
+							({
+								recordRead: () => {},
+								formatFile: async () => {
+									runtime.readGuard.retainBranch(new Set());
+									runtime.deferFormat(filePath, cwd, "edit", cwd);
+									throw new Error("formatter crashed");
+								},
+							}) as any,
+					});
+					expect(runtime.pendingDeferredMutationCount).toBe(1);
+				},
+				moved: false,
+			}),
+		).toBe("allow");
+	});
+
+	// T7: a record the drain requeues merges into one that a stale sweep entry
+	// created while the drain awaited its formatter; the merged record keeps the
+	// newer epoch.
+	it("credits a requeued format merged into a record a pre-move sweep created meanwhile", async () => {
+		expect(
+			await acrossSettles({
+				onX: async (runtime, filePath, base, cwd) => {
+					// Y's record: the move comes first here, so the "X" run is Y's.
+					runtime.readGuard.retainBranch(new Set());
+					runtime.deferFormat(filePath, cwd, "edit", cwd);
+					await handleAgentEnd({
+						...base,
+						runtime,
+						getFormatService: () =>
+							({
+								recordRead: () => {},
+								formatFile: async () => {
+									// A settle that captured epoch 0 replays drift on F
+									// while this drain awaits, then the format fails.
+									sweepReplay(runtime, filePath, cwd, 0);
+									throw new Error("formatter crashed");
+								},
+							}) as any,
+					});
+					expect(runtime.pendingDeferredMutationCount).toBe(1);
+				},
+				moved: false,
+			}),
+		).toBe("allow");
 	});
 });

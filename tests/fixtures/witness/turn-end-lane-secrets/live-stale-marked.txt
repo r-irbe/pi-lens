@@ -1,4 +1,6 @@
 === context message the agent receives ===
+keep working
+
 [pi-lens automated check — not a user request] Address 🔴 blockers before continuing; ℹ️ advisories are informational only.
 
 🔴 STOP — hardcoded secrets detected. Rotate the credentials and remove them from source:
@@ -13,5 +15,3 @@ The cached line numbers are no longer trustworthy, so they are withheld. Re-run 
 
 ℹ️ Advisory — no action required this turn:
 suppressed by disposition: 1 finding(s) dropped from this turn's gitleaks/govulncheck/trivy sections (gitleaks 1) (marked false-positive or won't-fix).
-
-keep working

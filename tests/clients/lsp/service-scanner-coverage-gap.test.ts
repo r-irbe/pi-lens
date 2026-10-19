@@ -74,6 +74,7 @@ function makeServer(
 		id,
 		name: id,
 		extensions: [".ts"],
+		idleEviction: "resident",
 		...(role !== undefined && { role }),
 		root: async () => ROOT,
 		spawn: vi.fn(async () => ({ process: makeFakeProcess(), source: "test" })),
@@ -154,6 +155,7 @@ function makeClient(
 		getDiagnostics: vi.fn(() => diags),
 		getAllDiagnostics: vi.fn(() => new Map()),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(() => {
 				inFlight += 1;
 				stats.maxInFlight = Math.max(stats.maxInFlight, inFlight);

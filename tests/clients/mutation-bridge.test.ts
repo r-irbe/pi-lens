@@ -10,6 +10,10 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
 	MUTATION_BRIDGE_KEY,
 	getMutationBridge,
 	isValidMutationEntry,
@@ -21,10 +25,14 @@ import {
 	_observedMutationStateForTests,
 	resetObservedMutationNet,
 } from "../../clients/observed-mutation.js";
-import { normalizeMapKey } from "../../clients/path-utils.js";
+import {
+	normalizeFilePath,
+	normalizeMapKey,
+} from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { retireScope } from "../../clients/session-scope.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const SOURCE = ["import a from 'a';", "const b = 2;", "const c = 3;", ""].join(
@@ -175,6 +183,149 @@ describe("mutation bridge bookkeeping", () => {
 		}
 	});
 
+	it("does not widen authorship when observed bridge range is unavailable (F-4210-2)", () => {
+		// F-4210-2 recurrence: an observed replay with no recoverable baseline
+		// range must not become a whole-file license for an untouched line.
+		const env = setupTestEnvironment("pi-lens-4210-observed-unknown-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\nfive\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-4210-observed-unknown" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			fs.writeFileSync(filePath, "one\ntwo\nbridge\nfour\nfive\n");
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [3, 3],
+						consumer: "bridge-v1",
+					},
+					deps,
+				),
+			).toBe(true);
+
+			// The observed writer checked this path, but its bounded evidence cannot
+			// recover a range; the bridge therefore reaches ReadGuard without one.
+			runtime.readGuard.noteCheckedPaths("call-4210-observed", [filePath]);
+			fs.writeFileSync(filePath, "one\nobserved\nbridge\nfour\nfive\n");
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						consumer: "observed-replay",
+						provenance: "observed",
+						toolCallId: "call-4210-observed",
+					},
+					deps,
+				),
+			).toBe(true);
+
+			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
+				"block",
+			);
+			// UNKNOWN empties the prior range too; no guessed replacement survives.
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"block",
+			);
+			// #4387: an empty scope, not a retirement: no other writer is blamed.
+			expect(
+				runtime.readGuard
+					.exportAuthorship()
+					.entries?.find(
+						(entry) =>
+							normalizeFilePath(entry.filePath) === normalizeFilePath(filePath),
+					)?.authoredRanges,
+			).toEqual([]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4387: over a whole-file authorship an UNKNOWN range is moot, so the
+	// writer rule decides, as for a partial credit (#4210 N3): the licensed
+	// observed replay advances it, and one its call did not license ends it.
+	// Recurrence: the UNKNOWN short-circuit ended every authorship, including
+	// the ones a checked writer of the conversation's own call advanced.
+	it("advances whole-file authorship over a licensed observed replay with no range only with a bounding read, and ends it over an unlicensed one (#4387)", () => {
+		const env = setupTestEnvironment("pi-lens-4387-observed-unknown-whole-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const run = (name: string, licensed: boolean, bounded: boolean) => {
+				const filePath = path.join(env.tmpDir, name);
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.setTelemetryIdentity({ sessionId: `s-4387-${name}` });
+				runtime.beginTurn();
+				const deps = makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				});
+				// A whole-file first credit.
+				expect(
+					recordMutationThroughSeam(
+						{ filePath, kind: "write", consumer: "bridge-v1" },
+						deps,
+					),
+				).toBe(true);
+				// The agent's read of the file, which a move keeps with its call.
+				if (bounded)
+					runtime.readGuard.recordRead({
+						filePath,
+						requestedOffset: 1,
+						requestedLimit: 3,
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						expandedByLsp: false,
+						turnIndex: 0,
+						writeIndex: 0,
+						timestamp: Date.now(),
+						toolCallId: "call-4387-read",
+					});
+				if (licensed)
+					runtime.readGuard.noteCheckedPaths("call-4387-observed", [filePath]);
+				fs.writeFileSync(filePath, "one\nobserved\nthree\nfour\n");
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							consumer: "observed-replay",
+							provenance: "observed",
+							toolCallId: "call-4387-observed",
+						},
+						deps,
+					),
+				).toBe(true);
+				return runtime.readGuard
+					.exportAuthorship()
+					.entries?.find((entry) => path.basename(entry.filePath) === name);
+			};
+			const licensed = run("licensed.ts", true, true);
+			expect(licensed?.retired).toBeUndefined();
+			expect(licensed?.authoredRanges).toBeUndefined();
+			expect(run("unbounded.ts", true, false)?.authoredRanges).toEqual([]);
+			expect(run("unlicensed.ts", false, true)?.retired).toBe(true);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("#2465: under no-read-guard, a recordable write still gets turn-state + receipt + the observed-handled mark, but skips only the read-guard stamp", () => {
 		const env = setupTestEnvironment("pi-lens-2465-no-read-guard-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
@@ -246,6 +397,7 @@ describe("mutation bridge bookkeeping", () => {
 	});
 
 	it("drops an out-of-scope path without touching any store", () => {
+		resetDegradationLedger();
 		const env = setupTestEnvironment("pi-lens-2423-bridge-scope-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
 		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
@@ -260,7 +412,12 @@ describe("mutation bridge bookkeeping", () => {
 			const cacheManager = new CacheManager(false);
 
 			const accepted = recordMutationThroughSeam(
-				{ filePath, kind: "edit", touchedLines: [1, 2] },
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					consumer: "ast_grep_replace",
+				},
 				makeDeps({
 					tmpDir: env.tmpDir,
 					runtime,
@@ -275,6 +432,21 @@ describe("mutation bridge bookkeeping", () => {
 			).toHaveLength(0);
 			expect(readChangesSince(env.tmpDir, 0)).toEqual([]);
 			expect(runtime.pendingDeferredFormatCount).toBe(0);
+			// #4140: the v1 drop is recorded once per producer, with the path, so a
+			// second producer's drop stays visible (#4185 round 1 F5).
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "mutation-bridge-out-of-scope",
+						latestReasons: [
+							expect.objectContaining({
+								subject: "ast_grep_replace:out-of-scope",
+								reason: expect.stringContaining(filePath),
+							}),
+						],
+					}),
+				]),
+			);
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
@@ -307,6 +479,719 @@ describe("mutation bridge bookkeeping", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+});
+
+describe("#3677: a foreign readGuardBranchEpoch cannot poison a deferred record", () => {
+	// Recurrence: #3669 taught `deferMutation` to merge epochs with `Math.max`,
+	// and the bridge forwarded a foreign `entry.readGuardBranchEpoch` into that
+	// merge without validation. NaN, a negative, a fraction, and a non-number
+	// all poisoned (or were misread by) the legitimate record. Round 1's upper
+	// bound then misread a genuine prior-session capture as "from the future"
+	// and credited it to the new session (F1, covered below).
+	const malformed: ReadonlyArray<readonly [string, string, unknown]> = [
+		["a NaN", "nan", Number.NaN],
+		["a negative", "negative", -1],
+		["a fractional", "fraction", 1.5],
+		["a string", "string", "5"],
+	];
+
+	for (const [label, slug, value] of malformed) {
+		it(`ignores ${label} epoch and still credits the write`, () => {
+			const env = setupTestEnvironment(`pi-lens-3677-${slug}-`);
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "epoch.ts");
+				fs.writeFileSync(filePath, SOURCE);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.setTelemetryIdentity({ sessionId: `s-3677-${slug}` });
+				runtime.beginTurn();
+				const cacheManager = new CacheManager(false);
+				const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+				// A legitimate record first, so the foreign value has something to
+				// merge into. Epoch 0 is current on a fresh session.
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [1, 2],
+							consumer: "legit",
+							readGuardBranchEpoch: 0,
+						},
+						deps,
+					),
+				).toBe(true);
+
+				// The foreign value arrives on a second touch of the same path.
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [2, 3],
+							consumer: "foreign",
+							readGuardBranchEpoch: value as number,
+						},
+						deps,
+					),
+				).toBe(true);
+
+				const [record] = runtime.consumeDeferredFormatFiles();
+				expect(record.readGuardBranchEpoch).toBe(0);
+
+				const summary = getDegradationSummary();
+				// The foreign value is named once, and the read-guard stamp is still
+				// credited: pre-fix the raw value reached `recordWritten`, whose
+				// `!==` check refused the write and recorded the sibling kind.
+				expect(
+					summary.find(
+						(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+					)?.count,
+				).toBe(1);
+				expect(
+					summary.find(
+						(group) => group.kind === "read-guard-write-after-branch-move",
+					),
+				).toBeUndefined();
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+
+	it("does not credit a write whose captured epoch predates a session reset", () => {
+		// #3677 review round 1 F1. `ReadGuard.branchEpoch` lives on the guard
+		// INSTANCE, and `resetForSession` nulls `_readGuard`, so a new session
+		// restarts at 0. Round 1 read "captured 2 > current 0" as a foreign
+		// future value, stripped it to undefined, and credited the dead
+		// session's write to the new one — the exact false credit #3521 exists
+		// to prevent. Since S3 (#3759) the settled sweep hands the bridge the
+		// lineage it captured with the epoch, and that lineage, not the epoch
+		// value, refuses the dead session's write (#3763 item 5).
+		const env = setupTestEnvironment("pi-lens-3677-reset-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "reset.ts");
+			fs.writeFileSync(filePath, SOURCE);
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-reset" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			runtime.readGuard.retainBranch(new Set());
+			const captured = runtime.readGuard.currentBranchEpoch;
+			expect(captured).toBe(2);
+			const lineage = runtime.captureSessionGeneration();
+
+			// The real reset seam: a new session's guard restarts at 0.
+			runtime.resetForSession();
+			runtime.beginTurn();
+			expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+
+			const accepted = recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: captured,
+					lineage,
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(accepted).toBe(true);
+
+			// Fail closed: the pre-reset capture is NOT credited to the new session.
+			expect(runtime.readGuard.exportAuthorship().written).toEqual([]);
+			// ... and the refusal is observable through the lineage's own record.
+			expect(
+				getDegradationSummary()
+					.find((group) => group.kind === "generation-guard-stale-write")
+					?.latestReasons.map((row) => row.subject),
+			).toEqual([`runtime-session:${filePath}`]);
+			// No bridge record: the epoch is well-formed, just not this guard's.
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+			// Nothing is queued (#3677 round 3, verify r2 V2): round 2 queued the
+			// write at the CURRENT epoch, and the drain's own `recordWritten`
+			// then credited it (tests/clients/runtime-agent-end.test.ts, "drains
+			// nothing a dead session's sweep replay queued after a session reset").
+			expect(runtime.consumeDeferredFormatFiles()).toEqual([]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("ignores a null-proto epoch object without dropping the record", () => {
+		// #3677 review round 1 F3. `String(Object.create(null))` throws (no
+		// prototype), and the reason template is built INSIDE the bridge's try,
+		// so the throw dropped the whole record — turn state, receipt, and
+		// deferral — and returned false. `typeof value` closes it.
+		const env = setupTestEnvironment("pi-lens-3677-nullproto-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "nullproto.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-nullproto" });
+			runtime.beginTurn();
+
+			const accepted = recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					readGuardBranchEpoch: Object.create(null) as number,
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(accepted).toBe(true);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				)?.count,
+			).toBe(1);
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("forwards a legitimately stale epoch captured before a /tree", () => {
+		// The upper bound is `<=`, not `==`: the field exists to carry an epoch
+		// captured before an await, so a `/tree` during that await must not turn
+		// a real epoch into a rejection.
+		const env = setupTestEnvironment("pi-lens-3677-stale-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "stale.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-stale" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: 0,
+					},
+					deps,
+				),
+			).toBe(true);
+
+			const [record] = runtime.consumeDeferredFormatFiles();
+			expect(record.readGuardBranchEpoch).toBe(0);
+
+			// The boundary itself (#3677 round 3): an epoch EQUAL to the live one
+			// is this session's and still queues. Only one above it queues
+			// nothing; with `<` there, a current write lost its deferral and
+			// no other test noticed.
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: 1,
+					},
+					deps,
+				),
+			).toBe(true);
+			const [current] = runtime.consumeDeferredFormatFiles();
+			expect(current?.readGuardBranchEpoch).toBe(1);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("ignores a fraction at or below the current epoch", () => {
+		// `Number.isInteger` is load-bearing on its own: 0.5 passes both the
+		// `>= 0` and `<= currentEpoch` bounds, so only the integer check rejects
+		// it. The guard's 1.5 row is caught by the upper bound instead.
+		const env = setupTestEnvironment("pi-lens-3677-subfraction-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "subfraction.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-subfraction" });
+			runtime.beginTurn();
+			runtime.readGuard.retainBranch(new Set());
+			expect(runtime.readGuard.currentBranchEpoch).toBe(1);
+			const deps = makeDeps({
+				tmpDir: env.tmpDir,
+				runtime,
+				cacheManager: new CacheManager(false),
+			});
+
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					readGuardBranchEpoch: 0,
+				},
+				deps,
+			);
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [2, 3],
+					readGuardBranchEpoch: 0.5,
+				},
+				deps,
+			);
+
+			const [record] = runtime.consumeDeferredFormatFiles();
+			// Ignoring the field falls back to the CURRENT epoch (1), which is the
+			// same credit a producer that omitted the field would get.
+			expect(record.readGuardBranchEpoch).toBe(1);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				)?.count,
+			).toBe(1);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records nothing when the entry omits the epoch", () => {
+		const env = setupTestEnvironment("pi-lens-3677-omitted-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "omitted.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-omitted" });
+			runtime.beginTurn();
+			recordMutationThroughSeam(
+				{ filePath, kind: "edit", touchedLines: [1, 2] },
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				),
+			).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records ONE bounded degradation for repeated foreign values", () => {
+		const env = setupTestEnvironment("pi-lens-3677-once-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "s-3677-once" });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			const deps = makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager });
+
+			for (const [index, value] of [Number.NaN, -1, 1.5, "5"].entries()) {
+				const filePath = path.join(env.tmpDir, `once-${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						readGuardBranchEpoch: value as number,
+					},
+					deps,
+				);
+			}
+
+			const groups = getDegradationSummary().filter(
+				(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+			);
+			expect(groups).toHaveLength(1);
+			expect(groups[0].count).toBe(1);
+			// The one row names the field and the first value's type against the
+			// live epoch (#3677 round 3: Stryker left the subject and the reason
+			// unread by every test).
+			expect(groups[0].latestReasons).toEqual([
+				{
+					subject: "readGuardBranchEpoch",
+					reason:
+						"ignored a foreign readGuardBranchEpoch (typeof number) (current 0)",
+				},
+			]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+describe("#3620/#3709: a retired scope's replay writes no session state", () => {
+	// Recurrence: #3709. The branch epoch restarts at 0 in every scope, so a
+	// settled sweep that captured epoch 0 and replayed after `/new` passed the
+	// #3521 epoch check and was credited to the new session (#3620's NS-RACE).
+	// The in-process producer now hands its lineage handle over, and the bridge
+	// keeps the handle's scope out of every later scope's state.
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+
+	function withScopes(
+		slug: string,
+		body: (args: {
+			filePath: string;
+			tmpDir: string;
+			runtime: RuntimeCoordinator;
+			cacheManager: CacheManager;
+			deps: MutationBridgeDeps;
+		}) => void,
+	): void {
+		const env = setupTestEnvironment(`pi-lens-3709-${slug}-`);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, `${slug}.ts`);
+			fs.writeFileSync(filePath, SOURCE);
+			// Aged, so the mtime fallback cannot answer for an explicit credit.
+			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: `s-3709-${slug}` });
+			runtime.beginTurn();
+			const cacheManager = new CacheManager(false);
+			body({
+				filePath,
+				tmpDir: env.tmpDir,
+				runtime,
+				cacheManager,
+				deps: makeDeps({ tmpDir: env.tmpDir, runtime, cacheManager }),
+			});
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	}
+
+	const turnFiles = (cacheManager: CacheManager, tmpDir: string) =>
+		Object.keys(cacheManager.readTurnState(tmpDir).files ?? {});
+
+	it("does not credit or queue a retired scope's replay at the same epoch value", () => {
+		withScopes(
+			"same-epoch",
+			({ filePath, tmpDir, runtime, cacheManager, deps }) => {
+				const lineage = runtime.captureSessionGeneration();
+				expect(lineage.branchEpoch).toBe(0);
+				runtime.resetForSession();
+				runtime.beginTurn();
+				expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+
+				const accepted = recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						consumer: "settled-sweep",
+						provenance: "settled-sweep",
+						readGuardBranchEpoch: 0,
+						lineage,
+					},
+					deps,
+				);
+
+				expect({
+					accepted,
+					verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+					queued: runtime.consumeDeferredFormatFiles(),
+					turnFiles: turnFiles(cacheManager, tmpDir),
+					// The bytes did change: the change log still says so (I5).
+					receipts: readChangesSince(tmpDir, 0).map((c) => c.source),
+					dropped: getDegradationSummary()
+						.find((group) => group.kind === "generation-guard-stale-write")
+						?.latestReasons.map((r) => r.subject),
+				}).toEqual({
+					accepted: true,
+					verdict: "block",
+					queued: [],
+					turnFiles: [],
+					receipts: ["agent-tool:settled-sweep"],
+					dropped: [`runtime-session:${filePath}`],
+				});
+			},
+		);
+	});
+
+	it("credits and queues a replay whose scope is still live", () => {
+		withScopes("live", ({ filePath, tmpDir, runtime, cacheManager, deps }) => {
+			const lineage = runtime.captureSessionGeneration();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					consumer: "settled-sweep",
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: 0,
+					lineage,
+				},
+				deps,
+			);
+			expect({
+				verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+				queued: runtime.consumeDeferredFormatFiles().map((r) => [...r.kinds]),
+				turnFiles: turnFiles(cacheManager, tmpDir).length,
+			}).toEqual({
+				// A settled sweep records the change and queues follow-up work, but
+				// its unattributed drift is not first-credit authorship (#4210).
+				verdict: "block",
+				queued: [["autofix", "format"]],
+				turnFiles: 1,
+			});
+		});
+	});
+
+	it("keeps a v1 producer entry without a lineage fail-open after a reset", () => {
+		// The external-producer shape documented in the bridge header: no
+		// lineage, no epoch. It carries no scope, so it stays credited (I4).
+		withScopes("v1", ({ filePath, tmpDir, runtime, cacheManager, deps }) => {
+			runtime.resetForSession();
+			runtime.beginTurn();
+			const v1Entry = JSON.parse(
+				JSON.stringify({
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					consumer: "my-extension",
+				}),
+			);
+			expect(isValidMutationEntry(v1Entry)).toBe(true);
+			expect(recordMutationThroughSeam(v1Entry, deps)).toBe(true);
+			expect({
+				verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+				queued: runtime.consumeDeferredFormatFiles().length,
+				turnFiles: turnFiles(cacheManager, tmpDir).length,
+			}).toEqual({ verdict: "allow", queued: 1, turnFiles: 1 });
+		});
+	});
+
+	it("counts a dropped replay by its scope's retirement reason", () => {
+		// F1 (maintainer decision on #3609): a read-guard write dropped after
+		// `/reload` is a false block while its entry is still on the branch, so
+		// it is counted by the reason the scope retired with.
+		withScopes("reload", ({ filePath, runtime, deps }) => {
+			const lineage = runtime.captureSessionGeneration();
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					lineage,
+				},
+				deps,
+			);
+			expect(
+				getDegradationSummary()
+					.find((group) => group.kind === "session-scope-read-dropped")
+					?.latestReasons.map((r) => r.subject),
+			).toEqual(["reload:settled-sweep"]);
+		});
+	});
+
+	it("counts no false block when the entry was captured on an earlier branch than its handle", () => {
+		// Recurrence: S1's F1 over-count. The write's queue-time epoch is the
+		// entry's, not the handle's: an entry captured before a /tree that its
+		// handle postdates is not on the branch, so its drop is no false block.
+		withScopes("moved", ({ filePath, runtime, deps }) => {
+			runtime.readGuard.retainBranch(new Set());
+			const lineage = runtime.captureSessionGeneration();
+			expect(lineage.branchEpoch).toBe(1);
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					readGuardBranchEpoch: 0,
+					lineage,
+				},
+				deps,
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "session-scope-read-dropped",
+				),
+			).toBeUndefined();
+		});
+	});
+
+	it("counts no false block under no-read-guard, where no credit was due", () => {
+		withScopes("no-guard", ({ filePath, tmpDir, runtime, cacheManager }) => {
+			const lineage = runtime.captureSessionGeneration();
+			retireScope(runtime.sessionScope, "reload");
+			runtime.resetForSession();
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [1, 2],
+					provenance: "settled-sweep",
+					lineage,
+				},
+				makeDeps({
+					tmpDir,
+					runtime,
+					cacheManager,
+					shouldStampReadGuard: () => false,
+				}),
+			);
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "session-scope-read-dropped",
+				),
+			).toBeUndefined();
+		});
+	});
+
+	it("never lets a non-handle lineage escape to the producer", () => {
+		withScopes("foreign", ({ filePath, runtime, deps }) => {
+			const entry = {
+				filePath,
+				kind: "edit" as const,
+				touchedLines: [1, 2] as [number, number],
+				lineage: {} as never,
+			};
+			expect(() => recordMutationThroughSeam(entry, deps)).not.toThrow();
+			expect(recordMutationThroughSeam(entry, deps)).toBe(false);
+			expect(runtime.readGuard.checkEdit(filePath, [1, 1]).action).toBe(
+				"block",
+			);
+		});
+	});
+
+	// #3763 item 5 (the #3705 residual): a well-formed epoch above the live one
+	// was taken for a dead session's capture and skipped: no stamp, no
+	// deferral, and nothing recorded under no-read-guard. Session currency is
+	// the lineage's now (the only in-process epoch sender, the settled sweep,
+	// carries its own), and a producer without one cannot hold an epoch at
+	// all, so the value is ignored like a malformed one. The recurrence: a
+	// forward epoch that silently loses its write's format pass.
+	function forwardEpochCase(readGuardOn: boolean): void {
+		withScopes(
+			`forward-${readGuardOn ? "on" : "off"}`,
+			({ filePath, tmpDir, runtime, cacheManager }) => {
+				expect(runtime.readGuard.currentBranchEpoch).toBe(0);
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [1, 2],
+						consumer: "third-party",
+						readGuardBranchEpoch: 5,
+					},
+					makeDeps({
+						tmpDir,
+						runtime,
+						cacheManager,
+						shouldStampReadGuard: () => readGuardOn,
+					}),
+				);
+				const epochRecord = getDegradationSummary().find(
+					(group) => group.kind === "mutation-bridge-invalid-branch-epoch",
+				);
+				expect({
+					verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+					queued: runtime
+						.consumeDeferredFormatFiles()
+						.map((record) => record.readGuardBranchEpoch),
+					recorded: epochRecord?.count,
+					// #3763 item 5: the above-live value is named in the record, so
+					// the ignored epoch is observable, not a silent skip (kills the
+					// reason-string mutant on this added line).
+					reason: epochRecord?.latestReasons[0]?.reason,
+				}).toEqual({
+					verdict: readGuardOn ? "allow" : "block",
+					queued: [0],
+					recorded: 1,
+					reason: "ignored a readGuardBranchEpoch above the live epoch (5 > 0)",
+				});
+			},
+		);
+	}
+
+	it("ignores an epoch above the live one from a producer without a lineage, and queues its write (read guard on)", () => {
+		forwardEpochCase(true);
+	});
+
+	it("ignores an epoch above the live one from a producer without a lineage, and queues its write (read guard off)", () => {
+		forwardEpochCase(false);
 	});
 });
 
@@ -380,5 +1265,277 @@ describe("mutation bridge registration", () => {
 				.filter((line) => /\bruntime\s*=\s*new RuntimeCoordinator\(/.test(line))
 				.every((line) => !/^\s/.test(line)),
 		).toBe(true);
+	});
+});
+
+/**
+ * #3525, #3865: a bridge replay reports a mutation, never the bytes the
+ * conversation holds: the settled sweep's drift no tool_result described, an
+ * unclassified tool's observed write, an `ast_grep_replace` rewrite or a
+ * co-process producer's (no provenance). Recurrence: its `recordWritten`
+ * re-stamped FileTime, the only staleness check a line without a hash has,
+ * so an edit of a line another writer changed passed on a record past
+ * READ_HASH_MAX_LINES. Authorship is still credited (#3865 acceptance).
+ */
+describe("mutation bridge authorship without FileTime credit (#3865)", () => {
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+	for (const provenance of ["settled-sweep", "observed", undefined] as const) {
+		it(`credits authorship without stamping FileTime for a ${provenance ?? "no-provenance"} replay`, () => {
+			const env = setupTestEnvironment("pi-lens-3525-bridge-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const filePath = path.join(env.tmpDir, "big.ts");
+				const big = Array.from({ length: 3100 }, (_, i) => `line${i + 1}`);
+				fs.writeFileSync(filePath, big.join("\n"));
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				// A whole-file read past READ_HASH_MAX_LINES: no line hashes.
+				runtime.readGuard.recordRead({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: big.length,
+					effectiveOffset: 1,
+					effectiveLimit: big.length,
+					expandedByLsp: false,
+					turnIndex: 0,
+					writeIndex: 0,
+					timestamp: Date.now(),
+				});
+				big[10] = "EXTERNAL11";
+				fs.writeFileSync(filePath, big.join("\n"));
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [11, 11],
+							...(provenance !== undefined && { provenance }),
+						},
+						makeDeps({
+							tmpDir: env.tmpDir,
+							runtime,
+							cacheManager: new CacheManager(false),
+						}),
+					),
+				).toBe(true);
+				expect(runtime.readGuard.exportAuthorship().written).toEqual(
+					provenance === "settled-sweep" ? [] : [normalizeFilePath(filePath)],
+				);
+				expect(runtime.readGuard.checkEdit(filePath, [11, 11]).action).toBe(
+					"block",
+				);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+
+	it("credits scattered bridge ranges without licensing their gap (#4210)", () => {
+		const env = setupTestEnvironment("pi-lens-4210-scattered-bridge-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "scattered.ts");
+			fs.writeFileSync(
+				filePath,
+				Array.from({ length: 60 }, (_, i) => `line${i + 1}`).join("\n"),
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath,
+						kind: "edit",
+						touchedLines: [2, 51],
+						editRanges: [
+							[2, 3],
+							[50, 51],
+						],
+					},
+					makeDeps({
+						tmpDir: env.tmpDir,
+						runtime,
+						cacheManager: new CacheManager(false),
+					}),
+				),
+			).toBe(true);
+			expect(runtime.readGuard.checkEdit(filePath, [20, 20]).action).toBe(
+				"block",
+			);
+			expect(runtime.readGuard.checkEdit(filePath, [50, 51]).action).toBe(
+				"allow",
+			);
+
+			const narrowPath = path.join(env.tmpDir, "narrow.ts");
+			fs.writeFileSync(narrowPath, "one\ntwo\nthree\nfour\n");
+			const narrowRuntime = new RuntimeCoordinator();
+			narrowRuntime.projectRoot = env.tmpDir;
+			narrowRuntime.beginTurn();
+			expect(
+				recordMutationThroughSeam(
+					{
+						filePath: narrowPath,
+						kind: "edit",
+						touchedLines: [2, 2],
+					},
+					makeDeps({
+						tmpDir: env.tmpDir,
+						runtime: narrowRuntime,
+						cacheManager: new CacheManager(false),
+					}),
+				),
+			).toBe(true);
+			expect(narrowRuntime.readGuard.checkEdit(narrowPath, [4, 4]).action).toBe(
+				"block",
+			);
+			expect(narrowRuntime.readGuard.checkEdit(narrowPath, [2, 2]).action).toBe(
+				"allow",
+			);
+			expect(narrowRuntime.readGuard.checkEdit(narrowPath, [4, 4]).action).toBe(
+				"block",
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #4131 (#4187 R2-4, probe A1; orchestrator decision 2): a bridge write that
+ * no pre-write check guarded (a co-process producer, `ast_grep_replace`, the
+ * settled sweep's drift) reports a mutation without the bytes, so it may
+ * create a first authorship but never advance one. Recurrence: its
+ * `recordWritten` re-baselined the agent's authorship over another writer's
+ * line 11, and a zero-read edit of that line passed (stale allow).
+ */
+describe("mutation bridge never advances an existing authorship (#4131)", () => {
+	for (const provenance of ["settled-sweep", undefined] as const) {
+		it(`ends the authorship a ${provenance ?? "co-process"} write lands on`, () => {
+			const env = setupTestEnvironment("pi-lens-4131-bridge-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				const lines = Array.from({ length: 12 }, (_, i) => `line${i + 1}`);
+				fs.writeFileSync(filePath, lines.join("\n"));
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.beginTurn();
+				// The agent's bash write authored the file, without a read.
+				runtime.readGuard.recordWritten(filePath, {
+					stampFileTime: false,
+					toolCallId: "call-4131-bash",
+				});
+				// Another writer changes line 11.
+				lines[10] = "EXTERNAL11";
+				fs.writeFileSync(filePath, lines.join("\n"));
+				// The producer writes line 3 and reports it.
+				lines[2] = "bridge3";
+				fs.writeFileSync(filePath, lines.join("\n"));
+				expect(
+					recordMutationThroughSeam(
+						{
+							filePath,
+							kind: "edit",
+							touchedLines: [3, 3],
+							...(provenance !== undefined && { provenance }),
+						},
+						makeDeps({
+							tmpDir: env.tmpDir,
+							runtime,
+							cacheManager: new CacheManager(false),
+						}),
+					),
+				).toBe(true);
+				const verdict = runtime.readGuard.checkEdit(filePath, [11, 11]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("File modified since your write");
+				expect(runtime.readGuard.exportAuthorship()).toMatchObject({
+					written: [],
+					entries: [{ retired: true }],
+				});
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					)?.count,
+				).toBe(1);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+	}
+});
+
+describe("mutation bridge first-credit scope (#4210)", () => {
+	it("does not let a first partial bridge write vouch for another line (Q3)", () => {
+		const env = setupTestEnvironment("pi-lens-4210-q3-");
+		try {
+			const filePath = path.join(env.tmpDir, "partial.ts");
+			fs.writeFileSync(filePath, ["one", "two", "three"].join("\n"));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			fs.writeFileSync(filePath, ["one", "bridge", "three"].join("\n"));
+
+			recordMutationThroughSeam(
+				{ filePath, kind: "edit", touchedLines: [2, 2], consumer: "writer" },
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let settled-sweep drift create authorship (Q4)", () => {
+		const env = setupTestEnvironment("pi-lens-4210-q4-");
+		try {
+			const filePath = path.join(env.tmpDir, "drift.ts");
+			fs.writeFileSync(filePath, ["one", "two", "three"].join("\n"));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.beginTurn();
+			fs.writeFileSync(filePath, ["one", "foreign", "three"].join("\n"));
+
+			recordMutationThroughSeam(
+				{
+					filePath,
+					kind: "edit",
+					touchedLines: [2, 2],
+					consumer: "settled-sweep",
+					provenance: "settled-sweep",
+				},
+				makeDeps({
+					tmpDir: env.tmpDir,
+					runtime,
+					cacheManager: new CacheManager(false),
+				}),
+			);
+
+			expect(runtime.readGuard.checkEdit(filePath, [2, 2]).action).toBe(
+				"block",
+			);
+		} finally {
+			env.cleanup();
+		}
 	});
 });

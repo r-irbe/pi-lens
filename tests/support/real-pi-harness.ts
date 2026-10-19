@@ -1,9 +1,14 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+	spawn,
+	type ChildProcess,
+	type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import {
 	cpSync,
 	existsSync,
+	mkdirSync,
+	readdirSync,
 	readFileSync,
-	rmSync,
 	writeFileSync,
 } from "node:fs";
 import * as path from "node:path";
@@ -14,6 +19,8 @@ import {
 	SWEEP_ANY_AGE,
 	sweepScratchDirs,
 } from "../../scripts/lib/scratch-dir.mjs";
+import { removeTempDirSync } from "../clients/test-utils.js";
+import { isProcessAlive, killProcessTree } from "./process-tree.js";
 
 // flake-shape: raw-timer-wait — the bounded timeout waits for real child progress
 
@@ -43,13 +50,26 @@ export type RealPi = {
 	getState(): Promise<JsonObject>;
 	getCommands(): Promise<JsonObject>;
 	newSession(): Promise<JsonObject>;
+	/**
+	 * RPC `clone`: pi forks the session at its leaf and rebinds the extensions,
+	 * the hand-off a `/clone` makes (#3521, #4138). Works under `--no-session`.
+	 */
+	clone(): Promise<JsonObject>;
+	/** Close the child and resume its persisted session in a new pi process. */
+	resume(): Promise<JsonObject>;
+	/** Close stdin and wait for the current child to perform orderly shutdown. */
+	quit(): Promise<void>;
 	events(kind: string): Promise<ReadonlyArray<HarnessEvent>>;
 	toolResults(): ReadonlyArray<HarnessEvent>;
 	awaitAssistantTurn(): Promise<HarnessEvent>;
 	awaitToolResult(name: string): Promise<HarnessEvent>;
 	killChildForTest(): void;
 	providerObservations(): ReadonlyArray<JsonObject>;
+	sessionFiles(): ReadonlyArray<string>;
 	projectPath(): string;
+	homePath(): string;
+	childTempDir(): string;
+	childEnvironment(): Readonly<Record<string, string | undefined>>;
 	lens: {
 		latencyRows(): ReadonlyArray<JsonObject>;
 		extensionLog(): ReadonlyArray<JsonObject>;
@@ -131,6 +151,28 @@ export function createRealPiProject(
 	return dir;
 }
 
+/**
+ * The PATH head `npm run` hands a test, whatever started it: the repo's
+ * `node_modules/.bin`, then the running node's directory. The pre-push hook
+ * and a bare `vitest` start without the first, and the child then finds
+ * neither `pi` nor the `knip` the fixture's project-diagnostics scan resolves
+ * through PATH (#3742). Both bins are `#!/usr/bin/env node` shims, hence the
+ * second entry. The key is matched case-insensitively because Windows spreads
+ * `Path`.
+ */
+export function withRepoBinOnPath(
+	env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+	const key =
+		Object.keys(env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+	const entries = [
+		path.join(repoRoot, "node_modules", ".bin"),
+		path.dirname(process.execPath),
+		env[key],
+	];
+	return { ...env, [key]: entries.filter(Boolean).join(path.delimiter) };
+}
+
 function startRealPi(
 	scenario: string,
 	scriptFile: string,
@@ -138,44 +180,52 @@ function startRealPi(
 	args: readonly string[] = [],
 	env: Record<string, string> = {},
 	projectOverride?: string,
+	extensions: readonly string[] = [],
+	agentSettings?: JsonObject,
+	persistedSession = false,
+	entryFile = "index.js",
 ) {
 	const scratchRoot = homeOverride ?? SCRATCH_DIR_ROOT;
 	sweepScratchDirs(scratchRoot, "real-pi-", { maxAgeMs: SWEEP_ANY_AGE });
 	const project = projectOverride ?? createRealPiProject(scenario, scratchRoot);
 	const home = homeOverride ?? claimScratchDir(scratchRoot, "real-pi-home");
 	const providerLog = path.join(home, "provider.jsonl");
-	const child: ChildProcessWithoutNullStreams = spawn(
-		"pi",
-		[
-			"--mode",
-			"rpc",
-			"--no-session",
-			"--provider",
-			"scripted",
-			"--model",
-			"harness",
-			"-e",
-			path.join(repoRoot, "index.js"),
-			"-e",
-			path.join(fixtureRoot, "scripted-provider.mjs"),
-			...args,
-		],
-		{
-			cwd: project,
-			stdio: ["pipe", "pipe", "pipe"],
-			env: {
-				...process.env,
-				// Keep the real host outside Vitest's runner-only rethrow mode.
-				VITEST: undefined,
-				PI_LENS_HOME: home,
-				HOME: home,
-				REAL_PI_HARNESS_SCRIPT: scriptFile,
-				REAL_PI_HARNESS_PROVIDER_LOG: providerLog,
-				ANTHROPIC_API_KEY: "sk-ant-real-harness-dummy",
-				...env,
-			},
-		},
-	);
+	const sessionDir = path.join(home, "sessions");
+	const childTmp = path.join(home, "tmp");
+	mkdirSync(childTmp, { recursive: true });
+	// #4292: callers may replace TMPDIR for adoption tests, but scanner
+	// reports belong to this child, including when siblings share a home.
+	const scannerTempDir = claimScratchDir(home, "scanner-tmp");
+	if (persistedSession) mkdirSync(sessionDir, { recursive: true });
+	// pi's agent dir (`PI_CODING_AGENT_DIR`) under the removable home, so a
+	// scenario can turn on a built-in tool pi keeps off by default (codemode).
+	const agentDir = path.join(home, "agent");
+	if (agentSettings) {
+		mkdirSync(agentDir, { recursive: true });
+		writeFileSync(
+			path.join(agentDir, "settings.json"),
+			JSON.stringify(agentSettings),
+		);
+	}
+	const childEnv = withRepoBinOnPath({
+		...process.env,
+		// Keep the real host outside Vitest's runner-only rethrow mode.
+		VITEST: undefined,
+		PI_LENS_HOME: home,
+		REAL_PI_HARNESS_HOME: home,
+		HOME: home,
+		TMPDIR: childTmp,
+		TMP: childTmp,
+		TEMP: childTmp,
+		REAL_PI_HARNESS_SCRIPT: scriptFile,
+		REAL_PI_HARNESS_PROVIDER_LOG: providerLog,
+		ANTHROPIC_API_KEY: "sk-ant-real-harness-dummy",
+		...(agentSettings && { PI_CODING_AGENT_DIR: agentDir }),
+		...env,
+		PI_LENS_TEST_SCANNER_TMPDIR: scannerTempDir,
+		PI_LENS_TEST_SCANNER_HARNESS: "1",
+	});
+	let child!: ChildProcessWithoutNullStreams;
 	const events: RpcMessage[] = [];
 	const waiters = new Map<
 		string,
@@ -187,6 +237,25 @@ function startRealPi(
 		}>
 	>();
 	let childFailure: RealPiChildExitError | undefined;
+	const killed = new Set<number>();
+	let childStopped = false;
+	const spawnArgs = (resume: boolean): string[] => [
+		"--mode",
+		"rpc",
+		...(persistedSession
+			? ["--session-dir", sessionDir, ...(resume ? ["--continue"] : [])]
+			: ["--no-session"]),
+		"--provider",
+		"scripted",
+		"--model",
+		"harness",
+		"-e",
+		path.join(repoRoot, entryFile),
+		"-e",
+		path.join(fixtureRoot, "scripted-provider.mjs"),
+		...extensions.flatMap((extension) => ["-e", extension]),
+		...args,
+	];
 	const rejectPending = (error: RealPiChildExitError) => {
 		childFailure = error;
 		for (const pending of waiters.values()) {
@@ -197,42 +266,51 @@ function startRealPi(
 		}
 		waiters.clear();
 	};
-	child.once("error", (error) => {
-		if (!childFailure) rejectPending(new RealPiChildExitError(null, null));
-		else void error;
-	});
-	child.once("exit", (code, signal) => {
-		if (!childFailure) rejectPending(new RealPiChildExitError(code, signal));
-	});
-	let buffer = "";
-	child.stdout.on("data", (chunk) => {
-		buffer += chunk.toString();
-		let end = buffer.indexOf("\n");
-		while (end >= 0) {
-			const line = buffer.slice(0, end).replace(/\r$/, "");
-			buffer = buffer.slice(end + 1);
-			end = buffer.indexOf("\n");
-			if (!line.trim()) continue;
-			try {
-				const message = JSON.parse(line) as RpcMessage;
-				events.push(message);
-				for (const key of [message.id, message.event, message.type]) {
-					const pending = waiters.get(String(key));
-					if (!pending) continue;
-					const remaining = pending.filter((waiter) => {
-						if (!waiter.predicate(message)) return true;
-						clearTimeout(waiter.timer);
-						waiter.resolve(message);
-						return false;
-					});
-					if (remaining.length) waiters.set(String(key), remaining);
-					else waiters.delete(String(key));
+	const attachChild = (resume: boolean) => {
+		childFailure = undefined;
+		child = spawn("pi", spawnArgs(resume), {
+			cwd: project,
+			stdio: ["pipe", "pipe", "pipe"],
+			env: childEnv,
+		});
+		child.once("error", (error) => {
+			if (!childFailure) rejectPending(new RealPiChildExitError(null, null));
+			else void error;
+		});
+		child.once("exit", (code, signal) => {
+			if (!childFailure) rejectPending(new RealPiChildExitError(code, signal));
+		});
+		let buffer = "";
+		child.stdout.on("data", (chunk) => {
+			buffer += chunk.toString();
+			let end = buffer.indexOf("\n");
+			while (end >= 0) {
+				const line = buffer.slice(0, end).replace(/\r$/, "");
+				buffer = buffer.slice(end + 1);
+				end = buffer.indexOf("\n");
+				if (!line.trim()) continue;
+				try {
+					const message = JSON.parse(line) as RpcMessage;
+					events.push(message);
+					for (const key of [message.id, message.event, message.type]) {
+						const pending = waiters.get(String(key));
+						if (!pending) continue;
+						const remaining = pending.filter((waiter) => {
+							if (!waiter.predicate(message)) return true;
+							clearTimeout(waiter.timer);
+							waiter.resolve(message);
+							return false;
+						});
+						if (remaining.length) waiters.set(String(key), remaining);
+						else waiters.delete(String(key));
+					}
+				} catch {
+					/* protocol owns stdout */
 				}
-			} catch {
-				/* protocol owns stdout */
 			}
-		}
-	});
+		});
+	};
+	attachChild(false);
 	const waitFor = (
 		key: string,
 		predicate: (message: RpcMessage) => boolean = () => true,
@@ -260,14 +338,32 @@ function startRealPi(
 		child.stdin.write(`${JSON.stringify({ id, type, ...fields })}\n`);
 		return response;
 	};
+	const killTree = () => {
+		for (const pid of killProcessTree(child)) killed.add(pid);
+	};
+	const stopChild = async (kill: boolean) => {
+		if (childStopped) return;
+		childStopped = true;
+		child.stdin.end();
+		if (kill) killTree();
+		await waitForChildExit(child, [...killed]);
+	};
 	return {
 		child,
 		project,
 		home,
+		childEnv,
 		events,
 		request,
 		waitFor,
-		killChildForTest: () => child.kill("SIGKILL"),
+		killChildForTest: killTree,
+		async resume() {
+			await stopChild(false);
+			attachChild(true);
+			childStopped = false;
+			return request("get_commands");
+		},
+		quit: () => stopChild(false),
 		providerObservations: () =>
 			readFileSync(providerLog, "utf8")
 				.trim()
@@ -275,14 +371,49 @@ function startRealPi(
 				.filter(Boolean)
 				.map((line) => JSON.parse(line) as JsonObject),
 		async close() {
-			child.stdin.end();
-			child.kill("SIGKILL");
+			await stopChild(true);
+			removeTempDirSync(scannerTempDir);
 			// A caller-supplied project (and home) outlives this child by
 			// construction — a concurrent sibling session is still reading it.
-			if (!projectOverride) rmSync(project, { recursive: true, force: true });
-			if (!homeOverride) rmSync(home, { recursive: true, force: true });
+			if (!projectOverride) removeTempDirSync(project);
+			if (!homeOverride) removeTempDirSync(home);
 		},
 	};
+}
+
+const CHILD_EXIT_WAIT_MS = 5_000;
+const CHILD_EXIT_POLL_MS = 20;
+
+/**
+ * SIGKILL is asynchronous: pi can still be releasing files when the signal
+ * returns, and its grandchildren (`pids`, from {@link killProcessTree}) outlive
+ * it. Wait until the child has reported exit and every pid is gone before
+ * recursive cleanup, but keep teardown bounded if either never happens: one
+ * stderr line, then removal proceeds (#4081).
+ */
+export function waitForChildExit(
+	child: ChildProcess,
+	pids: readonly number[] = [],
+	timeoutMs = CHILD_EXIT_WAIT_MS,
+): Promise<void> {
+	// A child that never spawned (ENOENT) carries exitCode -2 and resolves here.
+	const settled = () =>
+		(child.exitCode !== null || child.signalCode !== null) &&
+		pids.every((pid) => pid === child.pid || !isProcessAlive(pid));
+	if (settled()) return Promise.resolve();
+	return new Promise((resolve) => {
+		const deadline = Date.now() + timeoutMs;
+		const poll = setInterval(() => {
+			const done = settled();
+			if (!done && Date.now() < deadline) return;
+			clearInterval(poll);
+			if (!done)
+				process.stderr.write(
+					`[real-pi cleanup] child tree did not exit within ${timeoutMs}ms\n`,
+				);
+			resolve();
+		}, CHILD_EXIT_POLL_MS);
+	});
 }
 
 export async function withRealPi<T>(
@@ -292,6 +423,7 @@ export async function withRealPi<T>(
 		home?: string;
 		args?: readonly string[];
 		env?: Record<string, string>;
+		extensions?: readonly string[];
 		/**
 		 * Reuse an EXISTING project directory (from {@link createRealPiProject})
 		 * instead of claiming and seeding a fresh one. The caller owns it: it is
@@ -301,6 +433,20 @@ export async function withRealPi<T>(
 		 * That pair is what makes two sessions share one repository (#2154 AC1).
 		 */
 		project?: string;
+		/**
+		 * pi `settings.json` for the child's own agent dir, for example
+		 * `{ defaultTools: ["+codemode"] }` to turn on a tool pi ships off.
+		 */
+		agentSettings?: JsonObject;
+		/** Use a persisted session directory so {@link RealPi.resume} can restart pi. */
+		persistedSession?: boolean;
+		/**
+		 * Extension entrypoint to load, relative to the repo root. The default
+		 * `"index.js"` is the built twin real pi loads; `"index.ts"` drives the
+		 * TypeScript-source load, where jiti transpiles the entry fresh on every
+		 * `/reload` (#4169).
+		 */
+		entry?: "index.js" | "index.ts";
 	},
 	callback: (pi: RealPi) => Promise<T>,
 ): Promise<T> {
@@ -316,6 +462,10 @@ export async function withRealPi<T>(
 		options.args,
 		options.env,
 		options.project,
+		options.extensions,
+		options.agentSettings,
+		options.persistedSession,
+		options.entry ?? "index.js",
 	);
 	try {
 		let cursor = harness.events.length;
@@ -342,6 +492,12 @@ export async function withRealPi<T>(
 				cursor = harness.events.length;
 				return harness.request("new_session");
 			},
+			clone: async () => {
+				cursor = harness.events.length;
+				return harness.request("clone");
+			},
+			resume: () => harness.resume(),
+			quit: () => harness.quit(),
 			prompt: async (message) => {
 				cursor = harness.events.length;
 				return harness.request("prompt", { message });
@@ -380,14 +536,28 @@ export async function withRealPi<T>(
 						event.type === "tool_execution_end",
 				),
 			providerObservations: () => harness.providerObservations(),
+			sessionFiles: () =>
+				options.persistedSession
+					? readdirSync(path.join(harness.home, "sessions"))
+							.filter((name) => name.endsWith(".jsonl"))
+							.sort()
+					: [],
 			projectPath: () => harness.project,
+			homePath: () => harness.home,
+			childTempDir: () => path.join(harness.home, "tmp"),
+			childEnvironment: () => harness.childEnv,
 			lens: {
 				latencyRows: () => readRows(path.join(harness.home, "latency.log")),
 				extensionLog: () => readRows(path.join(harness.home, "extension.log")),
 				sessionStartLog: () =>
 					readLines(path.join(harness.home, "sessionstart.log")),
 				degradations: () =>
-					readRows(path.join(harness.home, "degradation-ledger.json")),
+					readRows(path.join(harness.home, "latency.log"))
+						.filter((row) => row.phase === "degradation_ledger")
+						.map((row) => ({
+							...row,
+							...(row.metadata as JsonObject | undefined),
+						})),
 			},
 		};
 		await harness.request("get_commands");

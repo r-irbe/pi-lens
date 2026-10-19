@@ -23,10 +23,10 @@
  * `tests/support/tests-tree-write-guard.test.ts` carries the deterministic
  * fake-watcher coverage for the swallow-vs-record-once LOGIC in the
  * installed 'error' handler; this file is the one case that drives node's
- * actual internal race end-to-end. Kept in its own file because
- * `admissionHeader` (`tests/support/flake-shape-scan.ts`) only ever reads a
- * file's FIRST `// flake-shape:` header — a second header for a different
- * detector in the sibling file would silently misvalidate its existing
+ * actual internal race end-to-end. Kept in its own file because, until
+ * #4362, `admissionHeader` (`tests/support/flake-shape-scan.ts`) read only a
+ * file's FIRST `// flake-shape:` header, so a second header for a different
+ * detector in the sibling file would have misvalidated its existing
  * raw-timer-wait admission.
  */
 // flake-shape: real-process-spawn — the race is cross-process by construction (readdirSync/statSync inside node's recursive-watch polyfill are blocking syscalls on one thread); only a separately spawned process removing the watched directory can land inside that window.

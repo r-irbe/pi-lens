@@ -1,0 +1,129 @@
+name: Stryker per-test campaign (clients/)
+
+# #4365: stryker-nightly mutates scripts/ with a command runner and
+# coverageAnalysis "off", so its report cannot say which test killed a mutant.
+# This campaign mutates ONE clients/ module per run with the vitest runner and
+# coverageAnalysis "perTest", then lists the tests that cover mutated code but
+# kill no mutant (scripts/stryker-pertest.mjs candidates). It is manual only,
+# gates nothing, and writes nothing: the report and the candidate list are an
+# artifact and the job summary, so no permission beyond `contents: read` exists
+# here and the stryker-nightly tracking issue is never touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Runtime module to mutate, e.g. clients/run-duration.ts. Empty takes the next module in the rotation (run number modulo the eligible list)."
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: stryker-pertest
+  cancel-in-progress: false
+
+jobs:
+  mutate:
+    name: Stryker per-test run
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # `--ignore-scripts` skips `prepare`, whose core grammar download the
+      # Vitest runs under Stryker parse with (the stryker-nightly step).
+      - name: Download core grammars
+        run: node scripts/download-grammars.js --core --dest grammars
+      - run: npm run build
+      # The runner joins describe titles with a space, vitest 5 matches names
+      # joined with " > ": unpatched, every mutant run skips every test. The
+      # script throws if the runner no longer holds the spelling it patches.
+      - name: Patch the Stryker vitest runner for vitest 5
+        run: node scripts/stryker-pertest.mjs patch-runner
+      # An explicit module wins; otherwise the rotation walks the eligible list
+      # (scripts/lib/stryker-pertest.mjs: modules with a sibling test, at most
+      # 600 lines) by run number.
+      - name: Choose the module
+        id: choose
+        env:
+          INPUT_MODULE: ${{ inputs.module }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_MODULE" ]; then
+            echo "module=$INPUT_MODULE" | tee -a "$GITHUB_OUTPUT"
+          else
+            node scripts/stryker-pertest.mjs pick --index "$GITHUB_RUN_NUMBER" | tee -a "$GITHUB_OUTPUT"
+          fi
+      - name: Plan the run
+        id: plan
+        env:
+          MODULE: ${{ steps.choose.outputs.module }}
+        run: |
+          set -euo pipefail
+          node scripts/stryker-pertest.mjs plan --module "$MODULE" | tee -a "$GITHUB_OUTPUT"
+      # The runner pins the threads pool over any config; `process.chdir()` throws
+      # there and Stryker aborts its dry run on one failing test. A pre-flight
+      # under the same pool drops, and names, the files that cannot run.
+      - name: Pre-flight the planned tests under the threads pool
+        id: preflight
+        env:
+          PILENS_MUTATION_TESTS: ${{ steps.plan.outputs.tests }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/pertest"
+          node_modules/.bin/vitest run --config vitest.mutation.config.ts --pool=threads --reporter=json --outputFile="$RUNNER_TEMP/preflight.json" || true
+          node scripts/stryker-pertest.mjs preflight --tests "$PILENS_MUTATION_TESTS" --report "$RUNNER_TEMP/preflight.json" 2> "$RUNNER_TEMP/pertest/dropped.txt" | tee -a "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/pertest/dropped.txt"
+      - name: Mutate the module
+        id: stryker
+        continue-on-error: true
+        env:
+          PILENS_MUTATION_TESTS: ${{ steps.preflight.outputs.tests }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          set -uo pipefail
+          START=$(date +%s)
+          rc=0
+          node_modules/.bin/stryker run stryker.pertest.config.mjs --mutate "$TARGET" || rc=$?
+          echo "wall_seconds=$(( $(date +%s) - START ))" | tee -a "$GITHUB_OUTPUT"
+          exit "$rc"
+      - name: List tests that kill no mutant
+        if: always()
+        env:
+          MODULE: ${{ steps.choose.outputs.module }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pertest"
+          if [ -f reports/mutation/pertest.json ]; then
+            cp reports/mutation/pertest.json "$RUNNER_TEMP/pertest/pertest.json"
+            node scripts/stryker-pertest.mjs candidates --report reports/mutation/pertest.json --module "$MODULE" --out "$RUNNER_TEMP/pertest/candidates.md" --json-out "$RUNNER_TEMP/pertest/candidates.json"
+            cat "$RUNNER_TEMP/pertest/candidates.md" >> "$GITHUB_STEP_SUMMARY"
+            if [ -s "$RUNNER_TEMP/pertest/dropped.txt" ]; then
+              { echo; echo "Test files the threads pool could not run (not in this report):"; echo '```'; cat "$RUNNER_TEMP/pertest/dropped.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "wall seconds: ${{ steps.stryker.outputs.wall_seconds }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::no mutation report was written"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pertest-report
+          path: ${{ runner.temp }}/pertest/
+          if-no-files-found: error
+          overwrite: true
+      - name: Fail the job when Stryker failed
+        if: steps.stryker.outcome == 'failure'
+        run: |
+          echo "::error::stryker run failed; see the step log"
+          exit 1

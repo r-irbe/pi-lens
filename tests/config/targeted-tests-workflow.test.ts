@@ -1,17 +1,23 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
+import { BUDGET_MS } from "../../scripts/ci-shuffle-changed-tests.mjs";
 import {
 	CI_ONLY_PRE_PUSH_TESTS,
+	TEST_TREE_GOVERNANCE_TESTS,
 	TREE_SCANNING_GOVERNANCE_TESTS,
 } from "../../scripts/pre-push-targeted-tests.mjs";
 import {
 	assertNonEmptyScan,
 	codeMatches,
+	escapeRegExp,
 	listSourceFiles,
+	readWalkedFile,
 	readWalkedFiles,
 	relativePosix,
+	stripSource,
 } from "../support/sweep-kit.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -80,6 +86,223 @@ function walkHelperAliases(source: string): string[] {
 	return [...aliases];
 }
 
+// ── Walks delegated to a tests/support module (#3472) ──────────────────────
+//
+// `countsByDetector` (tests/support/flake-shape-scan.ts) walks the tests tree
+// on behalf of the flake-shape ratchet, so the ratchet's own calls name no
+// walk helper. The census resolves each relative import that lands in
+// tests/support/, finds the exports whose body reaches a walk helper (through
+// module-local functions and through further support imports), and treats a
+// test that calls one of them as a walker. The chunks are column-0
+// declarations of the comment/string-blanked module, not a name list.
+
+const SUPPORT_ROOT = resolve(TESTS_ROOT, "support");
+const DECLARATION =
+	/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z_$][\w$]*)?|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*[:=])/gm;
+const DEFAULT_ARROW_DECLARATION =
+	/^export\s+default\s+(?:async\s+)?(?:<[^;\n]+>\s*)?(?:\([^)]*\)(?:\s*:\s*[^=\n]+)?|[A-Za-z_$][\w$]*)\s*=>/gm;
+const RELATIVE_IMPORT =
+	/\bimport\s+(?:type\s+)?([^;"']*?)\s*from\s*["'](\.[^"']*)["']/g;
+const DEFAULT_EXPORT_ALIAS = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/g;
+const DEFAULT_EXPORT_SPECIFIER = /\bexport\s*\{([^}]*)\}(?!\s*from\b)/g;
+const REEXPORT_SPECIFIER =
+	/\bexport\s*\{([^}]*)\}\s*from\s*["'](\.[^"']*)["']/g;
+const DIRECT_HELPER = new RegExp(`^(?:${WALK_HELPERS})$`);
+const CALLEE = /\b([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*\(/g;
+
+/** Reads a source file by absolute path; `undefined` when it is gone. */
+type SourceReader = (absolute: string) => string | undefined;
+
+interface ImportBinding {
+	file: string;
+	/** The exported name, or `*` for a namespace binding. */
+	imported: string;
+}
+
+interface SupportModule {
+	chunks: Map<string, string>;
+	imports: Map<string, ImportBinding>;
+	reexports: Map<string, ImportBinding>;
+	helpers: RegExp;
+}
+
+// Keep diagnostics concise while counting every distinct miss in this census.
+const SUPPORT_IMPORT_GAP_LIMIT = 16;
+
+function supportImports(
+	from: string,
+	source: string,
+): Map<string, ImportBinding> {
+	const bindings = new Map<string, ImportBinding>();
+	for (const match of codeMatches(source, RELATIVE_IMPORT)) {
+		const resolved = resolve(dirname(from), match[2]).replace(/\.js$/, ".ts");
+		if (!resolved.startsWith(`${SUPPORT_ROOT}${sep}`)) continue;
+		const clause = match[1];
+		const defaultImport = /^([A-Za-z_$][\w$]*)/.exec(clause.trim());
+		if (defaultImport)
+			bindings.set(defaultImport[1], { file: resolved, imported: "default" });
+		const namespace = /\*\s+as\s+([A-Za-z_$][\w$]*)/.exec(clause);
+		if (namespace)
+			bindings.set(namespace[1], { file: resolved, imported: "*" });
+		const named = /\{([^}]*)\}/.exec(clause);
+		for (const specifier of named?.[1].split(",") ?? []) {
+			const [imported, local = imported] = specifier
+				.trim()
+				.replace(/^type\s+/, "")
+				.split(/\s+as\s+/);
+			if (imported) bindings.set(local, { file: resolved, imported });
+		}
+	}
+	return bindings;
+}
+
+function supportModule(file: string, source: string): SupportModule {
+	const blanked = stripSource(source, { strings: "blank" });
+	const starts = [
+		...blanked.matchAll(DECLARATION),
+		...blanked.matchAll(DEFAULT_ARROW_DECLARATION),
+	].sort((left, right) => (left.index ?? 0) - (right.index ?? 0));
+	const chunks = new Map<string, string>();
+	starts.forEach((start, index) => {
+		const end = starts[index + 1]?.index ?? blanked.length;
+		const chunk = blanked.slice(start.index, end);
+		const name = start[1] ?? start[2];
+		if (name) chunks.set(name, chunk);
+		if (/^(?:export\s+)?default\b/.test(start[0])) chunks.set("default", chunk);
+	});
+	for (const [, name] of codeMatches(source, DEFAULT_EXPORT_ALIAS)) {
+		const chunk = chunks.get(name);
+		if (chunk !== undefined) chunks.set("default", chunk);
+	}
+	for (const [, specifiers] of codeMatches(source, DEFAULT_EXPORT_SPECIFIER)) {
+		for (const specifier of specifiers.split(",")) {
+			const [local, exported = local] = specifier
+				.trim()
+				.replace(/^type\s+/, "")
+				.split(/\s+as\s+/);
+			if (exported === "default") {
+				const chunk = chunks.get(local);
+				if (chunk !== undefined) chunks.set("default", chunk);
+			}
+		}
+	}
+	const reexports = new Map<string, ImportBinding>();
+	for (const [, specifiers, specifier] of codeMatches(
+		source,
+		REEXPORT_SPECIFIER,
+	)) {
+		const resolved = resolve(dirname(file), specifier).replace(/\.js$/, ".ts");
+		if (!resolved.startsWith(`${SUPPORT_ROOT}${sep}`)) continue;
+		for (const entry of specifiers.split(",")) {
+			const [imported, exported = imported] = entry
+				.trim()
+				.replace(/^type\s+/, "")
+				.split(/\s+as\s+/);
+			if (imported && exported)
+				reexports.set(exported, { file: resolved, imported });
+		}
+	}
+	const helpers = [WALK_HELPERS, ...walkHelperAliases(source)].join("|");
+	return {
+		chunks,
+		imports: supportImports(file, source),
+		reexports,
+		helpers: new RegExp(`\\b(?:${helpers})\\s*\\(`),
+	};
+}
+
+/**
+ * Answers "does this support export reach a walk helper", caching proven walks
+ * per census. A cycle answers `false` only while that name is being visited.
+ */
+function createSupportWalkIndex(read: SourceReader) {
+	const modules = new Map<string, SupportModule | undefined>();
+	const verdicts = new Map<string, boolean>();
+	const supportImportGaps: string[] = [];
+	let droppedSupportImportGaps = 0;
+	const load = (file: string): SupportModule | undefined => {
+		if (!modules.has(file)) {
+			const source = read(file);
+			if (source === undefined) {
+				if (supportImportGaps.length < SUPPORT_IMPORT_GAP_LIMIT)
+					supportImportGaps.push(file);
+				else droppedSupportImportGaps += 1;
+			}
+			modules.set(
+				file,
+				source === undefined ? undefined : supportModule(file, source),
+			);
+		}
+		return modules.get(file);
+	};
+	const walks = (file: string, name: string): boolean => {
+		const key = `${file}#${name}`;
+		const known = verdicts.get(key);
+		if (known !== undefined) return known;
+		verdicts.set(key, false);
+		const module = load(file);
+		let verdict = false;
+		const reexport = module?.reexports.get(name);
+		if (reexport) {
+			verdict = walks(reexport.file, reexport.imported);
+		} else {
+			const chunk = module?.chunks.get(name);
+			if (module && chunk !== undefined) {
+				verdict = module.helpers.test(chunk);
+				for (const [, callee, member] of chunk.matchAll(CALLEE)) {
+					if (verdict) break;
+					const binding = module.imports.get(callee);
+					if (binding?.imported === "*" && member)
+						verdict = walks(binding.file, member);
+					else if (binding) verdict = walks(binding.file, binding.imported);
+					else if (callee !== name && module.chunks.has(callee))
+						verdict = walks(file, callee);
+				}
+			}
+		}
+		// A false reached through a cycle is provisional, not proof of no walk.
+		if (verdict) verdicts.set(key, true);
+		else verdicts.delete(key);
+		return verdict;
+	};
+	const gapEvidence = () => ({
+		paths: [...supportImportGaps],
+		dropped: droppedSupportImportGaps,
+		total: supportImportGaps.length + droppedSupportImportGaps,
+	});
+	const assertComplete = () => {
+		const evidence = gapEvidence();
+		if (evidence.total > 0) {
+			throw new Error(
+				`support import coverage incomplete (${evidence.total} unreadable path(s); ${evidence.dropped} omitted): ${evidence.paths.join(", ")}`,
+			);
+		}
+	};
+	return {
+		/** Missing paths are request-local; the next census creates a fresh index. */
+		gapEvidence,
+		assertComplete,
+		/** True when `source` calls a support export that walks a tree. */
+		callsSupportWalker(from: string, source: string): boolean {
+			return [...supportImports(from, source)].some(([local, binding]) => {
+				const name = escapeRegExp(local);
+				if (binding.imported === "*") {
+					const members = new RegExp(`\\b${name}\\.([\\w$]+)\\s*\\(`, "g");
+					return codeMatches(source, members).some((call) =>
+						walks(binding.file, call[1]),
+					);
+				}
+				// A direct helper name is judged by the production-root shapes.
+				return (
+					!DIRECT_HELPER.test(binding.imported) &&
+					codeHas(source, new RegExp(`\\b${name}\\s*\\(`, "g")) &&
+					walks(binding.file, binding.imported)
+				);
+			});
+		},
+	};
+}
+
 function shapesFor(walkHelpers: string): Record<string, RegExp> {
 	return {
 		// A walk helper called with a production-root path literal.
@@ -127,11 +350,21 @@ function codeHas(source: string, pattern: RegExp): boolean {
 	return codeMatches(source, pattern).length > 0;
 }
 
-export function isTreeScannerCandidate(source: string): boolean {
+/** Resolves the tests/support walks a file delegates to (#3472). */
+interface SupportWalks {
+	file: string;
+	index: ReturnType<typeof createSupportWalkIndex>;
+}
+
+export function isTreeScannerCandidate(
+	source: string,
+	support?: SupportWalks,
+): boolean {
 	const walkHelpers = [WALK_HELPERS, ...walkHelperAliases(source)].join("|");
 	const SHAPES = shapesFor(walkHelpers);
 	const ANY_WALK = anyWalkFor(walkHelpers);
 	return (
+		support?.index.callsSupportWalker(support.file, source) === true ||
 		codeHas(source, SHAPES.productionWalk) ||
 		codeHas(source, SHAPES.namedProductionWalk) ||
 		(codeHas(source, SHAPES.productionRead) && codeHas(source, FLOOR)) ||
@@ -150,6 +383,8 @@ export function isTreeScannerCandidate(source: string): boolean {
 // A reason is required; `auditRegistry`'s stale-entry check (below) deletes an
 // entry whose file stops matching the scanner shapes.
 const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
+	"tests/build-freshness-guard.test.ts":
+		"runs the freshness helpers over temp roots it builds; its one real-root case checks compiled-twin mtimes, which the pre-push build step satisfies, not a source population",
 	"tests/clients/analyzed-files-producer-coverage.test.ts":
 		"governance sweep over a specific production module or target that import resolution already selects; not a broad production-population scanner",
 	"tests/clients/bus-producer-coverage.test.ts":
@@ -186,8 +421,6 @@ const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"governance sweep over a specific production module or target that import resolution already selects; not a broad production-population scanner",
 	"tests/config/gitignore-tracked-shadow.test.ts":
 		"real-git fixture behavior cases over a temp repository, not a tracked-source population scan",
-	"tests/config/knip-entry-coverage.test.ts":
-		"reads one production file as an input fixture for behavior assertions, not a production population scan",
 	"tests/config/lsp-advertised-capability-senders.test.ts":
 		"governance sweep over a specific production module or target that import resolution already selects; not a broad production-population scanner",
 	"tests/config/lsp-service-double-sweep.test.ts":
@@ -200,6 +433,8 @@ const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"enumerates a production path for behavior/fixture assertions, not a production population scan",
 	"tests/config/sync-child-process-timeout.test.ts":
 		"governance sweep over a specific production module or target that import resolution already selects; not a broad production-population scanner",
+	"tests/config/test-shard-assignment.test.ts":
+		"reads the live test file set for shard placement and duration-snapshot drift, not a production or test-code defect population; unknown files receive the median cost and accumulated missing/stale snapshot entries can cross the 15% drift threshold (regenerated by scripts/gen-test-shard-weights.mjs)",
 	"tests/config/win32-gate-lane.test.ts":
 		"walks the tests/ tree, not the production source population; out of the production tree-scanner registry",
 	"tests/host-sdk-type-only.test.ts":
@@ -208,9 +443,128 @@ const TREE_SCANNER_EXEMPTIONS: Readonly<Record<string, string>> = {
 		"walks the unpacked `npm pack` tarball (the published file set, #3219), not a tracked-source population; its real pack runs in the Unit tests lane",
 	"tests/real-harness/fixture-shape.test.ts":
 		"enumerates a production path for behavior/fixture assertions, not a production population scan",
-	"tests/scripts/pre-push-targeted-tests.test.ts":
+	"tests/real-harness/outside-root.test.ts":
 		"enumerates a production path for behavior/fixture assertions, not a production population scan",
+	"tests/scripts/pre-push-targeted-tests.test.ts":
+		"pins the pre-push selector's production-versus-tests scanner arming against the live collectTestFiles inventory; it checks hook selection classes, not a tests-tree defect population",
+	"tests/support/tests-tree-write-guard-race.test.ts":
+		"exercises the tests-tree write guard against a temp root the test creates; the live tests/ tree is not the population",
+	"tests/support/tests-tree-write-guard.test.ts":
+		"exercises the tests-tree write guard against a temp root the test creates; the live tests/ tree is not the population",
 };
+
+// Independently reviewed admissions for the current exemption set. The reason
+// text above explains each status; its digest pins that reviewed explanation
+// so plausible but unrelated prose cannot silently excuse a live scanner.
+// Adding, deleting, or rewording an exemption requires an explicit admission
+// review here as well as the stale-entry/census checks below.
+const REVIEWED_EXEMPTION_REASON_SHA256: Readonly<Record<string, string>> = {
+	"tests/build-freshness-guard.test.ts":
+		"ea497d088a210d85cef8f2e67ce466fb9bfb9d6e354ab44503b7fbcf61dc6f09",
+	"tests/clients/analyzed-files-producer-coverage.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/bus-producer-coverage.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/cargo-manifest.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/config-diagnostic-codes.test.ts":
+		"328eedc0f2ae31de9712393c0b6bb60bed4b2b7ee26f33e331ea9a8dd9bd9640",
+	"tests/clients/config-notice-bounds.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/data-dir-display-path-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/deps-centralization.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/dispatch/runners/exit-table-governance.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/dispatch/runners/runner-spawn-cwd-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/lsp/launch.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/mutating-tool-classification.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/ndjson-writer-conformance.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/clients/pi-lens-home-hermeticity.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/safe-spawn-default-output-cap.test.ts":
+		"962f7e39a3c4804aa1a9a15ab5716bab85cae3094e46f983444c81c219934703",
+	"tests/clients/socket-error-listener-sweep.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/clients/workspace-topology-conformance.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/bounded-eviction-idiom-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/gitignore-tracked-shadow.test.ts":
+		"328eedc0f2ae31de9712393c0b6bb60bed4b2b7ee26f33e331ea9a8dd9bd9640",
+	"tests/config/lsp-advertised-capability-senders.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/lsp-service-double-sweep.test.ts":
+		"603e6212ad082ac4ed3c67fb1a7e1520c7caeb948dc81b0dbefb6b789fc1e459",
+	"tests/config/path-key-fold-sweep.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/process-table-seam.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/script-entry-portability.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/config/sync-child-process-timeout.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/config/test-shard-assignment.test.ts":
+		"60a56bf699306e0bc49c7170e00f7dafd11b34b67f1793c2d5e89d2cd5d19a0e",
+	"tests/config/win32-gate-lane.test.ts":
+		"603e6212ad082ac4ed3c67fb1a7e1520c7caeb948dc81b0dbefb6b789fc1e459",
+	"tests/host-sdk-type-only.test.ts":
+		"a5f39f74f8b98ecb71fd32eca749b87f32253b782a3ceb03e421ca71cfa22e88",
+	"tests/packaging-pack-manifest.test.ts":
+		"a23d57340227888c7a1cdef6804380a521059657a230689a9f04cc1f14b36823",
+	"tests/real-harness/fixture-shape.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/real-harness/outside-root.test.ts":
+		"d7b3f6416a0c3322ccacd55c509f742554dda016cb99a2ff0f383ef33578ae13",
+	"tests/scripts/pre-push-targeted-tests.test.ts":
+		"16cca8c9c3dc8ab143a20b9464160dc66889beff2afa1e442a5a2bf6e4ef0a59",
+	"tests/support/tests-tree-write-guard-race.test.ts":
+		"80ad6f38da37fe72579a02e932e78067e7d8dbb3fcc288547ccf68b805780833",
+	"tests/support/tests-tree-write-guard.test.ts":
+		"80ad6f38da37fe72579a02e932e78067e7d8dbb3fcc288547ccf68b805780833",
+};
+
+function exemptionAdmissionDrift(
+	exemptions: Readonly<Record<string, string>> = TREE_SCANNER_EXEMPTIONS,
+): string[] {
+	const admitted = Object.entries(exemptions).map(
+		([file, reason]) =>
+			[file, createHash("sha256").update(reason).digest("hex")] as const,
+	);
+	const current = Object.fromEntries(admitted);
+	return [
+		...new Set([
+			...Object.keys(REVIEWED_EXEMPTION_REASON_SHA256).filter(
+				(file) => !Object.hasOwn(current, file),
+			),
+			...Object.entries(current)
+				.filter(
+					([file, digest]) => REVIEWED_EXEMPTION_REASON_SHA256[file] !== digest,
+				)
+				.map(([file]) => file),
+		]),
+	].sort();
+}
+
+function discoverTreeScannersFromWalk(
+	walked: readonly { file: string; source: string }[],
+	readSupport: SourceReader,
+): string[] {
+	const index = createSupportWalkIndex(readSupport);
+	const discovered = walked
+		.filter(({ file, source }) =>
+			isTreeScannerCandidate(source, { file, index }),
+		)
+		.map(({ file }) => relativePosix(ROOT, file))
+		.sort();
+	index.assertComplete();
+	return discovered;
+}
 
 /** The scanner population discovered on this tree, repo-relative and sorted. */
 export function discoveredTreeScanners(): string[] {
@@ -219,10 +573,7 @@ export function discoveredTreeScanners(): string[] {
 		.filter((file) => relativePosix(ROOT, file) !== SELF);
 	// readWalkedFiles, not readFileSync: a path that vanished between the walk
 	// and the read is out of the population, not a finding (#3082).
-	return readWalkedFiles(walked)
-		.filter(({ source }) => isTreeScannerCandidate(source))
-		.map(({ file }) => relativePosix(ROOT, file))
-		.sort();
+	return discoverTreeScannersFromWalk(readWalkedFiles(walked), readWalkedFile);
 }
 
 // One census per worker: two assertions read the same walking of ~1,200 files.
@@ -241,13 +592,19 @@ function readWorkflow() {
 				name?: string;
 				if?: string;
 				"continue-on-error"?: boolean;
+				"timeout-minutes"?: number;
 				steps?: Array<{
+					name?: string;
+					if?: string;
+					"timeout-minutes"?: number;
+					env?: Record<string, string>;
 					uses?: string;
 					run?: string;
 					with?: Record<string, unknown>;
 				}>;
 			}
 		>;
+		on: Record<string, unknown>;
 	};
 }
 
@@ -259,18 +616,22 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			const expectedRegistry = discovered.filter(
 				(file) => !Object.hasOwn(TREE_SCANNER_EXEMPTIONS, file),
 			);
-
 			// Mechanical equality in both directions: an unregistered scanner reds,
 			// including one that calls a walk helper through an import alias
 			// (`fg("clients/**")`, #3448), and a registry entry that is no longer a
-			// scanner reds. Not seen: a helper renamed through a dynamic `import()`
-			// or `require`, which no test in this tree uses.
-			expect(expectedRegistry).toEqual(
-				[...TREE_SCANNING_GOVERNANCE_TESTS].sort(),
-			);
-			expect(new Set(TREE_SCANNING_GOVERNANCE_TESTS).size).toBe(
-				TREE_SCANNING_GOVERNANCE_TESTS.length,
-			);
+			// scanner reds, as does one whose walk lives in an imported
+			// tests/support module (#3472). Not seen: a helper renamed through a
+			// dynamic `import()` or `require`, or a support export that only a
+			// `export … from` re-export reaches (hook-await-scan.ts re-exports an
+			// .mjs; its tree walkers are already the named production shapes).
+			// A scanner may sit in either list (#3472): the production list is
+			// armed by a production change, the tests-tree list by a tests/ change.
+			const registered = [
+				...TREE_SCANNING_GOVERNANCE_TESTS,
+				...TEST_TREE_GOVERNANCE_TESTS,
+			];
+			expect(expectedRegistry).toEqual([...registered].sort());
+			expect(new Set(registered).size).toBe(registered.length);
 
 			// Dead-sweep floors (AGENTS.md shape 10, #1718): the census cannot pass
 			// by discovering nothing. Registered through the sweep-kit seam so the
@@ -293,6 +654,34 @@ describe("targeted advisory workflow contract (#3215)", () => {
 				.filter(([, reason]) => reason.trim().length < 20)
 				.map(([file]) => file);
 			expect(reasonless).toEqual([]);
+			expect(exemptionAdmissionDrift()).toEqual([]);
+			// #3951 N1: a reworded reviewed reason must fail its digest pin.
+			const reviewedRow = "tests/build-freshness-guard.test.ts";
+			expect(
+				exemptionAdmissionDrift({
+					...TREE_SCANNER_EXEMPTIONS,
+					[reviewedRow]: `${TREE_SCANNER_EXEMPTIONS[reviewedRow]}.`,
+				}),
+			).toEqual([reviewedRow]);
+
+			// #3951 N1: a missing reviewed row must be reported.
+			const withoutReviewedRow = Object.fromEntries(
+				Object.entries(TREE_SCANNER_EXEMPTIONS).filter(
+					([file]) => file !== reviewedRow,
+				),
+			);
+			expect(exemptionAdmissionDrift(withoutReviewedRow)).toEqual([
+				reviewedRow,
+			]);
+			// #3951 F2: plausible prose must not let a live scanner migrate into
+			// exemptions and disappear from the independently reviewed admission.
+			expect(
+				exemptionAdmissionDrift({
+					...TREE_SCANNER_EXEMPTIONS,
+					"tests/config/tmp-fixture-hygiene.test.ts":
+						"this is a plausible but unreviewed reason for exemption",
+				}),
+			).toEqual(["tests/config/tmp-fixture-hygiene.test.ts"]);
 			const stale = Object.keys(TREE_SCANNER_EXEMPTIONS).filter(
 				(file) => !discovered.has(file),
 			);
@@ -317,7 +706,7 @@ describe("targeted advisory workflow contract (#3215)", () => {
 			step.uses?.startsWith("actions/setup-node@"),
 		);
 		expect(setupNode?.uses).toBe(
-			"actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+			"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 		);
 	});
 
@@ -345,6 +734,47 @@ describe("targeted advisory workflow contract (#3215)", () => {
 		);
 		expect(selector).toContain("GITHUB_STEP_SUMMARY");
 		expect(selector).toContain("cap exceeded");
+	});
+
+	// #4397 recurrence: a PR's new test file that depends on case order passes
+	// in CI's file order and reds on a reorder or a shard split (#4390, #4391).
+	// The step below is the only thing that reorders it before merge, so a
+	// reworded step name, a dropped `env`, or SHAs spliced into `run:` (event
+	// data in a shell string) must red here.
+	it("runs the changed-test shuffle step after the build, with the SHAs in env only (#4397)", () => {
+		const workflow = readWorkflow();
+		const job = workflow.jobs["targeted-tests-advisory"];
+		const steps = job?.steps ?? [];
+		const index = steps.findIndex(
+			(step) => step.name === "Changed test files, alone and shuffled",
+		);
+		expect(index).toBeGreaterThan(-1);
+		const step = steps[index];
+		expect(step.run).toBe(
+			'node scripts/ci-shuffle-changed-tests.mjs --base "$BASE_SHA" --head "$HEAD_SHA"',
+		);
+		expect(step.run).not.toContain("${{");
+		expect(step.env).toMatchObject({
+			BASE_SHA: "${{ github.event.pull_request.base.sha }}",
+			HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
+		});
+		// It follows the build and the selector run: the compiled twins exist.
+		expect(index).toBeGreaterThan(
+			steps.findIndex((other) => other.run === "npm run build"),
+		);
+		expect(index).toBeGreaterThan(
+			steps.findIndex((other) => other.name === "Run targeted tests"),
+		);
+		// A red selector must not skip it, and a cancelled run must.
+		expect(step.if).toBe("${{ !cancelled() }}");
+		// The script's own budget sits under the step cap, the step cap under
+		// the job's (15 min).
+		const stepCap = step["timeout-minutes"] ?? Infinity;
+		expect(stepCap * 60_000).toBeGreaterThan(BUDGET_MS);
+		expect(stepCap).toBeLessThan(job?.["timeout-minutes"] ?? 0);
+		// pull_request, never pull_request_target: the step runs the PR's code.
+		expect(Object.keys(workflow.on)).toContain("pull_request");
+		expect(Object.keys(workflow.on)).not.toContain("pull_request_target");
 	});
 });
 
@@ -410,6 +840,368 @@ describe("tree-scanner census — import aliases are resolved (#3448)", () => {
 			),
 		).toBe(false);
 	});
+});
+
+// #3472: a walk delegated to a tests/support module. `scan.ts` below stands in
+// for tests/support/flake-shape-scan.ts: the test names no walk helper, and the
+// export it calls reaches one through module-local functions or other support
+// modules. The reader is in-memory, so no file on disk decides these cases.
+describe("tree-scanner census — walks delegated to tests/support (#3472)", () => {
+	const TEST_FILE = resolve(TESTS_ROOT, "clients/subject.test.ts");
+	const WALKING_SCAN = [
+		"export function counts(detector: string) {",
+		"	return files().length + detector.length;",
+		"}",
+		"function files() {",
+		"	return listSourceFiles(ROOT);",
+		"}",
+	].join("\n");
+
+	function candidate(source: string, modules: Record<string, string>): boolean {
+		const read = (absolute: string) =>
+			modules[relativePosix(SUPPORT_ROOT, absolute)];
+		return isTreeScannerCandidate(source, {
+			file: TEST_FILE,
+			index: createSupportWalkIndex(read),
+		});
+	}
+
+	it.each([
+		[
+			"a module-local helper reached from the export",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{ "scan.ts": WALKING_SCAN },
+		],
+		[
+			"an arrow-function export",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts": "export const counts = (d: string) =>\n	readdirSync(d);",
+			},
+		],
+		[
+			"an aliased import",
+			'import { counts as c } from "../support/scan.js";\nc("x");',
+			{ "scan.ts": WALKING_SCAN },
+		],
+		[
+			"a named default export import",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default function counts(d: string) {\n\treturn listSourceFiles(d);\n}",
+			},
+		],
+		[
+			"an anonymous default function import",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default function(d: string) {\n\treturn listSourceFiles(d);\n}",
+			},
+		],
+		[
+			"a default arrow expression import",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts": "export default (d: string) => listSourceFiles(d);",
+			},
+		],
+		[
+			"a default arrow expression with a return annotation",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default (d: string): string[] => listSourceFiles(d);",
+			},
+		],
+		[
+			"a generic default arrow expression",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default <T extends string>(d: T): string[] => listSourceFiles(d);",
+			},
+		],
+		[
+			"a default import of a local function assignment",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"function counts(d: string) {\n\treturn listSourceFiles(d);\n}\nexport default counts;",
+			},
+		],
+		[
+			"a default import of a named export alias",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"const counts = (d: string) => listSourceFiles(d);\nexport { counts as default };",
+			},
+		],
+		[
+			"a namespace import",
+			'import * as scan from "../support/scan.js";\nscan.counts("x");',
+			{ "scan.ts": WALKING_SCAN },
+		],
+		[
+			"a second support module",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					'import { allFiles } from "./inner.js";\nexport function counts(d: string) {\n	return allFiles(d);\n}',
+				"inner.ts":
+					"export function allFiles(d: string) {\n	return glob(d);\n}",
+			},
+		],
+		[
+			"a walk helper the support module renames",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					'import { readdirSync as ls } from "node:fs";\nexport function counts(d: string) {\n	return ls(d);\n}',
+			},
+		],
+		[
+			"a walking default re-export",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts": 'export { default } from "./inner.js";',
+				"inner.ts": "export default (d: string) => listSourceFiles(d);",
+			},
+		],
+	])("detects %s", (_label, source, modules) => {
+		expect(candidate(source, modules)).toBe(true);
+	});
+
+	it.each([
+		[
+			"an export whose body does not walk",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts": "export function counts(d: string) {\n	return d.length;\n}",
+			},
+		],
+		[
+			"a default export whose body does not walk",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					"export default function counts(d: string) {\n\treturn d.length;\n}",
+			},
+		],
+		[
+			"a sourced default re-export instead of a same-name local walker",
+			'import scan from "../support/scan.js";\nscan("x");',
+			{
+				"scan.ts":
+					'function scan(d: string) { return listSourceFiles(d); }\nexport { scan as default } from "./inner.js";',
+				"inner.ts":
+					"export default function scan(d: string) { return d.length; }",
+			},
+		],
+		[
+			"a walk named only in a support comment or string",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts":
+					'// readdirSync(ROOT) is not a walk\nexport function counts(d: string) {\n	return "listSourceFiles(ROOT)" + d;\n}',
+			},
+		],
+		[
+			"a walking export that is imported but never called",
+			'import { counts } from "../support/scan.js";\n// counts("x");',
+			{ "scan.ts": WALKING_SCAN },
+		],
+		[
+			"a module outside tests/support",
+			'import { counts } from "../../clients/scan.js";\ncounts("x");',
+			{ "../../clients/scan.ts": WALKING_SCAN },
+		],
+		[
+			"a re-export target outside tests/support",
+			'import { counts } from "../support/scan.js";\ncounts("x");',
+			{
+				"scan.ts": 'export { counts } from "../../clients/string-utils.js";',
+				"../../clients/string-utils.ts": WALKING_SCAN,
+			},
+		],
+		[
+			"a direct helper name, which the production-root shapes judge",
+			'import { listSourceFiles } from "../support/kit.js";\nlistSourceFiles(dir);',
+			{
+				"kit.ts":
+					"export function listSourceFiles(d: string) {\n	return readdirSync(d);\n}",
+			},
+		],
+		[
+			"a call cycle with no walk in it",
+			'import { a } from "../support/scan.js";\na();',
+			{
+				"scan.ts":
+					"export function a() {\n	return b();\n}\nfunction b() {\n	return a();\n}",
+			},
+		],
+	])("does NOT detect %s", (_label, source, modules) => {
+		expect(candidate(source, modules)).toBe(false);
+	});
+
+	// #3472: one census shares the index across files; resolving a cycle from
+	// one export must not hide another export's reachable walk later.
+	it("does not cache a cycle cut as a non-walking export", () => {
+		const source = [
+			"export function a(depth = 1) { if (depth > 0) return b(depth - 1); return files(); }",
+			"export function b(depth = 1) { return a(depth); }",
+			"function files() { return listSourceFiles(ROOT); }",
+		].join("\n");
+		const index = createSupportWalkIndex(() => source);
+		for (const name of ["a", "b", "a", "b"]) {
+			expect(
+				index.callsSupportWalker(
+					TEST_FILE,
+					`import { ${name} } from "../support/scan.js";\n${name}();`,
+				),
+				name,
+			).toBe(true);
+		}
+	});
+
+	it("follows namespace calls inside support modules", () => {
+		expect(
+			candidate('import { counts } from "../support/scan.js";\ncounts();', {
+				"scan.ts":
+					'import * as inner from "./inner.js";\nexport function counts() { return inner.files(); }',
+				"inner.ts": "export function files() { return readdirSync(ROOT); }",
+			}),
+		).toBe(true);
+	});
+
+	it("does not attribute a sibling export's walk to a non-walking export", () => {
+		expect(
+			candidate('import { counts } from "../support/scan.js";\ncounts();', {
+				"scan.ts":
+					"export function counts() { return 0; }\nexport function files() { return readdirSync(ROOT); }",
+			}),
+		).toBe(false);
+	});
+
+	it("ignores missing support modules and quoted namespace calls", () => {
+		expect(
+			candidate(
+				'import { counts } from "../support/missing.js";\ncounts();',
+				{},
+			),
+		).toBe(false);
+		expect(
+			candidate(
+				'import * as scan from "../support/scan.js";\n"scan.counts()"; // scan.counts()',
+				{
+					"scan.ts": WALKING_SCAN,
+				},
+			),
+		).toBe(false);
+	});
+
+	it("records a missing relative support import read by the real reader", () => {
+		const testFile = resolve(
+			TESTS_ROOT,
+			"config/targeted-tests-workflow.test.ts",
+		);
+		const index = createSupportWalkIndex(readWalkedFile);
+		const source =
+			'import { counts } from "../support/__census_gap_probe__.js";\ncounts();';
+
+		expect(index.callsSupportWalker(testFile, source)).toBe(false);
+		expect(index.gapEvidence()).toEqual({
+			paths: [resolve(SUPPORT_ROOT, "__census_gap_probe__.ts")],
+			dropped: 0,
+			total: 1,
+		});
+		expect(() => index.assertComplete()).toThrow(
+			/support import coverage incomplete \(1 unreadable path\(s\); 0 omitted\)/,
+		);
+	});
+
+	it("fails closed at the census boundary when a support import is unreadable", () => {
+		const testFile = resolve(
+			TESTS_ROOT,
+			"config/targeted-tests-workflow.test.ts",
+		);
+		const walked = [
+			{
+				file: testFile,
+				source:
+					'import { counts } from "../support/__census_boundary_gap__.js";\ncounts();',
+			},
+		];
+
+		expect(() => discoverTreeScannersFromWalk(walked, () => undefined)).toThrow(
+			/support import coverage incomplete \(1 unreadable path\(s\); 0 omitted\)/,
+		);
+	});
+
+	it("caps missing-import paths and counts every distinct omitted path", () => {
+		const count = 20;
+		const source = Array.from({ length: count }, (_, index) => {
+			const name = `count${index}`;
+			return `import { scan as ${name} } from "../support/gap-${index}.js";\n${name}();`;
+		}).join("\n");
+		const index = createSupportWalkIndex(() => undefined);
+
+		expect(index.callsSupportWalker(TEST_FILE, source)).toBe(false);
+		const evidence = index.gapEvidence();
+		expect(evidence.paths).toHaveLength(16);
+		expect(evidence.dropped).toBe(4);
+		expect(evidence.total).toBe(count);
+	});
+
+	it("retries a missing support module in the next census request", () => {
+		const testFile = resolve(
+			TESTS_ROOT,
+			"config/targeted-tests-workflow.test.ts",
+		);
+		const source =
+			'import { counts } from "../support/appears_later.js";\ncounts();';
+		const first = createSupportWalkIndex(readWalkedFile);
+		const second = createSupportWalkIndex(
+			() => "export function counts() { return listSourceFiles(ROOT); }",
+		);
+
+		expect(first.callsSupportWalker(testFile, source)).toBe(false);
+		expect(first.gapEvidence().total).toBe(1);
+		expect(second.callsSupportWalker(testFile, source)).toBe(true);
+		expect(second.gapEvidence()).toEqual({ paths: [], dropped: 0, total: 0 });
+	});
+
+	it("resolves countsByDetector to the real tests-tree walk behind it", () => {
+		const ratchet = resolve(TESTS_ROOT, "clients/flake-shape-ratchet.test.ts");
+		const index = createSupportWalkIndex(readWalkedFile);
+		const call =
+			'import { countsByDetector } from "../support/flake-shape-scan.js";\ncountsByDetector("raw-timer-wait");';
+		expect(index.callsSupportWalker(ratchet, call)).toBe(true);
+	});
+
+	it(
+		"registers the flake-shape ratchet as a tests-tree scanner",
+		() => {
+			const ratchet = "tests/clients/flake-shape-ratchet.test.ts";
+			expect(census()).toContain(ratchet);
+			expect(TEST_TREE_GOVERNANCE_TESTS).toContain(ratchet);
+			expect(TREE_SCANNING_GOVERNANCE_TESTS).not.toContain(ratchet);
+		},
+		CENSUS_TIMEOUT_MS,
+	);
+
+	it(
+		"registers the host event-shape scan as a tests-tree scanner",
+		() => {
+			const scanner = "tests/support/host-event-shape-scan.test.ts";
+			expect(census()).toContain(scanner);
+			expect(TEST_TREE_GOVERNANCE_TESTS).toContain(scanner);
+			expect(TREE_SCANNING_GOVERNANCE_TESTS).not.toContain(scanner);
+		},
+		CENSUS_TIMEOUT_MS,
+	);
 });
 
 describe("CI-only pre-push tier (#3426 H3432-1)", () => {

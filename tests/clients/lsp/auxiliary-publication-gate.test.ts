@@ -7,7 +7,9 @@ import { setupTestEnvironment } from "../test-utils.js";
 
 interface PublicationGateHarness {
 	state: { clients: Map<string, unknown> };
-	resolveServerRoot: () => Promise<string>;
+	clientRegistry: {
+		resolveServerRoot: () => Promise<string>;
+	};
 	hasServerPublishedForFileRoot(
 		serverId: string,
 		filePath: string,
@@ -46,7 +48,7 @@ describe("auxiliary first-publication gate", () => {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const value = 1;\n");
 			const service = new LSPService() as unknown as PublicationGateHarness;
-			service.resolveServerRoot = async () => env.tmpDir;
+			service.clientRegistry.resolveServerRoot = async () => env.tmpDir;
 			const client = makeFakeClient();
 			service.state.clients.set(
 				`ast-grep:${normalizeMapKey(env.tmpDir)}`,
@@ -79,7 +81,7 @@ describe("auxiliary first-publication gate", () => {
 			fs.writeFileSync(fileA, "const a = 1;\n");
 			fs.writeFileSync(fileB, "const b = 2;\n");
 			const service = new LSPService() as unknown as PublicationGateHarness;
-			service.resolveServerRoot = async () => env.tmpDir;
+			service.clientRegistry.resolveServerRoot = async () => env.tmpDir;
 			const client = makeFakeClient();
 			service.state.clients.set(
 				`ast-grep:${normalizeMapKey(env.tmpDir)}`,

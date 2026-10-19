@@ -8,17 +8,15 @@ vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
 }));
 
 import {
-	clearRememberedLazyTools,
 	getRememberedLazyTools,
 	isFreshSessionStart,
+	lazyToolMemoryStore,
 	planToolSet,
 	recordToolSetMutation,
 	rememberLazyTools,
-	inheritRememberedLazyTools,
-	resetRememberedLazyToolsForTests,
-	REMEMBERED_LAZY_TOOLS_MAX_SESSIONS,
 	supportsDeferredTools,
 } from "../../clients/tool-set-policy.js";
+import { beginScope } from "../../clients/session-scope.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -38,78 +36,62 @@ describe("tool-set cache policy", () => {
 	beforeEach(() => {
 		logLatency.mockClear();
 		resetDegradationLedger();
-		resetRememberedLazyToolsForTests();
 	});
 
-	it("records missing session-file identity once when activation memory is unavailable", () => {
+	it("records a missing session scope once when activation memory is unavailable", () => {
 		rememberLazyTools(undefined, ["ast_grep_search"]);
 		rememberLazyTools(undefined, ["ast_grep_replace"]);
 
 		expect(getDegradationSummary()).toEqual([
 			expect.objectContaining({
-				kind: "tool-set-session-file-unavailable",
+				kind: "tool-set-scope-unavailable",
 				count: 1,
-				latestReasons: [
-					expect.objectContaining({
-						reason:
-							"session-file identity unavailable; activation memory is inert",
-					}),
-				],
 			}),
 		]);
 	});
 
-	it("bounds remembered session files with FIFO eviction", () => {
-		for (let i = 0; i < REMEMBERED_LAZY_TOOLS_MAX_SESSIONS + 1; i++) {
-			rememberLazyTools(`bounded-${i}`, ["ast_grep_search"]);
-		}
-		expect([...getRememberedLazyTools("bounded-0")]).toEqual([]);
-		expect([
-			...getRememberedLazyTools(
-				`bounded-${REMEMBERED_LAZY_TOOLS_MAX_SESSIONS}`,
-			),
-		]).toEqual(["ast_grep_search"]);
-	});
+	it("keeps each scope's activations its own, in activation order (#3653)", () => {
+		const primary = beginScope({ role: "primary" });
+		const secondary = beginScope({ role: "secondary" });
+		rememberLazyTools(primary, ["ast_grep_search"]);
+		rememberLazyTools(secondary, ["lsp_navigation"]);
+		rememberLazyTools(primary, ["ast_grep_replace", "ast_grep_search"]);
 
-	it("copies the parent's activation posture to a fork session file", () => {
-		rememberLazyTools("parent-file", ["ast_grep_search"]);
-		inheritRememberedLazyTools("parent-file", "child-file");
-		expect([...getRememberedLazyTools("child-file")]).toEqual([
+		expect([...getRememberedLazyTools(primary)]).toEqual([
 			"ast_grep_search",
+			"ast_grep_replace",
 		]);
+		expect([...getRememberedLazyTools(secondary)]).toEqual(["lsp_navigation"]);
+		expect([...getRememberedLazyTools(undefined)]).toEqual([]);
 	});
 
-	it("records activation in the session-file store before a factory re-run", () => {
-		clearRememberedLazyTools("policy-before-rebuild");
-		rememberLazyTools("policy-before-rebuild", ["ast_grep_search"]);
-		expect([...getRememberedLazyTools("policy-before-rebuild")]).toEqual([
+	it("snapshots a scope's activations and restores them into another, skipping a malformed payload (#3604)", () => {
+		const parent = beginScope({ role: "primary" });
+		rememberLazyTools(parent, ["ast_grep_search", "lsp_navigation"]);
+		const snapshot = lazyToolMemoryStore.snapshot(parent);
+		expect(snapshot).toEqual(["ast_grep_search", "lsp_navigation"]);
+
+		const child = beginScope({ role: "primary" });
+		const ctx = {
+			reason: "fork" as const,
+			source: "slot" as const,
+			savedAt: undefined,
+			sessionManager: undefined,
+			cwd: "/",
+		};
+		void lazyToolMemoryStore.restore(
+			child,
+			JSON.parse(JSON.stringify(snapshot)),
+			ctx,
+		);
+		void lazyToolMemoryStore.restore(child, { names: ["x"] }, ctx);
+		void lazyToolMemoryStore.restore(child, [42, "ast_grep_outline"], ctx);
+
+		expect([...getRememberedLazyTools(child)]).toEqual([
 			"ast_grep_search",
+			"lsp_navigation",
+			"ast_grep_outline",
 		]);
-	});
-
-	it("keeps activation isolated by session file", () => {
-		clearRememberedLazyTools("policy-file-a");
-		clearRememberedLazyTools("policy-file-b");
-		rememberLazyTools("policy-file-a", ["ast_grep_search"]);
-		expect([...getRememberedLazyTools("policy-file-b")]).toEqual([]);
-	});
-
-	it("clears activation when a conversation switches session file", () => {
-		rememberLazyTools("policy-switched", ["ast_grep_search"]);
-		clearRememberedLazyTools("policy-switched");
-		expect([...getRememberedLazyTools("policy-switched")]).toEqual([]);
-	});
-
-	it("does not create process-restart state without a session-file write", () => {
-		// Clearing an unknown file must not plant state a restart could read
-		// back, and clearing a written file must drop it through the real
-		// store. Mutation G (clear neutered to a no-op) leaves the written
-		// entry behind and reds the second assertion.
-		clearRememberedLazyTools("policy-restart-unknown");
-		expect([...getRememberedLazyTools("policy-restart-unknown")]).toEqual([]);
-		rememberLazyTools("policy-restart", ["ast_grep_search"]);
-		clearRememberedLazyTools("policy-restart");
-		expect([...getRememberedLazyTools("policy-restart")]).toEqual([]);
 	});
 
 	it("classifies only startup and new as fresh logical sessions", () => {

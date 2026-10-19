@@ -1,0 +1,41 @@
+{
+  "tests/mcp/analyze-coverage-repeat.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/analyze-graph.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/auto-session.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/build-staleness.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/clients/module-report-call-graph.test.ts": {
+    "reason": "grammar-heavy fixture matrix depends on optional tree-sitter grammars"
+  },
+  "tests/mcp/server.smoke.test.ts": {
+    "reason": "real stdio child and latency payload are scheduling-sensitive"
+  },
+  "tests/mcp/module-report.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/root-eviction.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/session-end.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/symbol-search.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/mcp/turn-end-route.smoke.test.ts": {
+    "reason": "real stdio child starts the built MCP entry and is scheduling-sensitive"
+  },
+  "tests/index-1892-scanner-freshness-witness.test.ts": {
+    "reason": "host witness uses real cache and scanner lifecycle state"
+  },
+  "tests/scripts/lint-js.test.ts": {
+    "reason": "oxlint lints Stryker's in-place instrumented .mjs and fires no-func-assign on the stryMutAct_* helpers whenever an .mjs file is a mutate target (#4108 verify N1)"
+  }
+}

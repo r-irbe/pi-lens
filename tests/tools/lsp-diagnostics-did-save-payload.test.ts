@@ -121,6 +121,7 @@ describe("#3405 M3406-1 — didSave payload from the explicit lsp_diagnostics qu
 			getDiagnosticBinding: vi.fn(() => undefined),
 			// The REAL notify path, against the mock transport on `state`.
 			notify: {
+				announceCreated: () => undefined,
 				open: (
 					filePath: string,
 					content: string,

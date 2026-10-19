@@ -111,6 +111,7 @@ describe("#2358 — CPU-liveness discriminator on a real wedged scanner", () => 
 			name: "opengrep",
 			role: "auxiliary" as const,
 			extensions: [".ts"],
+			idleEviction: "resident",
 			root: async () => ROOT,
 			spawn: async () => {
 				const { spawnFakeLspServer } =
@@ -248,7 +249,10 @@ describe("#2358 — CPU-liveness discriminator on a real wedged scanner", () => 
 		expect(broken()).toBe(false);
 		expect(clientStillRegistered()).toBe(true);
 		// The adaptive timer re-arms while busy, but detail telemetry remains
-		// rising-edge bounded for this server/file identity.
+		// rising-edge bounded for this server/file identity. Drain first (#4381):
+		// a second busy row or a demotion row queued during the wait above would
+		// otherwise be missed, and both counts would pass on an undrained sink.
+		await latencyLogger?.flushLatencyLog();
 		expect(rowsFor("lsp_notify_stall_cpu_busy")).toHaveLength(1);
 		expect(rowsFor("lsp_notify_backpressure_broken")).toHaveLength(0);
 	}, 30_000);

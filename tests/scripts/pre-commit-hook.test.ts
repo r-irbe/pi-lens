@@ -45,6 +45,39 @@ describe.skipIf(process.platform === "win32")(
 		const oxfmtBin = path.join(repoRoot, "node_modules", ".bin", "oxfmt");
 		const UNFORMATTED = "const  a=1\n";
 
+		it.each([
+			"HANDBACK_4034.md",
+			"REVIEW_notes.md",
+			"VERIFY_result.md",
+			"INVESTIGATION_case.md",
+			"REVIEW.md",
+			"INVESTIGATION.md",
+			"MONITOR.md",
+			"PR_BODY.md",
+			"COMMIT_MSG.txt",
+		])("refuses a staged root handoff file with a named rule: %s", (file) => {
+			enterFixture();
+			const dir = fixtureDir as string;
+			const env = gitFixtureEnv(dir);
+			fs.copyFileSync(
+				path.join(repoRoot, ".husky/pre-commit"),
+				path.join(dir, "pre-commit"),
+			);
+			fs.chmodSync(path.join(dir, "pre-commit"), 0o755);
+			const git = (...args: string[]) =>
+				gitExecFileSync("git", args, { cwd: dir, env, encoding: "utf8" });
+			git("init", "-q");
+			write(file, "handoff\n");
+			git("add", "-f", "--", file);
+			const result = spawnSync("sh", [path.join(dir, "pre-commit")], {
+				cwd: dir,
+				env: { ...env, PI_LENS_SKIP_HOOKS: "" },
+				encoding: "utf8",
+			});
+			expect(result.status).toBe(1);
+			expect(result.stderr).toContain(`refusing rule handoff-file: ${file}`);
+		});
+
 		function commitHook(stage: Record<string, string>) {
 			enterFixture();
 			const dir = fixtureDir as string;

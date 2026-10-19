@@ -58,6 +58,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
+import { pathsEqual } from "../../../../clients/path-utils.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
 const { safeSpawnAsync, unavailableCommands, CARGO_PATH } = vi.hoisted(() => ({
@@ -274,7 +275,7 @@ async function dispatch(
 const cwdRelative =
 	(member: Member) =>
 	({ runnerCwd, argvPath }: Spelling) =>
-		path.relative(runnerCwd, argvPath).split(path.sep).join("/") || member.file;
+		relativePath(runnerCwd, argvPath).split(/[\\/]/).join("/") || member.file;
 
 /** The spelling a tool emits when it echoes the absolute argv path back. */
 const echoesArgv = ({ argvPath }: Spelling) => argvPath;
@@ -293,7 +294,9 @@ function expectAttached(observed: Observed, member: Member): void {
 	);
 	expect(attributed).toHaveLength(1);
 	expect(attributed[0]?.line).toBe(4);
-	expect(attributed[0]?.filePath).toBe(observed.dispatchedPath);
+	expect(
+		pathsEqual(attributed[0]?.filePath ?? "", observed.dispatchedPath),
+	).toBe(true);
 	expect(observed.status).toBe(member.attached.status);
 	expect(observed.semantic).toBe(member.attached.semantic);
 }
@@ -316,6 +319,13 @@ function expectDetached(observed: Observed): void {
 function expectFilesystemAnswer(observed: Observed, member: Member): void {
 	if (HOST_FOLDS_PATH_CASE) expectAttached(observed, member);
 	else expectDetached(observed);
+}
+
+function relativePath(from: string, target: string): string {
+	const pathApi = /^[A-Za-z]:|^\\/.test(from) ? path.win32 : path.posix;
+	const canonicalFrom = fs.realpathSync.native(from);
+	const canonicalTarget = fs.realpathSync.native(target);
+	return pathApi.relative(canonicalFrom, canonicalTarget);
 }
 /**
  * gleam's own rendering of a located error, byte-identical to the upstream
@@ -804,9 +814,8 @@ describe("runner reported-path attribution (#3295)", () => {
 /** `cue` prefixes a cwd-relative position with `./` (v0.11.0 errors.go:590-596). */
 const cueRelative =
 	(target: (spelling: Spelling) => string) => (spelling: Spelling) =>
-		`./${path
-			.relative(spelling.runnerCwd, target(spelling))
-			.split(path.sep)
+		`./${relativePath(spelling.runnerCwd, target(spelling))
+			.split(/[\\/]/)
 			.join("/")}`;
 
 // ── golangci-lint — reproduced defect (relative Pos.Filename) ────────────────
@@ -1035,7 +1044,10 @@ describe("gleam-check reported-path attribution (#3285)", () => {
 		// gleam's `location.path` is absolute by construction: the CLI walks up
 		// from the absolute cwd to `gleam.toml` and joins `src`
 		// (`compiler-cli/src/fs.rs:32-62`, `compiler-core/src/paths.rs:42-48`).
-		expect(observed.reported).toBe(observed.dispatchedPath);
+		// `reported` is built with host `path.resolve` (backslashes on Windows)
+		// while `ctx.filePath` carries the dispatcher's forward-slash spelling;
+		// compare the same file in one spelling, still byte-exact (#4019).
+		expect(observed.reported).toBe(path.resolve(observed.dispatchedPath));
 		expectGleamAttached(observed, gleamCheck);
 	});
 

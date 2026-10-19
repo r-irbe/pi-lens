@@ -101,6 +101,22 @@ export interface DiagnosticStrategy {
 	 *  `Notification_handler.on_notification`: `DidSaveTextDocument` ->
 	 *  `Scan_helpers.scan_file`). The client expects that publication. */
 	rescansOnSave?: boolean;
+	/** #3548: `textDocument/didClose` makes this server publish once more, an
+	 *  empty, version-less set that answers no send (tekumara/typos-lsp
+	 *  `crates/typos-lsp/src/lsp.rs` `did_close`:
+	 *  `self.client.publish_diagnostics(uri, Vec::new(), None).await` — sent
+	 *  UNCONDITIONALLY on every close, to clear stale diagnostics on the
+	 *  editor side, never as an answer to an outstanding scan). Without this
+	 *  marker that publish is counted as a scan the closed lifetime was owed
+	 *  (client.ts's `closedDocuments` branch), which can consume the slot a
+	 *  REAL in-flight scan should consume: a rename that closes the path
+	 *  while a scan is still running lets that close-publish satisfy the
+	 *  backlog early, so the real (stale) scan lands later with nothing left
+	 *  to distinguish it from a fresh answer to the reopened file's send
+	 *  (#3548's failing sequence). Marked here, the client skips counting
+	 *  exactly one publish per close for this server, leaving a genuine
+	 *  backlog publish (from any server) to count as before. */
+	publishesOnClose?: boolean;
 	/**
 	 * Tier-3 marker (#458): true only for a `mode: "push-only"` server that is
 	 * known to publish NOTHING on a clean→clean transition (silent on clean —
@@ -239,11 +255,15 @@ export interface DiagnosticStrategy {
 export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 	{
 		typescript: {
-			seedFirstPush: true,
+			seedFirstPush: false,
 			pullRetryBudgetMs: 0,
 			debounceMs: 50,
 			aggregateWaitMs: 1000,
 			expectSemanticSecondPush: false,
+			// #3310 / nightly run 37930006227: the clean TypeScript fixture
+			// published an empty pre-index result before its settled result.
+			// Hold that first publish so it cannot resolve a push wait as clean.
+			emptyFirstPublish: "indexing",
 			// Tier 3 (#458): typescript-language-server publishes nothing on a
 			// clean→clean edit (docs/lsp-capability-matrix.md, re-confirmed
 			// 2026-07-12). It's the lone core-set tier-3 server, which is exactly
@@ -360,6 +380,25 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 2000,
 			expectSemanticSecondPush: false,
 			reopenOnResync: false,
+			// #3548: zizmor@main `crates/zizmor/src/lsp.rs` `initialized()`
+			// registers `textDocument/didSave` DYNAMICALLY (`include_text: true`),
+			// and `did_save` re-audits and republishes with `version: None` — the
+			// same surplus shape as opengrep's static save rescan (#3482). This is
+			// presently INERT: `applyDynamicCapabilities` (client.ts) does not map
+			// a dynamic didSave registration to anything, and `negotiateSaveOptions`
+			// (sync-kind.ts) reads only the static `initialize` reply, so
+			// `state.saveOptions` never gets set for zizmor and `sendDidSave` never
+			// fires (its `if (!save) return;` guard). Set now anyway, measured
+			// fact style (like `silentOnClean`'s launch-variant scoping above): the
+			// day dynamic registration is honoured, this is the correct value with
+			// no further plumbing, and `expectSaveRescan`/`rescansOnSave`'s
+			// counting logic does not care how `saveOptions` got set — proven by
+			// `ZIZMOR-SAVE-RESCAN-EXPECTED` in
+			// tests/clients/lsp/late-auxiliary-findings.test.ts, which sets
+			// `state.saveOptions` directly (the same shape as the pre-existing
+			// `SAVE-RESCAN-EXPECTED` opengrep test) rather than through the
+			// unbuilt dynamic-capability path.
+			rescansOnSave: true,
 		},
 		// typos (source-code spell checker, auxiliary LSP #283). Push-only (no pull
 		// diagnostics). Its dictionary is compiled in — there's NO rule-load window
@@ -375,6 +414,9 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			aggregateWaitMs: 1500,
 			expectSemanticSecondPush: false,
 			reopenOnResync: false,
+			// #3548: see `publishesOnClose`'s doc comment above — typos'
+			// `did_close` always publishes an empty, version-less set.
+			publishesOnClose: true,
 		},
 		// marksman (Markdown LSP, #274). Push-based; native binary so the per-file
 		// parse is fast, but its value is CROSS-file (broken intra-repo links,
@@ -468,6 +510,26 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			emptyFirstPublish: "indexing",
 			// #3484: the fence reply (+2..4 ms) precedes the publish (~+1 s).
 			diagnosticsFence: "reply-first",
+		},
+		// terraform-ls (#3310). The nightly tool-smoke measurement was identical
+		// on 2026-09-27, 2026-09-28, and 2026-09-29:
+		//
+		//   [terraform] clean-behavior=publishes-unversioned (tier 2*)
+		//   dirtyPubs=2(v:0) cleanPubs=2(v:0) first-publish=empty-first
+		//   provisional pre-index publish
+		//
+		// The first empty, unversioned publish is the cold-index artifact, so hold
+		// it once and let terraform-ls's next publish resolve the wait. A held
+		// clean-only trace therefore reaches the caller as unanswered/indeterminate
+		// at the wait ceiling rather than a false clean, by design (#3310). The
+		// marker is measured policy, not a blanket rule for Tier 2* push servers.
+		terraform: {
+			seedFirstPush: false,
+			pullRetryBudgetMs: 0,
+			debounceMs: 150,
+			aggregateWaitMs: 1500,
+			expectSemanticSecondPush: false,
+			emptyFirstPublish: "indexing",
 		},
 		// yaml-language-server (#3484): the default strategy plus the measured
 		// fence order — reply +3..6 ms, publish +207..242 ms after didChange.

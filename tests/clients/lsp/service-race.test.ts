@@ -21,6 +21,19 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 	logLatency,
 }));
 
+function defer<T = void>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((res) => {
+		resolve = res;
+	});
+	return { promise, resolve };
+}
+
+/** Drain the microtask queue so every queued continuation runs (no timers). */
+async function settle(turns = 50): Promise<void> {
+	for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
 describe("LSPService race hardening", () => {
 	beforeEach(() => {
 		vi.resetModules();
@@ -81,6 +94,89 @@ describe("LSPService race hardening", () => {
 		initialize.restore();
 	});
 
+	/**
+	 * Recurrence (#2372 slice 3, PR #4374 review F1): a caller that arrives
+	 * while the spawn gate is held by a capacity eviction must JOIN the spawn
+	 * already in flight. The unguarded `inFlight` read in `client-registry.ts`
+	 * is the only join for it: the gate re-read runs after the starter's
+	 * `finally` has cleared the entry, so without this read the joiner
+	 * double-spawns (xCreates=2) and the first client is overwritten in the
+	 * client map and never shut down (a leaked process). Through the real
+	 * service: ceiling 2, the victim is evicted to admit a third key while X
+	 * is still mid-spawn.
+	 */
+	it("a joiner behind a capacity-eviction gate joins the in-flight spawn, one client per key", async () => {
+		process.env.PI_LENS_LSP_CLIENT_CEILING = "2";
+		try {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			const serverFor: Record<string, unknown> = {};
+			for (const id of ["victim", "xsrv", "ysrv"]) {
+				serverFor[`.f${id[0]}`] = {
+					id,
+					name: id,
+					extensions: [`.f${id[0]}`],
+					root: async () => "C:/repo",
+					spawn: vi.fn(async () => ({ process: {} })),
+				};
+			}
+			getServersForFileWithConfig.mockImplementation((f: string) => [
+				serverFor[f.slice(f.lastIndexOf("."))],
+			]);
+			const xGate = defer();
+			const victimShutdown = defer();
+			createLSPClient.mockImplementation(
+				async ({ serverId }: { serverId: string }) => {
+					if (serverId === "xsrv") await xGate.promise;
+					return {
+						serverId,
+						isAlive: () => true,
+						isBusy: () => false,
+						wasShutdownIntentional: () => false,
+						getExitedAt: () => undefined,
+						diagnosticsVersion: 0,
+						getWorkspaceDiagnosticsSupport: () => ({
+							advertised: false,
+							mode: "push-only",
+							diagnosticProviderKind: "unavailable",
+						}),
+						notify: {
+							open: vi.fn(async () => undefined),
+							change: vi.fn(async () => undefined),
+						},
+						shutdown: vi.fn(async () => {
+							if (serverId === "victim") await victimShutdown.promise;
+						}),
+					};
+				},
+			);
+
+			await service.getClientForFile("C:/repo/v.fv");
+			const pX = service.getClientForFile("C:/repo/a.fx");
+			await settle();
+			// Y holds the spawn gate: its capacity eviction awaits the victim's shutdown.
+			const pY = service.getClientForFile("C:/repo/y.fy");
+			await settle();
+			// B arrives for X while the gate is held. It must join X's spawn.
+			const pB = service.getClientForFile("C:/repo/b.fx");
+			await settle();
+			xGate.resolve();
+			await settle();
+			victimShutdown.resolve();
+			const [rX, , rB] = await Promise.all([pX, pY, pB]);
+
+			const xCreates = createLSPClient.mock.calls.filter(
+				([a]) => a.serverId === "xsrv",
+			).length;
+			expect(xCreates).toBe(1);
+			expect(rB?.client).toBeTruthy();
+			expect(rB?.client).toBe(rX?.client);
+			await service.shutdown({});
+		} finally {
+			delete process.env.PI_LENS_LSP_CLIENT_CEILING;
+		}
+	});
+
 	it("does not orphan the in-flight client when a waiter times out", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
@@ -114,10 +210,12 @@ describe("LSPService race hardening", () => {
 		expect(await timedOut).toBeUndefined();
 		const internal = service as unknown as {
 			state: { inFlight: Map<string, unknown>; clients: Map<string, unknown> };
-			clientLeases: Map<string, number>;
+			clientRegistry: {
+				clientLeases: Map<string, number>;
+			};
 		};
 		expect(internal.state.inFlight.size).toBe(1);
-		expect(internal.clientLeases.size).toBe(0);
+		expect(internal.clientRegistry.clientLeases.size).toBe(0);
 
 		initialize.release();
 		await service.getClientForFile(file);
@@ -126,7 +224,7 @@ describe("LSPService race hardening", () => {
 		expect(createLSPClient).toHaveBeenCalledTimes(1);
 		expect(service.getAliveClientCount()).toBe(1);
 		expect(internal.state.inFlight.size).toBe(0);
-		expect(internal.clientLeases.size).toBe(0);
+		expect(internal.clientRegistry.clientLeases.size).toBe(0);
 		await service.shutdown();
 		expect(client.shutdown).toHaveBeenCalledTimes(1);
 		expect(internal.state.clients.size).toBe(0);
@@ -148,7 +246,10 @@ describe("LSPService race hardening", () => {
 			}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => [],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 		};
 		const initialize = suspendAt(createLSPClient, async () => client);
 		const spawn = vi.fn(async () => ({
@@ -165,6 +266,7 @@ describe("LSPService race hardening", () => {
 				id: "marksman",
 				name: "Marksman",
 				extensions: [".md"],
+				idleEviction: "resident",
 				root: async () => "C:/repo",
 				spawn,
 			},
@@ -242,7 +344,10 @@ describe("LSPService race hardening", () => {
 			}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => [],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 		};
 		const initialize = suspendAt(createLSPClient, async () => client);
 		getServersForFileWithConfig.mockReturnValue([
@@ -250,6 +355,7 @@ describe("LSPService race hardening", () => {
 				id: "marksman",
 				name: "Marksman",
 				extensions: [".md"],
+				idleEviction: "resident",
 				root: async () => "C:/repo",
 				spawn: vi.fn(async () => ({
 					process: {
@@ -307,7 +413,10 @@ describe("LSPService race hardening", () => {
 			}),
 			getAdvertisedCommands: () => [],
 			getRawCapabilityKeys: () => [],
-			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn().mockResolvedValue(undefined),
+			},
 		};
 		const initialize = suspendAt(createLSPClient, async () => client);
 		const internal = service as unknown as {
@@ -318,6 +427,7 @@ describe("LSPService race hardening", () => {
 				id: "marksman",
 				name: "Marksman",
 				extensions: [".md"],
+				idleEviction: "resident",
 				root: async () => "C:/repo",
 				spawn: vi.fn(async () => {
 					queueMicrotask(() =>
@@ -381,6 +491,7 @@ describe("LSPService race hardening", () => {
 					id: "marksman",
 					name: "Marksman",
 					extensions: [".md"],
+					idleEviction: "resident",
 					root: async () => "C:/repo",
 					spawn: vi.fn(async () => ({
 						process: {
@@ -431,6 +542,7 @@ describe("LSPService race hardening", () => {
 				id: "marksman",
 				name: "Marksman",
 				extensions: [".md"],
+				idleEviction: "resident",
 				root: async () => "C:/repo",
 				spawn: vi.fn(async () => ({
 					process: {
@@ -532,6 +644,7 @@ describe("LSPService race hardening", () => {
 				id: "marksman",
 				name: "Marksman",
 				extensions: [".md"],
+				idleEviction: "resident",
 				root: async () => "C:/repo-b",
 				spawn: vi.fn(async () => undefined),
 			},
@@ -552,6 +665,261 @@ describe("LSPService race hardening", () => {
 			}),
 		);
 		release();
+	});
+
+	// #3873 O9: B3 logged 9 of 26 pre-edit touches as `no_clients_none_spawning`
+	// with no word on which servers were considered or why none counted.
+	describe("#3873 the no-client touch row names its candidates", () => {
+		const touch = (service: {
+			touchFile: (...args: any[]) => Promise<unknown>;
+		}) =>
+			service.touchFile("C:/repo-b/README.md", "# repo b\n", {
+				diagnostics: "none",
+				clientScope: "primary",
+				maxClientWaitMs: 1,
+				source: "tool_call:read",
+			});
+		const candidatesOfTouch = (): unknown =>
+			logLatency.mock.calls
+				.map(([entry]) => entry)
+				.find(
+					(entry) =>
+						entry.phase === "lsp_touch_file" &&
+						entry.metadata?.failureKind === "no_clients_none_spawning",
+				)?.metadata?.candidates;
+
+		it("a server whose root resolved but whose spawn gave no client is rooted with no client", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					idleEviction: "resident",
+					root: async () => "C:/repo-b",
+					spawn: vi.fn(async () => undefined),
+				},
+			]);
+
+			await touch(new LSPService());
+
+			expect(candidatesOfTouch()).toEqual([
+				{ serverId: "marksman", rooted: true, clientFound: "none" },
+			]);
+		});
+
+		it("an alive client beside a no-client verdict, and a dead one, are told apart, with their spawn time", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			const internal = service as unknown as {
+				state: {
+					clients: Map<string, { isAlive: () => boolean }>;
+					clientSpawnedAt: Map<string, number>;
+				};
+			};
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "typescript",
+					name: "ts",
+					extensions: [".ts"],
+					root: async () => "C:/a",
+				},
+				{
+					id: "deno",
+					name: "deno",
+					extensions: [".ts"],
+					root: async () => "C:/a",
+				},
+			]);
+			internal.state.clients.set("typescript:C:/a", { isAlive: () => true });
+			internal.state.clientSpawnedAt.set("typescript:C:/a", 1234);
+			internal.state.clients.set("deno:C:/a", { isAlive: () => false });
+
+			expect(
+				service.describeTouchCandidates(
+					"C:/a/x.ts",
+					new Map([
+						["typescript", "C:/a"],
+						["deno", "C:/a"],
+					]),
+				),
+			).toEqual([
+				{
+					serverId: "typescript",
+					rooted: true,
+					clientFound: "alive",
+					generation: 1234,
+				},
+				{
+					serverId: "deno",
+					rooted: true,
+					clientFound: "dead",
+					generation: undefined,
+				},
+			]);
+		});
+
+		// #3873 round 2 (F3): the touch resolves roots for primary servers only,
+		// so an auxiliary server read `rooted: false, clientFound: "none"` even
+		// with a live client and a resolvable root. Auxiliaries are not listed.
+		it("lists primary servers only: an auxiliary server with a live client is not reported as unrooted", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			const internal = service as unknown as {
+				state: {
+					clients: Map<string, { isAlive: () => boolean }>;
+					clientSpawnedAt: Map<string, number>;
+				};
+			};
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "typescript",
+					name: "ts",
+					extensions: [".ts"],
+					root: async () => "C:/a",
+				},
+				{
+					id: "opengrep",
+					name: "opengrep",
+					role: "auxiliary",
+					extensions: [".ts"],
+					root: async () => "C:/a",
+				},
+			]);
+			internal.state.clients.set("opengrep:C:/a", { isAlive: () => true });
+			internal.state.clientSpawnedAt.set("opengrep:C:/a", 99);
+
+			expect(
+				service
+					.describeTouchCandidates(
+						"C:/a/x.ts",
+						new Map([["typescript", "C:/a"]]),
+					)
+					.map((entry) => entry.serverId),
+			).toEqual(["typescript"]);
+		});
+
+		for (const scope of ["primary", "with-auxiliary"] as const)
+			it(`a ${scope}-scope no-client touch does not list the auxiliary servers configured for the file`, async () => {
+				const { LSPService } = await import("../../../clients/lsp/index.js");
+				getServersForFileWithConfig.mockReturnValue([
+					{
+						id: "marksman",
+						name: "Marksman",
+						extensions: [".md"],
+						idleEviction: "resident",
+						root: async () => "C:/repo-b",
+						spawn: vi.fn(async () => undefined),
+					},
+					{
+						id: "opengrep",
+						name: "opengrep",
+						role: "auxiliary",
+						extensions: [".md"],
+						root: async () => "C:/repo-b",
+						spawn: vi.fn(async () => undefined),
+					},
+				]);
+
+				await new LSPService().touchFile("C:/repo-b/README.md", "# b\n", {
+					diagnostics: "none",
+					clientScope: scope,
+					auxiliaryServerIds: ["opengrep"],
+					maxClientWaitMs: 1,
+					source: "tool_call:read",
+				});
+
+				expect(
+					(candidatesOfTouch() as Array<{ serverId: string }>).map(
+						(entry) => entry.serverId,
+					),
+				).toEqual(["marksman"]);
+			});
+
+		// G1 (round 3). Recurrence: in `clientScope: "all"` the touch acquires
+		// auxiliary servers and resolves their roots (`serverCountAttempted` 2),
+		// so dropping every auxiliary made the row narrower than the attempt.
+		it("an all-scope no-client touch lists an auxiliary server it resolved a root for", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					idleEviction: "resident",
+					root: async () => "C:/repo-b",
+					spawn: vi.fn(async () => undefined),
+				},
+				{
+					id: "opengrep",
+					name: "opengrep",
+					role: "auxiliary",
+					extensions: [".md"],
+					root: async () => "C:/repo-b",
+					spawn: vi.fn(async () => undefined),
+				},
+			]);
+
+			await new LSPService().touchFile("C:/repo-b/README.md", "# b\n", {
+				diagnostics: "none",
+				clientScope: "all",
+				maxClientWaitMs: 1,
+				source: "tool_call:read",
+			});
+
+			expect(
+				(
+					candidatesOfTouch() as Array<{ serverId: string; rooted: boolean }>
+				).map((entry) => [entry.serverId, entry.rooted]),
+			).toEqual([
+				["marksman", true],
+				["opengrep", true],
+			]);
+		});
+
+		// The row's bound: a file with more primary candidates than the cap
+		// names the first MAX_TOUCH_CANDIDATES (8). Recurrence: unbounded row
+		// growth on a repeat decision.
+		it("names at most 8 candidates", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue(
+				Array.from({ length: 9 }, (_, i) => ({
+					id: `server-${i}`,
+					name: `s${i}`,
+					extensions: [".md"],
+					root: async () => "C:/a",
+				})),
+			);
+
+			const candidates = new LSPService().describeTouchCandidates(
+				"C:/a/x.md",
+				new Map(),
+			);
+
+			expect(candidates.map((entry) => entry.serverId)).toEqual(
+				Array.from({ length: 8 }, (_, i) => `server-${i}`),
+			);
+		});
+
+		it("a server with no resolvable root is listed as unrooted", async () => {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			getServersForFileWithConfig.mockReturnValue([
+				{
+					id: "marksman",
+					name: "Marksman",
+					extensions: [".md"],
+					idleEviction: "resident",
+					root: async () => undefined,
+					spawn: vi.fn(async () => undefined),
+				},
+			]);
+
+			await touch(new LSPService());
+
+			expect(candidatesOfTouch()).toEqual([
+				{ serverId: "marksman", rooted: false, clientFound: "none" },
+			]);
+		});
 	});
 
 	it("isSpawnInFlight is false for a file type with no configured server", () => {
@@ -615,6 +983,7 @@ describe("LSPService race hardening", () => {
 				id: "typescript",
 				name: "TypeScript",
 				extensions: [".ts"],
+				idleEviction: "resident",
 				root: async () => "C:/repo",
 				spawn: primarySpawn,
 			},
@@ -623,6 +992,7 @@ describe("LSPService race hardening", () => {
 				name: "Typos",
 				role: "auxiliary",
 				extensions: [".ts"],
+				idleEviction: "resident",
 				root: async () => "C:/repo",
 				spawn: auxSpawn,
 			},

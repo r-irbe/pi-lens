@@ -25,6 +25,12 @@
 // (documented per shape 16, never claimed as verified):
 //   - infra-net-getaddrinfo.unverified.log: no real pi-lens Unit-tests run
 //     with a DNS/network failure was found in the accessible run history.
+//   - infra-net-fail-line-non-test-path.synthetic.log and
+//     infra-kill-fail-line-non-test-path.synthetic.log (#3737 review r1, F4):
+//     an infra log with a line-start `FAIL` that names a NON-test file
+//     (`.../index.js`, `scripts/foo.mjs`). Built from the infra-net-getaddrinfo
+//     and infra-kill-bare-killed-pre-wrapper fixtures plus that one line: a
+//     BARE_FAIL_LINE widened to any script path flipped both to `real`.
 //   - file-level-collection-failure.synthetic.log (F2/P2): a representative
 //     vitest file-level FAIL shape (import/collection error, no ">"
 //     test-name separator) -- not pulled from a real pi-lens run.
@@ -56,6 +62,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+	ADVISORY_ONLY_MARKER,
 	buildCommentBody,
 	buildMarker,
 	classifyFailureLog,
@@ -272,6 +279,23 @@ describe("classifyFailureLog (#2103)", () => {
 		);
 		expect(result.kind).toBe("infra-net");
 		expect(result.detail).toContain("ENOTFOUND");
+	});
+
+	// Recurrence (#3737 r1 F4): BARE_FAIL_LINE widened to any .js/.ts path read
+	// `FAIL: could not fetch .../index.js` as a failing test file, so an
+	// infra-net log classified real and its auto-rerun was suppressed.
+	it("keeps infra-net when a FAIL line names a non-test script path", () => {
+		const result = classifyFailureLog(
+			fixture("infra-net-fail-line-non-test-path.synthetic.log"),
+		);
+		expect(result.kind).toBe("infra-net");
+	});
+
+	it("keeps infra-kill when a FAIL line names a non-test script path", () => {
+		const result = classifyFailureLog(
+			fixture("infra-kill-fail-line-non-test-path.synthetic.log"),
+		);
+		expect(result.kind).toBe("infra-kill");
 	});
 
 	// Acceptance criterion: "Real failures are never rerun automatically and
@@ -1043,7 +1067,15 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 				return jsonResponse({
 					head_sha: "deadbeef",
 					run_attempt: runAttempt,
-					pull_requests: [{ number: 42 }],
+					// The shape GitHub serves (#4382): only an entry of this
+					// repository at the run's own head names the run's PR.
+					pull_requests: [
+						{
+							number: 42,
+							url: "https://api.github.com/repos/acme/repo/pulls/42",
+							head: { sha: "deadbeef" },
+						},
+					],
 				});
 			}
 			if (url.endsWith("/actions/runs/999/jobs")) {
@@ -1191,6 +1223,268 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		});
 		expect(api.comments).toHaveLength(0);
 		expect(api.rerunCallCount).toBe(0);
+	});
+
+	// #3801 recurrence (verify r2 V3): a not-ready `Heavy advisory gate` exits 1,
+	// which fails the CI run even with every required check green. The label
+	// step read "skipped" as "not infra" and put `ci:real` on a green PR. A run
+	// whose failed jobs are ALL advisory is marked so the caller labels nothing;
+	// one non-advisory failure alongside keeps the plain skip (Lint red stays
+	// `ci:real` through the workflow's else branch).
+	it("marks a skipped run advisory-only when every failed job is advisory", async () => {
+		const api = makeStatefulApi();
+		const jobsFetcher =
+			(jobs: Array<{ id: number; name: string; conclusion: string }>) =>
+			async (url: string, init?: RequestInit) => {
+				if (url.endsWith("/actions/runs/999/jobs"))
+					return jsonResponse({ jobs });
+				return api.fetcher(url, init);
+			};
+		const run = (
+			jobs: Array<{ id: number; name: string; conclusion: string }>,
+		) =>
+			runClassifier({
+				fetcher: jobsFetcher(jobs),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+				skipMissingJob: true,
+			});
+		const gate = {
+			id: 1,
+			name: "Heavy advisory gate (advisory)",
+			conclusion: "failure",
+		};
+		const windows = {
+			id: 2,
+			name: "Unit tests Windows (advisory)",
+			conclusion: "failure",
+		};
+		const advisory = await run([
+			{ id: 3, name: "Unit tests", conclusion: "success" },
+			gate,
+			windows,
+		]);
+		expect(advisory).toEqual({
+			skipped: true,
+			advisoryOnly: true,
+			reason: `run 999 has no failed job named "Unit tests"; ${ADVISORY_ONLY_MARKER} (Heavy advisory gate (advisory), Unit tests Windows (advisory))`,
+		});
+		const mixed = await run([
+			gate,
+			{ id: 4, name: "Lint & type-check", conclusion: "failure" },
+		]);
+		expect(mixed).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		// Verify r3 V6: a required job that ended `timed_out` (or cancelled)
+		// beside a red advisory job is not advisory-only; an ADVISORY job with a
+		// non-`failure` blocking conclusion still is.
+		const required = await run([
+			{ id: 7, name: "Dependency boundaries", conclusion: "timed_out" },
+			gate,
+		]);
+		expect(required).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		const advisoryCancelled = await run([
+			{ id: 8, name: "Unit tests Windows (advisory)", conclusion: "cancelled" },
+			gate,
+		]);
+		expect(advisoryCancelled).toMatchObject({
+			skipped: true,
+			advisoryOnly: true,
+		});
+		// A run that failed with NO job concluding `failure` (a timed-out or
+		// cancelled job) is not "only advisory jobs failed": vacuous truth of
+		// `every` over an empty list must not read as advisory-only.
+		const none = await run([
+			{ id: 5, name: "Unit tests", conclusion: "success" },
+			{ id: 6, name: "Install test (ubuntu-latest)", conclusion: "timed_out" },
+		]);
+		// No blocking job at all (every job green or skipped, the run failed for
+		// another reason): vacuous truth of `every` must not read advisory-only.
+		const green = await run([
+			{ id: 9, name: "Unit tests", conclusion: "success" },
+			{ id: 10, name: "Heavy advisory gate (advisory)", conclusion: "skipped" },
+		]);
+		expect(green).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		expect(none).toEqual({
+			skipped: true,
+			reason: 'run 999 has no failed job named "Unit tests"',
+		});
+		expect(api.comments).toHaveLength(0);
+		expect(api.rerunCallCount).toBe(0);
+	});
+
+	// Verify r3 V5: log text that happens to contain the advisory-only phrase
+	// must not make a REAL failing shard read as skipped/advisory (the workflow
+	// label step keys on the CLI's skip line; this pins the classifier side: a
+	// failing shard is classified, never skipped, whatever its log says).
+	it("classifies a failing shard whose log carries the advisory-only phrase as a real failure", async () => {
+		const api = makeStatefulApi();
+		const fetcher = async (url: string, init?: RequestInit) => {
+			if (url.endsWith("/actions/runs/999/jobs"))
+				return jsonResponse({
+					jobs: [
+						{ id: 301, name: "Unit tests (shard 2/4)", conclusion: "failure" },
+						{
+							id: 302,
+							name: "Heavy advisory gate (advisory)",
+							conclusion: "failure",
+						},
+					],
+				});
+			if (/\/actions\/jobs\/301\/logs$/.test(url))
+				return textResponse(
+					`AssertionError: expected "${ADVISORY_ONLY_MARKER}" to be logged\n`,
+				);
+			return api.fetcher(url, init);
+		};
+		const result = await runClassifier({
+			fetcher,
+			owner: "acme",
+			repo: "repo",
+			runId: 999,
+			jobName: "Unit tests",
+			skipMissingJob: true,
+			prNumber: 42,
+			sha: "deadbeef",
+		});
+		expect("skipped" in result).toBe(false);
+		if ("skipped" in result) return;
+		expect(result.classification.kind).toBe("real");
+	});
+
+	// #3753 recurrence: `Unit tests` is an aggregate over `Unit tests (shard
+	// k/3)` jobs. The exact-name lookup picked the AGGREGATE, whose log carries
+	// no kill signature and no FAIL line, so every shard kill classified `real`
+	// and the infra rerun never fired. The shard's log is the evidence.
+	describe("#3753 sharded Unit tests", () => {
+		function shardedFetcher(
+			api: ReturnType<typeof makeStatefulApi>,
+			logs: Record<string, string>,
+			jobs: Array<{ id: number; name: string; conclusion: string }>,
+		) {
+			return async (url: string, init?: RequestInit) => {
+				if (url.endsWith("/actions/runs/999/jobs")) {
+					return jsonResponse({ jobs });
+				}
+				const logMatch = /\/actions\/jobs\/(\d+)\/logs$/.exec(url);
+				if (logMatch) return textResponse(logs[logMatch[1]] ?? "");
+				return api.fetcher(url, init);
+			};
+		}
+		const AGGREGATE_LOG = "Unit tests shard jobs (test): failure\n";
+
+		it("classifies the failed shard's log, not the aggregate's, and reruns an infra-killed shard", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{
+						"301": "all good\n",
+						"302": fixture("infra-kill-wrapper-killed.real.log"),
+						"111": AGGREGATE_LOG,
+					},
+					[
+						{ id: 301, name: "Unit tests (shard 1/3)", conclusion: "success" },
+						{ id: 302, name: "Unit tests (shard 2/3)", conclusion: "failure" },
+						{ id: 111, name: "Unit tests", conclusion: "failure" },
+					],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+				skipMissingJob: true,
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.classification.kind).toBe("infra-kill");
+			expect(result.rerunTriggeredThisPass).toBe(true);
+			expect(result.jobName).toBe("Unit tests (shard 2/3)");
+			expect(api.rerunCallCount).toBe(1);
+		});
+
+		it("a real failure in ANY failed shard wins over an infra kill in another (no rerun)", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{
+						"301": fixture("infra-kill-wrapper-killed.real.log"),
+						"303": fixture("real-assertion-failure.real.log"),
+						"111": AGGREGATE_LOG,
+					},
+					[
+						{ id: 301, name: "Unit tests (shard 1/3)", conclusion: "failure" },
+						{ id: 303, name: "Unit tests (shard 3/3)", conclusion: "failure" },
+						{ id: 111, name: "Unit tests", conclusion: "failure" },
+					],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.classification.kind).toBe("real");
+			expect(result.rerunTriggeredThisPass).toBe(false);
+			expect(api.rerunCallCount).toBe(0);
+		});
+
+		// Recurrence (Stryker survivor on the `jobName === UNIT_TESTS` guard,
+		// #3756 review): the shard filter is for the `Unit tests` aggregate ONLY.
+		// Without the guard any `--job-name` would be answered with the failed
+		// shard rows instead of the job it names.
+		it("selects only the named job for a non-Unit-tests --job-name, even with a failed shard present", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{
+						"301": fixture("infra-kill-wrapper-killed.real.log"),
+						"222": fixture("real-assertion-failure.real.log"),
+					},
+					[
+						{ id: 301, name: "Unit tests (shard 1/3)", conclusion: "failure" },
+						{ id: 222, name: "Lint & type-check", conclusion: "failure" },
+					],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Lint & type-check",
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.jobName).toBe("Lint & type-check");
+			expect(result.classification.kind).toBe("real");
+			expect(api.rerunCallCount).toBe(0);
+		});
+
+		it("falls back to the exact-name job when no shard failed (a pre-sharding run)", async () => {
+			const api = makeStatefulApi();
+			const result = await runClassifier({
+				fetcher: shardedFetcher(
+					api,
+					{ "111": fixture("infra-kill-wrapper-killed.real.log") },
+					[{ id: 111, name: "Unit tests", conclusion: "failure" }],
+				),
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				jobName: "Unit tests",
+			});
+			if ("skipped" in result) throw new Error("unexpectedly skipped");
+			expect(result.classification.kind).toBe("infra-kill");
+			expect(result.jobName).toBe("Unit tests");
+		});
 	});
 
 	it("updates the existing sticky comment in place instead of posting a second one, and skips the rerun once already triggered for this SHA", async () => {
@@ -1461,6 +1755,74 @@ describe("runClassifier orchestration against a mocked, STATEFUL GitHub API (#21
 		expect(comments).toHaveLength(1);
 	});
 
+	// #4382 recurrence (run 38514228860: a comment write 403ed and the classify
+	// step died before the rerun verdict). The CLI suite covers the first-call
+	// and upsert refusals; these two cover the seams it cannot reach: a refusal
+	// of ONLY the duplicate-reconcile re-read, and a refused failure comment.
+	describe("a refused PR comment never stops the classifier (#4382)", () => {
+		const forbidden = () =>
+			jsonResponse({ message: "Resource not accessible by integration" }, 403);
+
+		it("a 403 on the post-upsert reconcile read keeps the result and reports one commentWarning", async () => {
+			const rawLog = fixture("infra-kill-wrapper-killed.real.log");
+			let commentReads = 0;
+			const fetcher = async (url: string, init?: RequestInit) => {
+				const method = init?.method ?? "GET";
+				if (url.endsWith("/actions/runs/999")) {
+					return jsonResponse({ head_sha: "deadbeef", pull_requests: [] });
+				}
+				if (url.endsWith("/actions/runs/999/jobs")) {
+					return jsonResponse({
+						jobs: [{ id: 111, name: "Unit tests", conclusion: "failure" }],
+					});
+				}
+				if (url.endsWith("/actions/jobs/111/logs")) return textResponse(rawLog);
+				if (url.endsWith("/rerun-failed-jobs")) return jsonResponse({}, 201);
+				if (method === "GET" && url.includes("/issues/42/comments")) {
+					commentReads++;
+					return commentReads === 1 ? jsonResponse([]) : forbidden();
+				}
+				if (method === "POST" && url.includes("/issues/42/comments")) {
+					return jsonResponse({ id: 900, body: "x" }, 201);
+				}
+				throw new Error(`unmocked URL in test: ${method} ${url}`);
+			};
+			const result = await runClassifier({
+				fetcher,
+				owner: "acme",
+				repo: "repo",
+				runId: 999,
+				prNumber: 42,
+			});
+			expect(result.rerunTriggeredThisPass).toBe(true);
+			expect(result.commentWarning).toContain("HTTP 403");
+		});
+
+		it("a 403 while commenting a classification failure leaves the original error as the thrown one", async () => {
+			const fetcher = async (url: string, init?: RequestInit) => {
+				const method = init?.method ?? "GET";
+				if (url.endsWith("/actions/runs/999")) {
+					return jsonResponse({ head_sha: "deadbeef", pull_requests: [] });
+				}
+				if (url.endsWith("/actions/runs/999/jobs")) {
+					return jsonResponse({ message: "boom" }, 500);
+				}
+				if (url.includes("/issues/42/comments")) return forbidden();
+				throw new Error(`unmocked URL in test: ${method} ${url}`);
+			};
+			await expect(
+				runClassifier({
+					fetcher,
+					owner: "acme",
+					repo: "repo",
+					runId: 999,
+					prNumber: 42,
+					sha: "deadbeef",
+				}),
+			).rejects.toThrow("HTTP 500");
+		});
+	});
+
 	// #2668: a master-push run's workflow_run event carries an empty
 	// pull_requests array -- there is no PR at all, not merely an unresolved
 	// lookup. allowMissingPr lets classification and the rerun proceed
@@ -1615,5 +1977,24 @@ describe("buildCommentBody (#2103)", () => {
 			rerunTriggered: false,
 			runAttempt: 1,
 		});
+	});
+});
+
+describe("classifier summary evidence reads through the Vitest parser (#4087)", () => {
+	// Recurrence: the classifier kept two private `Tests`/`Test Files` patterns
+	// beside the shared parser; the tally pattern missed `2 passed | 1 failed`
+	// (a count that is not first on the line).
+	it("names a failed count that is not first on the Tests line", () => {
+		const result = classifyFailureLog("      Tests  2 passed | 1 failed (3)\n");
+		expect(result.kind).toBe("real");
+		expect(result.detail).toContain("1 test(s) failed (overall tally line");
+	});
+
+	it("names failing test files from the Test Files line", () => {
+		const result = classifyFailureLog(
+			"  Test Files  3 failed | 1 passed (4)\n",
+		);
+		expect(result.kind).toBe("real");
+		expect(result.detail).toBe("Test Files 3 failed");
 	});
 });

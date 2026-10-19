@@ -175,4 +175,31 @@ describe("Language.load failure on a vouched-for file (#1564)", () => {
 			getDegradationSummary().find((g) => g.kind === "wasm-abort")?.count,
 		).toBe(1);
 	});
+
+	it("charges a wasm trap in Language.load to the grammar file, not to the trap budget (#3605)", async () => {
+		// A trap here ran the grammar's own module code. Charging it to the
+		// process-wide trap budget would let one bad grammar poison every
+		// language; the file-level path re-fetches just that grammar.
+		env = setupTestEnvironment("pi-lens-grammar-load-fail-trap-");
+		const grammarFile = "tree-sitter-python.wasm";
+		fs.writeFileSync(path.join(env.tmpDir, grammarFile), TRUNCATED_WASM);
+		const client = await makeClient(env.tmpDir);
+		const { WebAssembly } = globalThis as unknown as {
+			WebAssembly: { RuntimeError: new (message: string) => Error };
+		};
+		client.LanguageLoader = {
+			load: vi
+				.fn()
+				.mockRejectedValue(
+					new WebAssembly.RuntimeError("table index is out of bounds"),
+				),
+		};
+
+		expect(await client.loadLanguage("python")).toBeNull();
+
+		const kinds = getDegradationSummary().map((g) => g.kind);
+		expect(kinds).toContain("grammar-blocked");
+		expect(kinds).not.toContain("wasm-trap");
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+	});
 });

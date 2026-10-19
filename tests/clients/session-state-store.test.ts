@@ -4,6 +4,8 @@
  */
 
 import {
+	copyFileSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -19,9 +21,9 @@ import {
 	dropStaleFiles,
 	loadSessionState,
 	saveSessionState,
-	sessionStartMode,
 	STATE_VERSION,
 } from "../../clients/session-state-store.js";
+import type { PersistedReadGuardState } from "../../clients/read-guard.js";
 import { createReadGuard } from "../../clients/read-guard.js";
 import {
 	clearWidgetState,
@@ -31,7 +33,9 @@ import {
 	type PersistedWidgetState,
 	recordDiagnostics,
 	reconcileStaleWidgetFiles,
+	widgetStore,
 } from "../../clients/widget-state.js";
+import { beginScope } from "../../clients/session-scope.js";
 
 let dataDir: string;
 let prevDataDir: string | undefined;
@@ -110,11 +114,11 @@ describe("session-state-store save/load (#190)", () => {
 	it("persists and reloads a session's widget snapshot keyed by session id", async () => {
 		seedDiagnostics();
 		const snapshot = exportWidgetState();
-		await saveSessionState(cwd, "019ead34-uuid", snapshot);
+		await saveSessionState(cwd, "019ead34-uuid", { widget: snapshot });
 
 		const loaded = await loadSessionState(cwd, "019ead34-uuid");
 		expect(loaded?.sessionId).toBe("019ead34-uuid");
-		expect(loaded?.widget).toEqual(snapshot);
+		expect(loaded?.stores.widget).toEqual(snapshot);
 	});
 
 	it("returns undefined for an unknown or empty session id", async () => {
@@ -125,17 +129,17 @@ describe("session-state-store save/load (#190)", () => {
 
 	it("save is a no-op for a missing session id (no throw)", async () => {
 		await expect(
-			saveSessionState(cwd, undefined, exportWidgetState()),
+			saveSessionState(cwd, undefined, { widget: exportWidgetState() }),
 		).resolves.toBeUndefined();
 		await expect(
-			saveSessionState(cwd, "", exportWidgetState()),
+			saveSessionState(cwd, "", { widget: exportWidgetState() }),
 		).resolves.toBeUndefined();
 	});
 
 	it("end-to-end resume flow: save → clear → load → import restores findings", async () => {
 		seedDiagnostics();
 		const before = getFileDiagnosticSummaries();
-		await saveSessionState(cwd, "resume-me", exportWidgetState());
+		await saveSessionState(cwd, "resume-me", { widget: exportWidgetState() });
 
 		// Simulate a fresh process: nothing in memory.
 		clearWidgetState();
@@ -143,29 +147,17 @@ describe("session-state-store save/load (#190)", () => {
 
 		// Resume: load by the same stable id and rehydrate.
 		const loaded = await loadSessionState(cwd, "resume-me");
-		expect(importWidgetState(loaded?.widget)).toBe(true);
-		expect(getFileDiagnosticSummaries()).toEqual(before);
-	});
-
-	it("fork hand-off: source snapshot branches into a new session id", async () => {
-		// Mirrors the session_before_fork → session_start(fork) flow: stash the
-		// source's in-memory snapshot, then adopt it under the forked session id.
-		seedDiagnostics();
-		const before = getFileDiagnosticSummaries();
-		const stashed = exportWidgetState(); // captured at session_before_fork
-
-		clearWidgetState(); // forked session starts empty in memory
-		importWidgetState(stashed); // branch from source
-		await saveSessionState(cwd, "forked-session", exportWidgetState());
-
-		const loaded = await loadSessionState(cwd, "forked-session");
-		expect(importWidgetState(loaded?.widget)).toBe(true);
+		expect(
+			importWidgetState(loaded?.stores.widget as PersistedWidgetState),
+		).toBe(true);
 		expect(getFileDiagnosticSummaries()).toEqual(before);
 	});
 
 	it("rejects and ignores a persisted snapshot whose version does not match STATE_VERSION (#1106)", async () => {
 		seedDiagnostics();
-		await saveSessionState(cwd, "wrong-version-session", exportWidgetState());
+		await saveSessionState(cwd, "wrong-version-session", {
+			widget: exportWidgetState(),
+		});
 
 		// Sanity: the freshly-saved snapshot loads fine at the current version.
 		const before = await loadSessionState(cwd, "wrong-version-session");
@@ -189,43 +181,25 @@ describe("session-state-store save/load (#190)", () => {
 
 	it("isolates sessions: one id's state does not leak into another", async () => {
 		seedDiagnostics();
-		await saveSessionState(cwd, "session-A", exportWidgetState());
+		await saveSessionState(cwd, "session-A", { widget: exportWidgetState() });
 
 		clearWidgetState();
 		recordDiagnostics("/proj/example/c.ts", [
 			{ tool: "ruff", severity: "error", message: "other", line: 1 },
 		]);
-		await saveSessionState(cwd, "session-B", exportWidgetState());
+		await saveSessionState(cwd, "session-B", { widget: exportWidgetState() });
 
-		const a = await loadSessionState(cwd, "session-A");
-		const b = await loadSessionState(cwd, "session-B");
-		expect(a?.widget.files.map((f) => f.filePath).sort()).toEqual([
+		const files = (state: Awaited<ReturnType<typeof loadSessionState>>) =>
+			(state?.stores.widget as PersistedWidgetState | undefined)?.files.map(
+				(f) => f.filePath,
+			) ?? [];
+		expect(files(await loadSessionState(cwd, "session-A")).sort()).toEqual([
 			"/proj/example/a.ts",
 			"/proj/example/b.ts",
 		]);
-		expect(b?.widget.files.map((f) => f.filePath)).toEqual([
+		expect(files(await loadSessionState(cwd, "session-B"))).toEqual([
 			"/proj/example/c.ts",
 		]);
-	});
-});
-
-describe("sessionStartMode — reason → action mapping (#190)", () => {
-	it("rehydrates on startup, not just resume (the pi --session launch case)", () => {
-		// The original Phase 1 bug: a `pi --session <id>` LAUNCH fires
-		// reason="startup", not "resume", so gating on "resume" missed it.
-		expect(sessionStartMode("startup", false)).toBe("maybe-rehydrate");
-		expect(sessionStartMode("resume", false)).toBe("maybe-rehydrate");
-		expect(sessionStartMode(undefined, false)).toBe("maybe-rehydrate");
-	});
-
-	it("keeps state on reload, cleans on new", () => {
-		expect(sessionStartMode("reload", false)).toBe("keep");
-		expect(sessionStartMode("new", false)).toBe("clean");
-	});
-
-	it("forks only when a stash is pending, else falls through to rehydrate", () => {
-		expect(sessionStartMode("fork", true)).toBe("fork");
-		expect(sessionStartMode("fork", false)).toBe("maybe-rehydrate");
 	});
 });
 
@@ -349,8 +323,8 @@ describe("reconcileStaleWidgetFiles — live widget freshness (lens_diagnostics)
 
 describe("read-guard read-set persistence across resume (#1041)", () => {
 	it("save → load → import rehydrates the read-set so a resumed edit is allowed", async () => {
-		// Real file on disk so recordRead captures line hashes and importState can
-		// reconcile them against current content.
+		// Real file on disk so recordRead captures line hashes and the resumed
+		// edit's per-line check can compare them against current content.
 		const fileDir = mkdtempSync(join(tmpdir(), "pi-lens-rg-resume-"));
 		const filePath = join(fileDir, "foo.ts");
 		writeFileSync(
@@ -376,20 +350,26 @@ describe("read-guard read-set persistence across resume (#1041)", () => {
 				turnIndex: 1,
 				writeIndex: 1,
 				timestamp: Date.now(),
+				toolCallId: "call_resume_read",
 			});
-			await saveSessionState(
-				cwd,
-				"resume-session",
-				exportWidgetState(),
-				guard1.exportState(),
-			);
+			await saveSessionState(cwd, "resume-session", {
+				widget: exportWidgetState(),
+				"read-guard": guard1.exportState(),
+			});
 
-			// Resume (maybe-rehydrate): fresh guard, load persisted state, import.
+			// Resume: fresh guard, load persisted state, import.
 			const loaded = await loadSessionState(cwd, "resume-session");
-			expect(loaded?.readGuard).toBeDefined();
+			const readGuard = loaded?.stores["read-guard"] as
+				| PersistedReadGuardState
+				| undefined;
+			expect(readGuard).toBeDefined();
 			const guard2 = createReadGuard("resume-session-2");
 			expect(guard2.checkEdit(filePath, [20, 30]).action).toBe("block");
-			const result = guard2.importState(loaded?.readGuard);
+			// #3521: the read's tool result is on the resumed branch.
+			const result = guard2.importBranch(
+				readGuard,
+				new Set(["call_resume_read"]),
+			);
 			expect(result.imported).toBe(1);
 			expect(guard2.getReadHistory(filePath)).toHaveLength(1);
 			expect(guard2.checkEdit(filePath, [20, 30]).action).toBe("allow");
@@ -398,21 +378,173 @@ describe("read-guard read-set persistence across resume (#1041)", () => {
 		}
 	});
 
-	it("backward-compat: a payload persisted with NO readGuard field loads clean", async () => {
+	it("backward-compat: a version-1 read-set loads as a clean guard, never a crash (#3521)", async () => {
+		// Before #3521 records carried no toolCallId, so nothing can be matched
+		// against the branch: the widget still rehydrates, the guard starts clean.
+		const fileDir = mkdtempSync(join(tmpdir(), "pi-lens-rg-v1-"));
+		const filePath = join(fileDir, "foo.ts");
+		writeFileSync(filePath, "a\nb\nc\n");
+		try {
+			seedDiagnostics();
+			const v1Record = {
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: 3,
+				effectiveOffset: 1,
+				effectiveLimit: 3,
+				expandedByLsp: false,
+				turnIndex: 1,
+				writeIndex: 1,
+				timestamp: Date.now(),
+			};
+			await saveSessionState(cwd, "v1-session", {
+				widget: exportWidgetState(),
+				"read-guard": { version: 1, reads: [[filePath, [v1Record]]] },
+			});
+			const loaded = await loadSessionState(cwd, "v1-session");
+			expect(
+				(loaded?.stores.widget as PersistedWidgetState | undefined)?.files
+					.length,
+			).toBeGreaterThan(0);
+			const guard = createReadGuard("v1-session");
+			expect(
+				guard.importBranch(
+					loaded?.stores["read-guard"] as PersistedReadGuardState,
+					new Set(["anything"]),
+				),
+			).toEqual({ imported: 0, dropped: 0 });
+			expect(guard.getReadHistory(filePath)).toHaveLength(0);
+		} finally {
+			rmSync(fileDir, { recursive: true, force: true });
+		}
+	});
+});
+
+/**
+ * #3612: the sidecar envelope moved to version 2 (one payload per session
+ * store). The recurrence: an envelope change that stops reading the files
+ * the previous build wrote, so every resume after an upgrade starts empty.
+ * The fixtures were written by the version-1 build (`origin/master` before
+ * #3612) through its own `saveSessionState`.
+ */
+describe("version-1 sidecars still load (#3612)", () => {
+	const FIXTURES = join(__dirname, "..", "fixtures", "session-state");
+
+	async function loadFixture(name: string) {
+		const sessionsDir = join(getProjectDataDir(cwd), "sessions");
+		mkdirSync(sessionsDir, { recursive: true });
+		copyFileSync(
+			join(FIXTURES, `${name}.json`),
+			join(sessionsDir, `${name}.json`),
+		);
+		return loadSessionState(cwd, name);
+	}
+
+	it("loads a widget-only version-1 file as the widget store", async () => {
+		const loaded = await loadFixture("v1-widget");
+		expect(loaded?.savedAt).toBe(1759250000000);
+		expect(loaded?.stores["read-guard"]).toBeUndefined();
+		expect(
+			importWidgetState(loaded?.stores.widget as PersistedWidgetState),
+		).toBe(true);
+		expect(getFileDiagnosticSummaries().map((f) => f.filePath)).toEqual([
+			"/proj/example/a.ts",
+		]);
+	});
+
+	it("loads a version-1 file's read-set as the read-guard store", async () => {
+		const loaded = await loadFixture("v1-widget-read-guard");
+		expect(loaded?.stores.widget).toBeDefined();
+		const readGuard = loaded?.stores["read-guard"] as PersistedReadGuardState;
+		expect(readGuard.reads.map(([key]) => key)).toEqual(["/proj/example/a.ts"]);
+		// The record parses: its tool call is on the branch, and only the
+		// missing file drops it.
+		expect(
+			createReadGuard("v1-fixture").importBranch(
+				readGuard,
+				new Set(["call_fixture_read"]),
+			),
+		).toEqual({ imported: 0, dropped: 1 });
+	});
+
+	it("loads a version-2 file whose stores are not an object as nothing", async () => {
+		const sessionsDir = join(getProjectDataDir(cwd), "sessions");
+		mkdirSync(sessionsDir, { recursive: true });
+		for (const [name, stores] of [
+			["v2-null-stores", null],
+			["v2-string-stores", "widget"],
+		] as const) {
+			writeFileSync(
+				join(sessionsDir, `${name}.json`),
+				JSON.stringify({ version: 2, sessionId: name, savedAt: 1, stores }),
+			);
+			expect(await loadSessionState(cwd, name), name).toBeUndefined();
+		}
+	});
+
+	it("writes version 2 and never version 1", async () => {
+		await saveSessionState(cwd, "v2-written", { widget: exportWidgetState() });
+		const sessionsDir = join(getProjectDataDir(cwd), "sessions");
+		const raw = JSON.parse(
+			readFileSync(join(sessionsDir, "v2-written.json"), "utf-8"),
+		);
+		expect(raw.version).toBe(2);
+		expect(raw.widget).toBeUndefined();
+		expect(raw.stores.widget).toBeDefined();
+	});
+});
+
+/**
+ * #3612: the widget as a session store. The recurrences: a resume or a
+ * `pi --fork` that shows a file changed on disk since its sidecar was saved
+ * (#180/#190), and a malformed sidecar that crashes the session start.
+ */
+describe("the widget store's restore (#3612)", () => {
+	function ctxFor(source: "own-sidecar", savedAt: number) {
+		return {
+			reason: "fork" as const,
+			source,
+			savedAt,
+			sessionManager: undefined,
+			cwd,
+		};
+	}
+
+	it("reconciles a sidecar with disk: a file changed since the save re-scans", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lens-widget-store-"));
+		try {
+			const kept = join(dir, "kept.ts");
+			const changed = join(dir, "changed.ts");
+			for (const file of [kept, changed]) {
+				writeFileSync(file, "x\n");
+				utimesSync(file, new Date(1_000_000), new Date(1_000_000));
+				recordDiagnostics(file, [
+					{ tool: "tsc", severity: "error", message: "boom", line: 1 },
+				]);
+			}
+			const saved = exportWidgetState();
+			utimesSync(changed, new Date(9_000_000), new Date(9_000_000));
+			const scope = beginScope({ role: "primary" });
+			const files = () =>
+				getFileDiagnosticSummaries()
+					.map((f) => f.filePath)
+					.sort();
+
+			await widgetStore.restore(scope, saved, ctxFor("own-sidecar", 9_000_000));
+			expect(files()).toEqual([changed, kept].sort());
+
+			await widgetStore.restore(scope, saved, ctxFor("own-sidecar", 2_000_000));
+			expect(files()).toEqual([kept]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("restores a payload without files as an empty widget", async () => {
 		seedDiagnostics();
-		// Old-style save (pre-#1041) omits the readGuard arg entirely.
-		await saveSessionState(cwd, "legacy-session", exportWidgetState());
-
-		const loaded = await loadSessionState(cwd, "legacy-session");
-		expect(loaded?.widget).toBeDefined();
-		expect(loaded?.readGuard).toBeUndefined();
-
-		// Importing the absent field is a null-safe no-op — no throw.
-		const guard = createReadGuard("legacy-session");
-		expect(() => guard.importState(loaded?.readGuard)).not.toThrow();
-		expect(guard.importState(loaded?.readGuard)).toEqual({
-			imported: 0,
-			dropped: 0,
-		});
+		const scope = beginScope({ role: "primary" });
+		await widgetStore.restore(scope, { version: 3 }, ctxFor("own-sidecar", 1));
+		await widgetStore.restore(scope, undefined, ctxFor("own-sidecar", 1));
+		expect(getFileDiagnosticSummaries()).toEqual([]);
 	});
 });

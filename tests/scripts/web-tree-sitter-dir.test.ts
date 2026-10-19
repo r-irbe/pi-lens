@@ -26,6 +26,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	findCoreGrammarDir,
 	isWebTreeSitterPackageDir,
 	resolveWebTreeSitterPackageDir,
 } from "../../scripts/lib/web-tree-sitter-dir.mjs";
@@ -172,6 +173,65 @@ describe("install-selftest's grammar probe on a compiled host (#3409 r1 R3418-2)
 				packageRoot: () => cwd,
 				cwd: () => cwd,
 			}),
+		).toBeUndefined();
+	});
+});
+
+describe("installed core-grammar dir (#1185)", () => {
+	let env: ReturnType<typeof setupTestEnvironment>;
+
+	beforeEach(() => {
+		env = setupTestEnvironment("pi-lens-core-grammar-");
+	});
+	afterEach(() => env.cleanup());
+
+	const writeGrammar = (dir: string) => {
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "tree-sitter-typescript.wasm"), "");
+		return dir;
+	};
+
+	// Recurrence: the selftest probed only <web-tree-sitter>/grammars, which
+	// nothing fills at install time, so the tarball's own bundled grammars read
+	// as missing in every layout and the strict npm cell could never drop
+	// --allow-soft.
+	it("finds the grammars the tarball bundles under the package root", () => {
+		const packageRoot = path.join(env.tmpDir, "node_modules", "pi-lens");
+		const bundled = writeGrammar(path.join(packageRoot, "grammars"));
+		const web = writePackage(
+			path.join(env.tmpDir, "node_modules", "web-tree-sitter"),
+		);
+
+		expect(findCoreGrammarDir({ packageRoot, webTreeSitterDir: web })).toBe(
+			bundled,
+		);
+	});
+
+	it("falls back to the web-tree-sitter grammars dir (the lazy-fetch target)", () => {
+		const packageRoot = path.join(env.tmpDir, "node_modules", "pi-lens");
+		fs.mkdirSync(packageRoot, { recursive: true });
+		const web = writePackage(
+			path.join(env.tmpDir, "node_modules", "web-tree-sitter"),
+		);
+		const fetched = writeGrammar(path.join(web, "grammars"));
+
+		expect(findCoreGrammarDir({ packageRoot, webTreeSitterDir: web })).toBe(
+			fetched,
+		);
+	});
+
+	// Recurrence: a probe that passes with the core grammar absent. A dir that
+	// exists without the core wasm, or no resolvable web-tree-sitter, is a miss.
+	it("is undefined when neither dir holds the core grammar", () => {
+		const packageRoot = path.join(env.tmpDir, "node_modules", "pi-lens");
+		fs.mkdirSync(path.join(packageRoot, "grammars"), { recursive: true });
+		fs.writeFileSync(
+			path.join(packageRoot, "grammars", "tree-sitter-go.wasm"),
+			"",
+		);
+
+		expect(
+			findCoreGrammarDir({ packageRoot, webTreeSitterDir: undefined }),
 		).toBeUndefined();
 	});
 });

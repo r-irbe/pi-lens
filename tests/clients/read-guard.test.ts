@@ -7,12 +7,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import {
+	captureReadContentBinding,
 	createReadGuard,
 	currentLinesMatchReadSnapshot,
-	READ_GUARD_STATE_VERSION,
 	type ReadRecord,
 } from "../../clients/read-guard.js";
 import { logReadGuardEvent } from "../../clients/read-guard-logger.js";
@@ -49,6 +52,41 @@ describe("ReadGuard", () => {
 	beforeEach(() => {
 		fileTimeState.hasChanged = false;
 		vi.mocked(logReadGuardEvent).mockClear();
+	});
+	it("revokes an unseen blocked read without dropping delivered evidence", () => {
+		const filePath = "/tmp/blocked-read-release.ts";
+		const guard = createReadGuard("blocked-read-release-session");
+		// Recurrence: a later extension can block after the read tool_call, so no
+		// tool_result arrives; that unseen capture must not license an edit.
+		guard.recordRead(
+			createReadRecord(filePath, {
+				provisional: true,
+				source: "native-read:blocked-call:provisional",
+			}),
+		);
+		guard.recordRead(
+			createReadRecord(filePath, { toolCallId: "delivered-result" }),
+		);
+
+		expect(guard.dropProvisionalReadByCall("blocked-call")).toBe(true);
+		expect(guard.getReadHistory(filePath)).toEqual([
+			expect.objectContaining({ toolCallId: "delivered-result" }),
+		]);
+	});
+
+	it("releases every provisional capture at the turn boundary", () => {
+		const guard = createReadGuard("blocked-read-turn-end-session");
+		for (const [filePath, source] of [
+			["/tmp/a.ts", "native-read:a:provisional"],
+			["/tmp/b.ts", "native-read:b:provisional"],
+		] as const)
+			guard.recordRead(
+				createReadRecord(filePath, { provisional: true, source }),
+			);
+
+		expect(guard.dropProvisionalReads()).toBe(2);
+		expect(guard.getReadHistory("/tmp/a.ts")).toEqual([]);
+		expect(guard.getReadHistory("/tmp/b.ts")).toEqual([]);
 	});
 	it("supersedes only the correlated provisional native read", () => {
 		const filePath = "/tmp/native-read-identity.ts";
@@ -104,6 +142,304 @@ describe("ReadGuard", () => {
 		expect(guard.checkEdit(filePath, [1500, 1500]).action).toBe("allow");
 		expect(guard.checkEdit(filePath, [2500, 2500]).action).toBe("block");
 	});
+	describe("content-binding supersession (#3962)", () => {
+		it("reports whether the newest full-file read still matches the file", () => {
+			const env = setupTestEnvironment("read-guard-last-content-");
+			try {
+				const filePath = path.join(env.tmpDir, "file.ts");
+				fs.writeFileSync(filePath, "const value = 1;\n");
+				const guard = createReadGuard("last-content-session");
+				const binding = captureReadContentBinding(filePath, 1, 100);
+				expect(binding?.fullFile).toBe(true);
+				guard.recordRead(
+					createReadRecord(filePath, { contentBinding: binding }),
+				);
+				expect(guard.contentMatchesLastRead(filePath)).toBe(true);
+				fs.writeFileSync(filePath, "const value = 2;\n");
+				expect(guard.contentMatchesLastRead(filePath)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		const before = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+		const after = "const a = 99;\nconst b = 2;\nconst c = 3;\n";
+		const span20 = `${Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n")}\n`;
+		const span20GapChanged = span20.replace("line10", "line10-changed");
+
+		function recordBridgeBinding(
+			guard: ReturnType<typeof createReadGuard>,
+			filePath: string,
+			limit: number,
+		): void {
+			const binding = captureReadContentBinding(filePath, 1, limit);
+			expect(binding).toBeDefined();
+			guard.recordRead(
+				createReadRecord(filePath, {
+					effectiveOffset: 1,
+					effectiveLimit: limit,
+					source: "bridge:test",
+					contentBinding: binding,
+				}),
+			);
+		}
+
+		function recordNativeRead(
+			guard: ReturnType<typeof createReadGuard>,
+			filePath: string,
+			offset: number,
+			limit: number,
+			source = "native-read:test",
+		): void {
+			guard.recordRead(
+				createReadRecord(filePath, {
+					source,
+					effectiveOffset: offset,
+					effectiveLimit: limit,
+				}),
+			);
+		}
+
+		it("allows an edit a newer covering native re-read supersedes", () => {
+			const env = setupTestEnvironment("read-guard-supersede-");
+			try {
+				const filePath = path.join(env.tmpDir, "supersede.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// An external tool changes the bytes after the bridge read.
+				fs.writeFileSync(filePath, after);
+				// The remedy the block message asks for: a native re-read of disk.
+				recordNativeRead(guard, filePath, 1, 3);
+
+				expect(guard.checkEdit(filePath, [1, 1])).toEqual({ action: "allow" });
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when no newer read covers the edited lines", () => {
+			const env = setupTestEnvironment("read-guard-supersede-noncover-");
+			try {
+				const filePath = path.join(env.tmpDir, "noncover.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-noncover-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				// Newer, but only line 1 was delivered; the edit targets line 3.
+				recordNativeRead(guard, filePath, 1, 1);
+
+				const verdict = guard.checkEdit(filePath, [3, 3]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when the newer read is stale against disk", () => {
+			const env = setupTestEnvironment("read-guard-supersede-stale-");
+			try {
+				const filePath = path.join(env.tmpDir, "stale.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-stale-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// The newer read happened BEFORE the external change: its hashes
+				// describe the old bytes, so it cannot vouch for the new ones.
+				recordNativeRead(guard, filePath, 1, 3);
+				fs.writeFileSync(filePath, after);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when the newer read carries no hashes for the edit", () => {
+			const env = setupTestEnvironment("read-guard-supersede-unhashed-");
+			try {
+				const filePath = path.join(env.tmpDir, "unhashed.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-unhashed-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				guard.recordRead(
+					createReadRecord(filePath, {
+						source: "native-read:test",
+						effectiveOffset: 1,
+						effectiveLimit: 1,
+						lineHashes: {},
+					}),
+				);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("allows when a fresh bridge read re-binds the edited bytes", () => {
+			const env = setupTestEnvironment("read-guard-supersede-rebind-");
+			try {
+				const filePath = path.join(env.tmpDir, "rebind.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-rebind-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				// The bridge read that DELIVERED the changed bytes is the newest
+				// bound record, so its binding matches and no block fires.
+				recordBridgeBinding(guard, filePath, 1);
+
+				expect(guard.checkEdit(filePath, [1, 1])).toEqual({ action: "allow" });
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("keeps the stale block when no edit range is supplied", () => {
+			const env = setupTestEnvironment("read-guard-supersede-norange-");
+			try {
+				const filePath = path.join(env.tmpDir, "norange.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-norange-session");
+				recordBridgeBinding(guard, filePath, 1);
+				fs.writeFileSync(filePath, after);
+				recordNativeRead(guard, filePath, 1, 3);
+
+				const verdict = guard.checkEdit(filePath);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("allows when a newer covering read matches both edited ranges but a gap line changed", () => {
+			// Kills mutation IDs 7 and 11, which collapse `editRanges` into the
+			// bounding box: lines 2 and 20 are the edit, both fresh in the newer
+			// read, and only the gap line 10 between them is stale. A box check
+			// would drop the one fresh answer this filter exists to keep.
+			const env = setupTestEnvironment("read-guard-supersede-gap-");
+			try {
+				const filePath = path.join(env.tmpDir, "gap.ts");
+				fs.writeFileSync(filePath, span20);
+				const guard = createReadGuard("supersede-gap-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// The newer delivered read covers the whole span the edit brackets.
+				recordNativeRead(guard, filePath, 2, 19);
+				// Only the GAP line 10 changes; the edited lines 2 and 20 stay fresh.
+				fs.writeFileSync(filePath, span20GapChanged);
+
+				expect(
+					guard.checkEdit(
+						filePath,
+						[2, 20],
+						[
+							[2, 2],
+							[20, 20],
+						],
+					),
+				).toEqual({
+					action: "allow",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when only the bound read's own hashes match (no newer read)", () => {
+			// Kills mutation ID 20 (`boundIndex + 1` -> `boundIndex - 1`), which
+			// reaches back to the bound read itself. Its whitespace-stripped line
+			// hash survives a whitespace-only reformat, so the stale binding would
+			// clear its own anchor instead of asking for the re-read it remediates.
+			const env = setupTestEnvironment("read-guard-supersede-self-");
+			try {
+				const filePath = path.join(env.tmpDir, "self.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-self-session");
+				recordBridgeBinding(guard, filePath, 3);
+				fs.writeFileSync(
+					filePath,
+					"const  a = 1;\nconst  b = 2;\nconst  c = 3;\n",
+				);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when only a provisional newer read covers the line", () => {
+			// Kills mutation IDs 23 and 25 (the provisional skip). A host with no
+			// correlation id records the read probe as a source-less provisional
+			// (runtime-tool-call.ts) and the clipped delivery beside it without
+			// `supersedes` (runtime-tool-result.ts); evidence the agent never saw
+			// must not clear the anchor.
+			const env = setupTestEnvironment("read-guard-supersede-provisional-");
+			try {
+				const filePath = path.join(env.tmpDir, "provisional.ts");
+				fs.writeFileSync(filePath, before);
+				const guard = createReadGuard("supersede-provisional-session");
+				recordBridgeBinding(guard, filePath, 3);
+				// External change the bridge never saw: the binding goes stale.
+				fs.writeFileSync(filePath, after);
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						provisional: true,
+					}),
+				);
+				// The delivered record is clipped to line 1, so the provisional
+				// beside it is the only record that covers the edited line 3.
+				recordNativeRead(guard, filePath, 1, 1);
+
+				const verdict = guard.checkEdit(filePath, [3, 3]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("still blocks when two partial newer reads cover the edit ranges separately", () => {
+			// Kills mutation ID 26 (`.every` -> `.some`): one fresh partial read
+			// per edited range does not make a single record that delivered both,
+			// so the binding is not superseded by combining them.
+			const env = setupTestEnvironment("read-guard-supersede-partials-");
+			try {
+				const filePath = path.join(env.tmpDir, "partials.ts");
+				fs.writeFileSync(filePath, span20);
+				const guard = createReadGuard("supersede-partials-session");
+				recordBridgeBinding(guard, filePath, 1);
+				// External change the bridge never saw: the binding goes stale.
+				fs.writeFileSync(filePath, span20GapChanged);
+				// One fresh partial read per edited range; neither covers both.
+				recordNativeRead(guard, filePath, 2, 1);
+				recordNativeRead(guard, filePath, 20, 1);
+
+				const verdict = guard.checkEdit(
+					filePath,
+					[2, 20],
+					[
+						[2, 2],
+						[20, 20],
+					],
+				);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
+
 	describe("Phase 1: Zero-read and FileTime checks", () => {
 		it("blocks edit on never-read file", () => {
 			const guard = createReadGuard("test-session");
@@ -248,6 +584,132 @@ describe("ReadGuard", () => {
 			}
 		});
 
+		// #4131, #4187 F10: the retirement is its own decision. Recurrence:
+		// round 1 logged it as `file_modified`, indistinguishable in
+		// read-guard.log from a FileTime block on a file the agent had read.
+		it("records an authorship another writer ended as authorship_retired, once", () => {
+			const env = setupTestEnvironment("read-guard-authorship-retired-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_bash" });
+				// Another writer: different bytes (and size, so no same-tick stat tie).
+				fs.writeFileSync(filePath, "export const x = 22;\n");
+
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+
+				const calls = vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.map(([entry]) => entry);
+				expect(
+					calls.filter((entry) => entry.event === "authorship_retired"),
+				).toEqual([
+					expect.objectContaining({
+						filePath: normalizeFilePath(filePath),
+						metadata: expect.objectContaining({
+							hashed: true,
+							toolCallId: "call_bash",
+						}),
+					}),
+				]);
+				expect(
+					calls
+						.filter((entry) => entry.event === "edit_blocked")
+						.map((entry) => entry.metadata?.reasonKind),
+				).toEqual(["authorship_retired", "authorship_retired"]);
+				// The pilens_health ledger row, counted once per retirement.
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					),
+				).toMatchObject({
+					count: 1,
+					latestReasons: [
+						expect.objectContaining({
+							subject: normalizeFilePath(filePath),
+						}),
+					],
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// #4187 R2-4: a bridge write ends the authorship after the fact, so its
+		// row names the writer. Recurrence: without it, read-guard.log cannot
+		// tell a retirement a bridge write caused from one an edit check found.
+		it("records an authorship a bridge write ended as authorship_retired with its writer, once", () => {
+			const env = setupTestEnvironment("read-guard-authorship-bridge-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_bash" });
+				fs.writeFileSync(filePath, "export const x = 22;\n");
+				for (let call = 0; call < 2; call++)
+					guard.recordWritten(filePath, {
+						stampFileTime: false,
+						advanceAuthorship: false,
+					});
+
+				expect(
+					vi
+						.mocked(logReadGuardEvent)
+						.mock.calls.map(([entry]) => entry)
+						.filter((entry) => entry.event === "authorship_retired"),
+				).toEqual([
+					expect.objectContaining({
+						filePath: normalizeFilePath(filePath),
+						metadata: expect.objectContaining({
+							writer: "bridge",
+							toolCallId: "call_bash",
+						}),
+					}),
+				]);
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					)?.count,
+				).toBe(1);
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		// #4187 R2-4 / #4131: a write no pre-write check guarded ends only an
+		// authorship whose bytes it changed (BridgeWrite in formal/read-guard).
+		// Recurrence: #4387 routes the opaque-recovery bash credit here, so a
+		// forced retire would end authorship over bytes the conversation still
+		// holds, which #4131's content identity keeps.
+		it("keeps an authorship whose bytes an unchecked write left identical", () => {
+			const env = setupTestEnvironment("read-guard-authorship-bridge-same-");
+			resetDegradationLedger();
+			try {
+				const filePath = path.join(env.tmpDir, "authored.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const guard = createReadGuard("test-session");
+				guard.recordWritten(filePath, { toolCallId: "call_write" });
+				guard.recordWritten(filePath, {
+					stampFileTime: false,
+					authorship: "unknown",
+					advanceAuthorship: false,
+				});
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-authorship-retired",
+					),
+				).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("blocks zero-read edit on a file the agent never wrote and was last touched before this session", () => {
 			const env = setupTestEnvironment("read-guard-old-file-");
 			try {
@@ -261,6 +723,32 @@ describe("ReadGuard", () => {
 				const verdict = guard.checkEdit(filePath);
 				expect(verdict.action).toBe("block");
 				expect(verdict.reason).toContain("Edit without read");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("blocks zero-read edit on a file another writer touched after the guard started (#3520)", () => {
+			const env = setupTestEnvironment("read-guard-foreign-write-");
+			try {
+				const guard = createReadGuard("test-session");
+				// An external editor, a second pi-lens or git wrote it: no recordWritten.
+				const filePath = path.join(env.tmpDir, "foreign.ts");
+				fs.writeFileSync(filePath, "export const x = 1;\n");
+				const later = new Date(Date.now() + 60_000);
+				fs.utimesSync(filePath, later, later);
+
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("Edit without read");
+				expect(guard.getReadHistory(filePath)).toEqual([]);
+				expect(logReadGuardEvent).toHaveBeenCalledWith(
+					expect.objectContaining({
+						event: "edit_blocked",
+						metadata: expect.objectContaining({ reasonKind: "zero_read" }),
+					}),
+				);
 			} finally {
 				env.cleanup();
 			}
@@ -737,13 +1225,12 @@ describe("ReadGuard", () => {
 			}
 		});
 
-		it("suppresses stale mismatch when a newer re-read covers most of the edit range via context-zone boundary", () => {
-			// Scenario: agent had a large old read [1-3] that is now stale (file changed).
-			// Agent re-reads [1-2] (newer timestamp) and then edits [2-3]:
-			//   - Old read [1-3]: effective candidate, mismatch (line 2 changed)
-			//   - New re-read [1-2]: contextual candidate (line 3 in context zone), unavailable
-			// Expected: do NOT block — the re-read is newer than the mismatch.
-			const env = setupTestEnvironment("read-guard-snapshot-rereed-suppress-");
+		it("allows an edit whose lines each match the newest read that delivered them, though an older read is stale on one", () => {
+			// Old read [1-3] is stale on line 2 (the file changed); the agent then
+			// re-read [1-2]. Editing [2-3]: line 2's newest view is the re-read
+			// (matches), line 3's is the old read (matches). #3522 replaced the
+			// "a newer read cancels the mismatch" rule with this per-line question.
+			const env = setupTestEnvironment("read-guard-snapshot-rereed-per-line-");
 			try {
 				const filePath = path.join(env.tmpDir, "api.ts");
 				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
@@ -752,7 +1239,6 @@ describe("ReadGuard", () => {
 				const t1 = Date.now() - 1000;
 				const t2 = Date.now();
 
-				// Old large read (stale — will mismatch after file changes)
 				guard.recordRead(
 					createReadRecord(filePath, {
 						effectiveOffset: 1,
@@ -761,11 +1247,9 @@ describe("ReadGuard", () => {
 					}),
 				);
 
-				// File changes (simulating a prior successful edit shifting content)
 				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
 				fileTimeState.hasChanged = false;
 
-				// Agent re-reads [1-2] after the change (newer timestamp)
 				guard.recordRead(
 					createReadRecord(filePath, {
 						effectiveOffset: 1,
@@ -774,9 +1258,6 @@ describe("ReadGuard", () => {
 					}),
 				);
 
-				// Edit at [2-3]: line 3 is 1 beyond the re-read boundary [1-2],
-				// falls in context zone (contextLines=3), so re-read is "unavailable"
-				// for line 3 but should still suppress the old mismatch.
 				const verdict = guard.checkEdit(filePath, [2, 3]);
 				expect(verdict.action).toBe("allow");
 			} finally {
@@ -784,7 +1265,45 @@ describe("ReadGuard", () => {
 			}
 		});
 
-		it("does not carry missing lines from one snapshot candidate into mismatch telemetry", () => {
+		it("blocks a line only a newer read context-covers, whatever that read's timestamp", () => {
+			// #3522 ContextSuppress: the newer read [4-4] shows line 3 only through
+			// its context zone, so it cannot cancel the old read's mismatch on 3.
+			const env = setupTestEnvironment("read-guard-snapshot-ctx-only-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						timestamp: Date.now() - 1000,
+					}),
+				);
+				fs.writeFileSync(filePath, "one\ntwo\nTHREE\nfour\n");
+				fileTimeState.hasChanged = false;
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 4,
+						effectiveLimit: 1,
+						timestamp: Date.now(),
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [3, 3]).action).toBe("block");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "mismatch",
+					mismatchedLines: [3],
+					enforced: true,
+					outcome: "enforced-block",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("does not carry missing lines from an older unhashed read into mismatch telemetry", () => {
 			const env = setupTestEnvironment("read-guard-snapshot-telemetry-");
 			try {
 				const filePath = path.join(env.tmpDir, "api.ts");
@@ -807,7 +1326,9 @@ describe("ReadGuard", () => {
 				vi.mocked(logReadGuardEvent).mockClear();
 
 				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
-				expect(guard.checkEdit(filePath, [2, 2]).action).toBe("allow");
+				// The newest read that delivered line 2 is the hashed one, and it
+				// no longer matches: the older unhashed read cannot speak for it.
+				expect(guard.checkEdit(filePath, [2, 2]).action).toBe("block");
 
 				const validationEntry = vi
 					.mocked(logReadGuardEvent)
@@ -817,15 +1338,246 @@ describe("ReadGuard", () => {
 
 				expect(validationEntry?.metadata).toMatchObject({
 					status: "mismatch",
-					candidateReadCount: 2,
-					checkedCandidateCount: 1,
-					unavailableCandidateCount: 1,
+					viewRunCount: 1,
+					checkedLineCount: 1,
 					missingLineCount: 0,
 					mismatchedLineCount: 1,
 					missingLines: [],
 					mismatchedLines: [2],
+					enforced: true,
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("does not let an older hashed read block a line whose newest view carries no hashes", () => {
+			// Unchanged not-decidable rule: the newest view of the line cannot be
+			// checked, and the older read it replaced no longer stands for it.
+			const env = setupTestEnvironment("read-guard-snapshot-unhashed-newest-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+					}),
+				);
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						lineHashes: {},
+					}),
+				);
+				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [2, 2]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "unavailable",
+					missingLines: [2],
+					enforced: false,
+					outcome: "not-decidable",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("never takes a provisional record for the agent's view of a line", () => {
+			// A provisional native read was requested, not delivered. Its hashes
+			// come from the disk at tool_call, so counting it would vouch for bytes
+			// the agent never saw.
+			const env = setupTestEnvironment("read-guard-snapshot-provisional-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+					}),
+				);
+				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
+				fileTimeState.hasChanged = false;
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+						provisional: true,
+					}),
+				);
+
+				expect(guard.checkEdit(filePath, [2, 2]).action).toBe("block");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("checks each line only against its own newest read when an older read brackets a newer one", () => {
+			// Old read A [1-6]; line 5 changes and the agent re-reads it alone (B).
+			// Editing [4-6]: 4 and 6 come from A, 5 from B. A's stale hash for line
+			// 5 must not be held against the edit (one run per read, not one span).
+			const env = setupTestEnvironment("read-guard-snapshot-bracket-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 6,
+					}),
+				);
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nL5\nl6\n");
+				fileTimeState.hasChanged = false;
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 5,
+						effectiveLimit: 1,
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [4, 6]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "match",
+					viewRunCount: 3,
+					checkedLineCount: 3,
+					enforced: true,
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("blocks a stale hashed line even when the range also holds lines the read has no hash for", () => {
+			// The read's effective range (1-10) outruns the 6-line file it hashed,
+			// so lines 7-8 (appended later) have no hash. They are missing, not a
+			// reason to stop checking line 5.
+			const env = setupTestEnvironment("read-guard-snapshot-partial-hash-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 10,
+					}),
+				);
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nL5\nl6\nl7\nl8");
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [5, 8]).action).toBe("block");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "mismatch",
+					viewRunCount: 1,
+					checkedLineCount: 2,
+					mismatchedLines: [5],
+					missingLines: [7, 8],
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("does not judge a line whose newest view is unhashed by the older read on both sides of it", () => {
+			// A [1-6] hashed; line 5 changes and the agent re-reads it unhashed (B).
+			// Line 5 is missing, so [4-6] is two runs of A (4 and 6): merging them
+			// would hold A's stale hash for line 5 against the edit.
+			const env = setupTestEnvironment("read-guard-snapshot-gap-run-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 6,
+					}),
+				);
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nL5\nl6");
+				fileTimeState.hasChanged = false;
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 5,
+						effectiveLimit: 1,
+						lineHashes: {},
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [4, 6]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "unavailable",
+					viewRunCount: 2,
+					checkedLineCount: 2,
+					missingLines: [5],
 					enforced: false,
 				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("reports a line only a context zone covers as unavailable and blocks nothing", () => {
+			// ContextSlack (admitted): line 3 was never delivered, so nothing can
+			// check it, and it must not read as a match.
+			const env = setupTestEnvironment("read-guard-snapshot-ctx-line-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "l1\nl2\nl3\nl4\nl5\nl6");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 5,
+						effectiveLimit: 2,
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [3, 3]).action).toBe("allow");
+				expect(lastValidationMetadata()).toMatchObject({
+					status: "unavailable",
+					missingLines: [3],
+					enforced: false,
+					outcome: "not-decidable",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("does not hash-check an edit the coverage gate refuses", () => {
+			// The per-line check walks the range line by line, so it must only ever
+			// run on a range some read covers, never on a caller-supplied
+			// [1, 50_000].
+			const env = setupTestEnvironment("read-guard-snapshot-after-coverage-");
+			try {
+				const filePath = path.join(env.tmpDir, "api.ts");
+				fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+				const guard = createReadGuard("test-session");
+				guard.recordRead(
+					createReadRecord(filePath, {
+						effectiveOffset: 1,
+						effectiveLimit: 3,
+					}),
+				);
+				vi.mocked(logReadGuardEvent).mockClear();
+
+				expect(guard.checkEdit(filePath, [1, 50_000]).action).toBe("block");
+				expect(
+					vi
+						.mocked(logReadGuardEvent)
+						.mock.calls.some(
+							([entry]) => entry.event === "range_snapshot_validation",
+						),
+				).toBe(false);
 			} finally {
 				env.cleanup();
 			}
@@ -1602,6 +2354,360 @@ describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
 		}
 	});
 
+	// #4210 F-4210-1: successive own credits must compose their produced
+	// ranges instead of dropping the first range and vouching for the file.
+	it("unions disjoint and overlapping successive own-credit ranges (#4210)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-union-");
+		try {
+			const filePath = path.join(env.tmpDir, "union.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-union");
+
+			fs.writeFileSync(filePath, "one\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[3, 3]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(filePath, "own\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-own",
+				authoredRanges: [[1, 1]],
+			});
+			expect(guard.checkEdit(filePath, [2, 2]).action).toBe("block");
+			expect(guard.checkEdit(filePath, [3, 3]).action).toBe("allow");
+			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+
+			const overlapPath = path.join(env.tmpDir, "overlap.ts");
+			fs.writeFileSync(overlapPath, "one\ntwo\nthree\nfour\n");
+			const overlapGuard = createReadGuard("authorship-overlap");
+			fs.writeFileSync(overlapPath, "one\nowned\nbridge\nfour\n");
+			overlapGuard.recordWritten(overlapPath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 3]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(overlapPath, "own\nowned-again\nbridge\nfour\n");
+			overlapGuard.recordWritten(overlapPath, {
+				stampFileTime: false,
+				toolCallId: "call-overlap",
+				authoredRanges: [[3, 3]],
+			});
+			expect(overlapGuard.checkEdit(overlapPath, [2, 2]).action).toBe("allow");
+
+			const wholePath = path.join(env.tmpDir, "whole.ts");
+			fs.writeFileSync(wholePath, "one\ntwo\nthree\nfour\n");
+			const wholeGuard = createReadGuard("authorship-whole");
+			fs.writeFileSync(wholePath, "one\nbridge\nthree\nfour\n");
+			wholeGuard.recordWritten(wholePath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 2]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(wholePath, "own\nbridge\nthree\nfour\n");
+			wholeGuard.recordWritten(wholePath, {
+				stampFileTime: false,
+				toolCallId: "call-whole",
+				authorship: "partial",
+				authoredRanges: [[1, 1]],
+			});
+			expect(wholeGuard.checkEdit(wholePath, [4, 4]).action).toBe("block");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4210 F-4210-2: a partial credit is a license only for the lines its
+	// writer produced. Recurrence: injectCreationRead widened the first
+	// allowed inside edit into a whole-file license.
+	it("keeps partial authorship narrow after an allowed inside edit (#4210)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-narrow-");
+		try {
+			const filePath = path.join(env.tmpDir, "narrow.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-narrow");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 2]],
+				allowFirstAuthorship: true,
+			});
+
+			expect(guard.checkEdit(filePath, [4, 4]).action).toBe("block");
+			expect(guard.checkEdit(filePath, [2, 2]).action).toBe("allow");
+			expect(guard.checkEdit(filePath, [4, 4]).action).toBe("block");
+
+			const reverse = createReadGuard("authorship-narrow-reverse");
+			reverse.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[2, 2]],
+				allowFirstAuthorship: true,
+			});
+			expect(reverse.checkEdit(filePath, [2, 2]).action).toBe("allow");
+			expect(reverse.checkEdit(filePath, [4, 4]).action).toBe("block");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4210 N3 recurrence: an observed licensed partial replay must not narrow
+	// an existing whole-file authorship to the replay's reported range.
+	it("keeps whole-file authorship when a licensed partial credit follows it (#4210 N3)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-whole-union-");
+		try {
+			const filePath = path.join(env.tmpDir, "whole-union.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-whole-union");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authorship: "whole-file",
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(filePath, "one\nobserved\nthree\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authorship: "partial",
+				authoredRanges: [[2, 2]],
+			});
+			expect(guard.checkEdit(filePath, [4, 4]).action).toBe("allow");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4387: an UNKNOWN credit names no line it produced, so over a range scope
+	// it leaves an empty scope. Every zero-read edit then needs a read, as
+	// before, and no record claims another writer changed the bytes.
+	// Recurrence: the credit force-retired the scope, so the next edit read
+	// "File modified since your write" with no other writer (review G2, S8).
+	it("leaves an empty scope, not a retirement, when an UNKNOWN credit lands on a range scope (#4387)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-unknown-");
+		resetDegradationLedger();
+		try {
+			const filePath = path.join(env.tmpDir, "unknown.ts");
+			fs.writeFileSync(filePath, "one\ntwo\n");
+			const guard = createReadGuard("authorship-unknown");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[1, 1]],
+				allowFirstAuthorship: true,
+			});
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authorship: "unknown",
+			});
+			const inside = guard.checkEdit(filePath, [1, 1]);
+			expect(inside.action).toBe("block");
+			expect(inside.reason).toContain("this write only covered part");
+			expect(guard.checkEdit(filePath, [2, 2]).action).toBe("block");
+			expect(
+				guard.exportAuthorship().entries?.find((entry) => entry.retired),
+			).toBeUndefined();
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "read-guard-authorship-retired",
+				),
+			).toBeUndefined();
+			expect(
+				vi
+					.mocked(logReadGuardEvent)
+					.mock.calls.filter(([entry]) => entry.event === "authorship_retired"),
+			).toEqual([]);
+			// A read that names a call bounds a whole-file advance, never a scope:
+			// the scope stays empty, so after a resume that keeps the edit and
+			// drops the read, line 2 (never read, never authored) is still refused.
+			// Recurrence: an UNKNOWN credit composed into a range scope widens it
+			// to the whole file (F-4210-2's shape behind a read).
+			const scoped = path.join(env.tmpDir, "scoped.ts");
+			fs.writeFileSync(scoped, "one\ntwo\n");
+			guard.recordRead(
+				createReadRecord(scoped, {
+					requestedLimit: 1,
+					effectiveLimit: 1,
+					toolCallId: "call-read",
+				}),
+			);
+			guard.recordWritten(scoped, {
+				stampFileTime: false,
+				authoredRanges: [[1, 1]],
+				allowFirstAuthorship: true,
+				toolCallId: "call-scope",
+			});
+			guard.recordWritten(scoped, {
+				stampFileTime: false,
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			const resumed = createReadGuard("authorship-unknown-resumed");
+			resumed.importAuthorship(
+				guard.exportAuthorship(),
+				new Set(["call-edit"]),
+			);
+			expect(resumed.checkEdit(scoped, [2, 2]).action).toBe("block");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #4387: over a whole-file authorship an UNKNOWN range is moot while a read
+	// that names a tool call bounds the advance (the zero-read allow records
+	// one), and the writer rule decides. Recurrences: the UNKNOWN short-circuit
+	// retired the authorship of the agent's own write at its own oldText edit;
+	// with no such read, a move kept the advanced authorship alone over bytes no
+	// check covered (review r1 F1, S12).
+	it("advances a whole-file authorship over an UNKNOWN credit only from a checked writer with a bounding read (#4387)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-unknown-whole-");
+		resetDegradationLedger();
+		try {
+			const credit = (name: string) => {
+				const filePath = path.join(env.tmpDir, name);
+				fs.writeFileSync(filePath, "one\ntwo\n");
+				const guard = createReadGuard(`authorship-unknown-${name}`);
+				guard.recordWritten(filePath, {
+					stampFileTime: false,
+					authorship: "whole-file",
+					toolCallId: "call-write",
+				});
+				const entry = () =>
+					guard
+						.exportAuthorship()
+						.entries?.find(
+							(candidate) => path.basename(candidate.filePath) === name,
+						);
+				return { filePath, guard, entry };
+			};
+			const landEdit = (filePath: string) =>
+				fs.writeFileSync(filePath, "one\nTWO\nthree\n");
+			// A native oldText edit after the zero-read allow, which recorded a
+			// read naming the write. The licensed in-process writer is pinned
+			// through the bridge seam in mutation-bridge.test.ts.
+			const own = credit("own.ts");
+			expect(own.guard.checkEdit(own.filePath, [1, 1]).action).toBe("allow");
+			landEdit(own.filePath);
+			own.guard.recordWritten(own.filePath, {
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			expect(own.entry()).toMatchObject({ toolCallId: "call-edit" });
+			expect(own.entry()?.retired).toBeUndefined();
+			expect(own.entry()?.authoredRanges).toBeUndefined();
+			// No read names a tool call, so nothing would bound the advance after
+			// a move: the credit leaves an empty scope.
+			const unbounded = credit("unbounded.ts");
+			landEdit(unbounded.filePath);
+			unbounded.guard.recordWritten(unbounded.filePath, {
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			expect(unbounded.entry()?.authoredRanges).toEqual([]);
+			expect(
+				unbounded.guard.checkEdit(unbounded.filePath, [1, 1]).reason,
+			).toContain("this write only covered part");
+			// No pre-write check: it can only end the authorship it changed.
+			const unchecked = credit("unchecked.ts");
+			landEdit(unchecked.filePath);
+			unchecked.guard.recordWritten(unchecked.filePath, {
+				stampFileTime: false,
+				authorship: "unknown",
+				advanceAuthorship: false,
+			});
+			expect(unchecked.entry()?.retired).toBe(true);
+			expect(unchecked.guard.checkEdit(unchecked.filePath, [1, 1]).action).toBe(
+				"block",
+			);
+			// And an UNKNOWN credit still creates no first authorship.
+			const fresh = path.join(env.tmpDir, "fresh.ts");
+			fs.writeFileSync(fresh, "one\n");
+			const freshGuard = createReadGuard("authorship-unknown-fresh");
+			freshGuard.recordWritten(fresh, {
+				stampFileTime: false,
+				authorship: "unknown",
+				toolCallId: "call-edit",
+			});
+			expect(freshGuard.exportAuthorship().entries).toEqual([]);
+			expect(freshGuard.checkEdit(fresh, [1, 1]).action).toBe("block");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops malformed persisted authored ranges without throwing", () => {
+		const guard = createReadGuard("authorship-import-validation");
+		expect(() =>
+			guard.importAuthorship(
+				{
+					entries: [
+						{
+							filePath: "/tmp/malformed-authored-range.ts",
+							size: 1,
+							mtimeMs: 1,
+							ctimeMs: 1,
+							toolCallId: "call-import",
+							authoredRanges: [null],
+						},
+					],
+				},
+				new Set(["call-import"]),
+			),
+		).not.toThrow();
+	});
+
+	// #4210 F-4210-1: when a later own write changes line positions, the
+	// existing range cannot be remapped from AuthoredBytes, so retire that
+	// shifted scope rather than silently licensing the wrong line.
+	it("retires an authored range when a later own write shifts lines above it (#4210)", () => {
+		const env = setupTestEnvironment("read-guard-authorship-shift-");
+		try {
+			const filePath = path.join(env.tmpDir, "shift.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\nfour\n");
+			const guard = createReadGuard("authorship-shift");
+
+			fs.writeFileSync(filePath, "one\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				authoredRanges: [[3, 3]],
+				allowFirstAuthorship: true,
+			});
+			fs.writeFileSync(filePath, "inserted\none\ntwo\nbridge\nfour\n");
+			guard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-shift",
+				authoredRanges: [[1, 1]],
+			});
+
+			expect(guard.checkEdit(filePath, [3, 3]).action).toBe("block");
+			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("forgets the authorship of an idle-evicted file, so it needs a read again (#3520)", () => {
+		const env = setupTestEnvironment("read-guard-idle-authorship-");
+		vi.useFakeTimers();
+		try {
+			const filePath = path.join(env.tmpDir, "idle.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			// The kernel's coarse clock can stamp the file before the fake clock's
+			// start; pin a newer mtime so the mtime fallback of the code before
+			// #3520 fires on every run.
+			const later = new Date(Date.now() + 60_000);
+			fs.utimesSync(filePath, later, later);
+			const guard = createReadGuard("tier2-idle-authorship");
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath); // consumes the read; arms the idle timer
+			expect(guard.exportAuthorship().written).toHaveLength(1);
+
+			vi.advanceTimersByTime(31 * 60_000);
+
+			expect(guard.exportAuthorship().written).toEqual([]);
+			expect(guard.checkEdit(filePath).action).toBe("block");
+		} finally {
+			vi.useRealTimers();
+			env.cleanup();
+		}
+	});
+
 	it("retains an old read until an edit consumes it", () => {
 		vi.useFakeTimers();
 		try {
@@ -1626,24 +2732,130 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 			.mock.calls.filter(([entry]) => entry.event === event);
 	}
 
-	// #1918 review F2: idle-timeout is routine housekeeping, not a fault — a
-	// read-only session idling out N files is healthy behavior, and N is
-	// unbounded, so it takes an in-code justification (evictFile's doc
-	// comment) instead of an always-on record. The eviction itself still
-	// happens; only the telemetry is intentionally silent.
-	it("evicts on idle timeout without any read_file_evicted record", () => {
+	// #1918 review F2: idle-timeout is routine housekeeping, not a fault, so it
+	// stays out of the ledger and logs nothing for a file that carried no
+	// authorship. Recurrence: a record per idle eviction would flood the log in
+	// every healthy session (an edit-history-only file idles out too).
+	it("evicts an idle file that carried no write record without any read_file_evicted record", () => {
 		vi.useFakeTimers();
 		try {
 			const guard = createReadGuard("1918-idle-evict-session");
 			const filePath = "/tmp/1918-idle-evict.ts";
-			guard.recordRead(createReadRecord(filePath));
-			guard.recordWritten(filePath); // marks consumed; arms the idle timer
+			// A blocked zero-read edit leaves an edit history and arms the idle timer.
+			expect(guard.checkEdit(filePath, [1, 1]).action).toBe("block");
+			expect(guard.getEditHistory(filePath)).toHaveLength(1);
 			vi.mocked(logReadGuardEvent).mockClear();
 
 			vi.advanceTimersByTime(31 * 60_000);
 
-			expect(guard.getReadHistory(filePath)).toHaveLength(0);
+			expect(guard.getEditHistory(filePath)).toHaveLength(0);
 			expect(evictionEvents("read_file_evicted")).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// #3520: an idle-evicted write record is one read_file_evicted line per file
+	// per session. Recurrence: the eviction was silent, so a later zero_read
+	// block of an edited file had nothing in read-guard.log to explain it.
+	it("records an idle-evicted write record once per file per session (#3520)", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("3520-idle-record-session");
+			const filePath = "/tmp/3520-idle-record.ts";
+			const otherPath = "/tmp/3520-idle-record-other.ts";
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath);
+			vi.mocked(logReadGuardEvent).mockClear();
+
+			vi.advanceTimersByTime(31 * 60_000);
+
+			const first = evictionEvents("read_file_evicted");
+			expect(first).toHaveLength(1);
+			expect(first[0][0]).toMatchObject({
+				event: "read_file_evicted",
+				filePath: normalizeFilePath(filePath),
+				metadata: { reason: "idle-timeout", authorshipDropped: true },
+			});
+
+			// The same file written and evicted again: no second line.
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath);
+			vi.advanceTimersByTime(31 * 60_000);
+			expect(evictionEvents("read_file_evicted")).toHaveLength(1);
+
+			// Another file gets its own line.
+			guard.recordRead(createReadRecord(otherPath));
+			guard.recordWritten(otherPath);
+			vi.advanceTimersByTime(31 * 60_000);
+			expect(
+				evictionEvents("read_file_evicted").map(([entry]) => entry.filePath),
+			).toEqual([normalizeFilePath(filePath), normalizeFilePath(otherPath)]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// #3520: the zero_read text claims "you have not read X in this
+	// conversation". For a file the agent wrote, that is false. Recurrence: the
+	// agent argued with the guard about a file it had just edited.
+	it("tells an edit of a file whose write record idle-expired that the record expired (#3520)", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("3520-idle-text-session");
+			const filePath = "/tmp/3520-idle-text.ts";
+			const neverPath = "/tmp/3520-never-written.ts";
+			guard.recordRead(createReadRecord(filePath));
+			guard.recordWritten(filePath);
+			vi.advanceTimersByTime(31 * 60_000);
+			vi.mocked(logReadGuardEvent).mockClear();
+
+			const expired = guard.checkEdit(filePath, [1, 1]);
+			const never = guard.checkEdit(neverPath, [1, 1]);
+
+			const canonical = normalizeFilePath(filePath);
+			expect(expired.action).toBe("block");
+			expect(expired.reason).toBe(
+				`🔄 RETRYABLE — Edit without read: the earlier write record for \`${canonical}\` expired, so it needs a read again. Read it first, then retry: \`read path="${canonical}"\`.`,
+			);
+			expect(expired.reason).not.toContain("have not read");
+			// A file that was never written keeps the zero_read text.
+			expect(never.reason).toContain("you have not read");
+			const blocked = vi
+				.mocked(logReadGuardEvent)
+				.mock.calls.filter(([entry]) => entry.event === "edit_blocked");
+			expect(blocked.map(([entry]) => entry.metadata)).toEqual([
+				expect.objectContaining({
+					reasonKind: "zero_read",
+					writeRecordExpired: true,
+				}),
+				expect.not.objectContaining({ writeRecordExpired: true }),
+			]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// #3520: the marker set is bounded like the file store. Recurrence guarded:
+	// a long session that edits many files grows the set without bound.
+	it("keeps the expired write records of at most 256 files (#3520)", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("3520-idle-cap-session");
+			const paths = Array.from(
+				{ length: 257 },
+				(_, i) => `/tmp/3520-idle-cap-${i}.ts`,
+			);
+			for (const filePath of paths) guard.recordWritten(filePath);
+
+			vi.advanceTimersByTime(31 * 60_000);
+
+			expect(guard.checkEdit(paths[0], [1, 1]).reason).toContain(
+				"you have not read",
+			);
+			expect(guard.checkEdit(paths[256], [1, 1]).reason).toContain(
+				"write record",
+			);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1767,6 +2979,34 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 		);
 	});
 
+	// #4187 R3-3: authorship-cap pressure is counted for every eviction, but
+	// read-guard.log gets only the rising-edge witness. Recurrence: one log row
+	// per over-cap file flooded the sink during a steady-state credit stream.
+	// #4187 R4-3 (T9b): one eviction proves nothing about the gate — a single
+	// row is also what an ungated `if (true)` emits — so this credits 104 files
+	// past the cap and pins 104 counted against ONE row.
+	it("counts authorship-cap evictions and logs only its rising edge", () => {
+		resetDegradationLedger();
+		const guard = createReadGuard("4187-authorship-cap-observability");
+		const overCap = 104;
+		for (let i = 0; i < 4096 + overCap; i += 1) {
+			const filePath = `/tmp/4187-authorship-cap-${i}.ts`;
+			guard.recordWritten(filePath);
+		}
+		const evictions = evictionEvents("read_file_evicted").filter(
+			([entry]) => entry.metadata?.reason === "authorship-cap",
+		);
+		expect(evictions).toHaveLength(1);
+		expect(evictions[0][0]).toMatchObject({
+			metadata: { reason: "authorship-cap", authorshipDropped: true },
+		});
+		expect(
+			getDegradationSummary().find(
+				(group) => group.kind === "read-guard-authorship-cap",
+			)?.count,
+		).toBe(overCap);
+	});
+
 	// #1918 review F3: pin session re-arm — the SAME file evicted twice within
 	// one session logs once (rising edge), but a fresh session (which is what
 	// resetDegradationLedger models: the ledger's own generation bump, wired
@@ -1791,165 +3031,6 @@ describe("ReadGuard eviction-path telemetry (#1918)", () => {
 		guard.recordRead(createReadRecord(filePath));
 		guard.forgetPath(filePath);
 		expect(evictionEvents("read_file_evicted")).toHaveLength(2);
-	});
-});
-
-// #1041: export/import of the read-set across a session resume.
-describe("ReadGuard export/import across resume (#1041)", () => {
-	// Write, then backdate mtime to BEFORE any guard's session start so the file
-	// reads as authored in a prior session (not "written this session"), which is
-	// exactly the resume scenario. Otherwise a just-written file's now-ish mtime
-	// makes wasWrittenThisSession() true and every edit is session-authored.
-	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
-	function writeNumberedLines(filePath: string, count: number): void {
-		fs.writeFileSync(
-			filePath,
-			`${Array.from({ length: count }, (_, i) => `line${i + 1}`).join("\n")}\n`,
-		);
-		fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
-	}
-
-	it("rehydrates a prior read so the first post-resume edit is allowed", () => {
-		const env = setupTestEnvironment("read-guard-resume-");
-		try {
-			const filePath = path.join(env.tmpDir, "foo.ts");
-			writeNumberedLines(filePath, 100);
-
-			// Session 1: read lines 1..100, then editing 40..50 is allowed.
-			const guard1 = createReadGuard("session-1");
-			guard1.recordRead(
-				createReadRecord(filePath, {
-					requestedOffset: 1,
-					requestedLimit: 100,
-					effectiveOffset: 1,
-					effectiveLimit: 100,
-				}),
-			);
-			expect(guard1.checkEdit(filePath, [40, 50]).action).toBe("allow");
-
-			// Session 2: a FRESH guard (models resetForSession wiping state) starts
-			// with no reads → would zero-read-block. After importing the persisted
-			// read-set, the same edit is allowed again.
-			const guard2 = createReadGuard("session-2");
-			expect(guard2.checkEdit(filePath, [40, 50]).action).toBe("block");
-
-			const result = guard2.importState(guard1.exportState());
-			expect(result).toEqual({ imported: 1, dropped: 0 });
-			expect(guard2.getReadHistory(filePath)).toHaveLength(1);
-			expect(guard2.checkEdit(filePath, [40, 50]).action).toBe("allow");
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("drops a rehydrated read whose file content changed on disk (staleness preserved)", () => {
-		const env = setupTestEnvironment("read-guard-resume-stale-");
-		try {
-			const filePath = path.join(env.tmpDir, "foo.ts");
-			writeNumberedLines(filePath, 100);
-
-			const guard1 = createReadGuard("session-1");
-			guard1.recordRead(
-				createReadRecord(filePath, {
-					requestedOffset: 1,
-					requestedLimit: 100,
-					effectiveOffset: 1,
-					effectiveLimit: 100,
-				}),
-			);
-			const exported = guard1.exportState();
-
-			// The file changes on disk between sessions (line 45 rewritten). Keep the
-			// mtime backdated so the drop is driven by the hash mismatch, not by a
-			// now-ish mtime tripping the session-authored allow.
-			const lines = fs.readFileSync(filePath, "utf-8").split("\n");
-			lines[44] = "line45-CHANGED";
-			fs.writeFileSync(filePath, lines.join("\n"));
-			fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
-
-			// A rehydrated read must never mask a real staleness: the changed read
-			// is dropped, so the edit is (correctly) blocked as zero-read.
-			const guard2 = createReadGuard("session-2");
-			const result = guard2.importState(exported);
-			expect(result).toEqual({ imported: 0, dropped: 1 });
-			expect(guard2.getReadHistory(filePath)).toHaveLength(0);
-			expect(guard2.checkEdit(filePath, [40, 50]).action).toBe("block");
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("drops rehydrated reads for a file that no longer exists", () => {
-		const env = setupTestEnvironment("read-guard-resume-missing-");
-		try {
-			const filePath = path.join(env.tmpDir, "gone.ts");
-			writeNumberedLines(filePath, 10);
-			const guard1 = createReadGuard("session-1");
-			guard1.recordRead(
-				createReadRecord(filePath, {
-					requestedOffset: 1,
-					requestedLimit: 10,
-					effectiveOffset: 1,
-					effectiveLimit: 10,
-				}),
-			);
-			const exported = guard1.exportState();
-			fs.rmSync(filePath);
-
-			const guard2 = createReadGuard("session-2");
-			expect(guard2.importState(exported)).toEqual({ imported: 0, dropped: 1 });
-			expect(guard2.getReadHistory(filePath)).toHaveLength(0);
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("import is a null-safe no-op for undefined / mismatched version", () => {
-		const env = setupTestEnvironment("read-guard-resume-compat-");
-		try {
-			const guard = createReadGuard("session-x");
-			expect(guard.importState(undefined)).toEqual({ imported: 0, dropped: 0 });
-			expect(guard.importState({ version: 999, reads: [] })).toEqual({
-				imported: 0,
-				dropped: 0,
-			});
-		} finally {
-			env.cleanup();
-		}
-	});
-
-	it("degrades to a no-op on a malformed payload instead of throwing", () => {
-		const env = setupTestEnvironment("read-guard-resume-malformed-");
-		try {
-			const guard = createReadGuard("session-x");
-
-			// `reads` is not an array (corrupt / hand-edited sidecar).
-			const nonArrayReads = {
-				version: READ_GUARD_STATE_VERSION,
-				reads: {} as unknown,
-			} as unknown as import("../../clients/read-guard.js").PersistedReadGuardState;
-			expect(() => guard.importState(nonArrayReads)).not.toThrow();
-			expect(guard.importState(nonArrayReads)).toEqual({
-				imported: 0,
-				dropped: 0,
-			});
-
-			// `reads` array with a non-tuple element mixed in with a valid one.
-			const badElement = {
-				version: READ_GUARD_STATE_VERSION,
-				reads: [[normalizeFilePath("/src/x.ts"), []], 5],
-			} as unknown as import("../../clients/read-guard.js").PersistedReadGuardState;
-			expect(() => guard.importState(badElement)).not.toThrow();
-			expect(guard.importState(badElement)).toEqual({
-				imported: 0,
-				dropped: 0,
-			});
-
-			// The map is uncorrupted — nothing was recorded.
-			expect(guard.getReadHistory("/src/x.ts")).toHaveLength(0);
-		} finally {
-			env.cleanup();
-		}
 	});
 });
 

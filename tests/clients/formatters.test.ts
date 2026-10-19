@@ -48,6 +48,7 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 import { FORMATTER_MARKERS } from "../../clients/tool-cwd.js";
+import { setProjectTrustState } from "../../clients/project-trust.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { _getSpotlessGradleReadCountForTests } from "../../clients/tool-policy.js";
 
@@ -130,6 +131,9 @@ let tmpDir: string;
 let cleanup: () => void;
 
 beforeEach(() => {
+	// This suite plants project-local rungs on purpose; the trust gate itself
+	// is witnessed in `project-local-bin-trust.test.ts`.
+	setProjectTrustState("trusted");
 	({ tmpDir, cleanup } = setupTestEnvironment("pi-lens-fmt-test-"));
 });
 
@@ -207,6 +211,60 @@ describe("resolveCommand — node_modules/.bin", () => {
 		expect(cmd).toContain("space");
 		expect(cmd).toContain("--indent-width");
 		expect(cmd).toContain("2");
+	});
+
+	// Recurrence this pins (#4321): tab evidence proves the style, not a display
+	// width, and the invented `--indent-width 1` made Biome re-wrap lines near 80
+	// columns that its own default had already formatted. Exact argv, so a
+	// reintroduced width flag on any style-pinning formatter reds here.
+	it("biome: pins tab style without inventing an indent width (#4321)", async () => {
+		const binPath = nodeModulesBin(tmpDir, "biome");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "index.ts");
+		fs.writeFileSync(filePath, "function f() {\n\treturn 1;\n}\n");
+
+		expect(await biomeFormatter.resolveCommand!(filePath, tmpDir)).toEqual([
+			binPath,
+			"format",
+			"--write",
+			"--no-errors-on-unmatched",
+			"--indent-style",
+			"tab",
+			filePath,
+		]);
+	});
+
+	it("prettier: pins tab style without inventing a tab width (#4321)", async () => {
+		const binPath = nodeModulesBin(tmpDir, "prettier");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "app.ts");
+		fs.writeFileSync(filePath, "function f() {\n\treturn 1;\n}\n");
+
+		expect(await prettierFormatter.resolveCommand!(filePath, tmpDir)).toEqual([
+			binPath,
+			"--write",
+			"--use-tabs",
+			filePath,
+		]);
+	});
+
+	// Recurrence this pins (#4321 F1): the Prettier space arm must carry its
+	// detected width. Dropping `--tab-width` leaves Prettier on its own default
+	// width, so this exact-argv row reds on that mutation.
+	it("prettier: pins space style and detected tab width (#4321)", async () => {
+		const binPath = nodeModulesBin(tmpDir, "prettier");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "app.ts");
+		fs.writeFileSync(filePath, "function f() {\n  return 1;\n}\n");
+
+		expect(await prettierFormatter.resolveCommand!(filePath, tmpDir)).toEqual([
+			binPath,
+			"--write",
+			"--no-use-tabs",
+			"--tab-width",
+			"2",
+			filePath,
+		]);
 	});
 
 	it("biome: ancestor editorconfig disables inferred style flags", async () => {
@@ -528,8 +586,6 @@ describe("resolveCommand — .venv", () => {
 		expect(cmd).toEqual([
 			binPath,
 			"format",
-			"--config",
-			"indent-width=1",
 			"--config",
 			"format.indent-style='tab'",
 			filePath,

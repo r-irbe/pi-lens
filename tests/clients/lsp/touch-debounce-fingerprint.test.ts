@@ -75,6 +75,7 @@ async function setup() {
 		getAllDiagnostics: vi.fn(() => new Map()),
 		getDiagnosticBinding: vi.fn(() => undefined),
 		notify: {
+			announceCreated: () => undefined,
 			open: (
 				filePath: string,
 				content: string,
@@ -103,6 +104,7 @@ async function setup() {
 			id: "typescript",
 			name: "typescript",
 			extensions: [".ts"],
+			idleEviction: "resident",
 			root: async () => ROOT,
 			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 		},

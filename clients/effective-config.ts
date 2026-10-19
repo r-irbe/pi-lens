@@ -55,6 +55,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 import { type LanguageEntry, resolveLanguage } from "./language-registry.js";
 import { getPiLensGlobalConfigPath } from "./lens-config.js";
 import {
+	customServerSpecsOf,
 	explainServersForFile,
 	lspConfigOf,
 	registerLSPConfig,
@@ -111,6 +112,20 @@ interface RedactedServerSpec {
 	readonly argvCount: number;
 	/** Env NAMES, sorted. Values never appear on this surface. */
 	readonly envNames: readonly string[];
+	/**
+	 * The runner-ownership claim, as the resolved config carries it (#3968).
+	 * Runner ids are not secret and do not name paths or env values: a covers
+	 * value renders so `effective_config` answers "why did this runner defer"
+	 * from the same view that renders the server. `command`/`args`/`env` keep
+	 * their existing redaction untouched. Absent when the entry carries none;
+	 * the runtime loader (`lspConfigOf`) has already dropped unknown runner-id
+	 * members from the SESSION's copy, and the core's validation drops
+	 * non-array values at the leaf, so this projects the resolved value's
+	 * claim — a value the runtime will not act on would render only when the
+	 * resolution this view was built from predates the drop (never: one
+	 * resolution, two consumers).
+	 */
+	readonly covers?: readonly string[];
 }
 
 /** One server's answer for a file, with the reason and the tier that decided. */
@@ -216,10 +231,23 @@ function redactServerSpec(entry: unknown): RedactedServerSpec | undefined {
 		typeof record.env === "object" && record.env !== null
 			? Object.keys(record.env as Record<string, unknown>).sort(compareOrdinal)
 			: [];
+	// The resolved value is validate()'s output, so a covers key present here
+	// is an array; a defensive member check keeps a hand-built resolution (a
+	// caller that skipped validate(), contract-citing merge.ts) from rendering
+	// a non-string member as a runner id.
+	const rawCovers = record.covers;
+	let covers: string[] | undefined;
+	if (Array.isArray(rawCovers)) {
+		covers = [];
+		for (const member of rawCovers as unknown[]) {
+			if (typeof member === "string") covers.push(member);
+		}
+	}
 	return {
 		...(command === undefined ? {} : { command }),
 		argvCount: (command === undefined ? 0 : 1) + args.length,
 		envNames: env,
+		...(covers === undefined || covers.length === 0 ? {} : { covers }),
 	};
 }
 
@@ -482,7 +510,9 @@ export async function effectiveConfig(
 							// `{ absolute, lspConfig }` struct (#2520): `absolute` is already
 							// this branch's narrowed local, so the struct's own field was
 							// carrying the same fact twice.
-							registerLSPConfig(lspConfigOf(resolution.value)),
+							registerLSPConfig(
+								lspConfigOf(resolution.value, undefined, resolution.provenance),
+							),
 						),
 					}),
 	};
@@ -515,12 +545,11 @@ async function fileView(
 	const language: LanguageEntry | undefined = resolveLanguage(absolute);
 	const kind = detectFileKind(absolute);
 	const section = lspSectionOf(resolved.value);
-	const customServers =
-		typeof section.servers === "object" &&
-		section.servers !== null &&
-		!Array.isArray(section.servers)
-			? (section.servers as Record<string, unknown>)
-			: {};
+	// The redacted spec reads the SAME validated projection the gates register
+	// (`customServerSpecsOf`), not the raw section: the covers values rendered
+	// here are the claim the runtime holds, and a member the loader dropped
+	// cannot render as if it would defer anything (#3968).
+	const customServers = customServerSpecsOf(resolved.value);
 
 	// The provenance that answers "why can I not turn THIS one back on".
 	//

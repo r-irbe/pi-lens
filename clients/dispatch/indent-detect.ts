@@ -1,9 +1,10 @@
-type IndentStyle = "tab" | "space";
-
-export interface Indentation {
-	style: IndentStyle;
-	width: number;
-}
+/**
+ * A tab file proves the STYLE only: one tab per nesting level says nothing
+ * about the display width, and a formatter that wraps at a column limit reads
+ * a pinned width as a different line length (#4321). Only space runs measure a
+ * unit, so only the space arm carries one.
+ */
+export type Indentation = { style: "tab" } | { style: "space"; width: number };
 
 const DEFAULT_INDENTATION: Indentation = { style: "space", width: 2 };
 
@@ -29,7 +30,7 @@ export function detectIndentation(content: string): Indentation | undefined {
 		// content with no raw indentation, whose callers never enter this path.
 		return hasDetectableIndentation(content) ? undefined : DEFAULT_INDENTATION;
 	}
-	if (tabs > spaceCounts.length) return { style: "tab", width: 1 };
+	if (tabs > spaceCounts.length) return { style: "tab" };
 	if (spaceCounts.length > tabs) {
 		const minimum = Math.min(...spaceCounts);
 		// 0 is GCD's identity, so seeding the fold both satisfies "reduce needs an

@@ -42,6 +42,9 @@ vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
 
 function makeCtx(filePath: string, cwd = process.cwd()) {
 	return {
+		// These are synthetic POSIX paths. Do not pass them through the host
+		// resolver: on Windows path.resolve("/m") injects the current drive and
+		// changes the fixture's contract rather than testing go-vet attribution.
 		filePath,
 		cwd,
 		kind: "go" as const,
@@ -85,7 +88,10 @@ describe("go-vet runner", () => {
 		const [exe, args, opts] = safeSpawnAsync.mock.calls[0];
 		expect(exe).toBe("/usr/local/bin/go");
 		expect(args).toEqual(["vet", "./sub"]);
-		expect(opts).toMatchObject({ cwd: "/m", timeout: 30000 });
+		// The runner resolves its cwd through the host resolver, which on Windows
+		// adds the current drive to the synthetic `/m` (`D:\m`); compare the
+		// spelling that resolver produces, not the raw fixture string (#4019).
+		expect(opts).toMatchObject({ cwd: path.resolve("/m"), timeout: 30000 });
 	});
 
 	it("vets '.' for a file in the module-root package", async () => {

@@ -16,6 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	buildProbeScopeKey,
 	buildScopeKey,
 	cacheKeyFor,
 	clearAllWorkspaceDiagnosticsCaches,
@@ -27,6 +28,7 @@ import {
 	WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 	type WorkspaceDiagnosticsCacheEntry,
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
+import { getProjectDataDir } from "../../../clients/file-utils.js";
 import { MTIME_DRIFT_TOLERANCE_MS } from "../../../clients/blocker-freshness.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import {
@@ -49,8 +51,12 @@ let tmp: string;
 beforeEach(() => {
 	resetDegradationLedger();
 	tmp = setupTestEnvironment("pi-lens-lsp-cache-").tmpDir;
-	// Legacy per-project data dir marker so the cache file writes INSIDE tmp
-	// (cleaned up by afterEach) instead of the real global ~/.pi-lens dir.
+	// Legacy per-project data dir marker: with no PILENS_DATA_DIR override this
+	// makes `getProjectDataDir` resolve the cache INSIDE tmp (cleaned up by
+	// afterEach) instead of the real global ~/.pi-lens dir. Under a relocated
+	// PILENS_DATA_DIR the production owner wins, and every fixture path below
+	// is built from `getProjectDataDir(tmp)`, so the write and read never
+	// disagree about which data root owns the cache.
 	fs.mkdirSync(path.join(tmp, ".pi-lens"));
 });
 
@@ -108,8 +114,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 
 	it("fails open on a corrupt cache file", () => {
 		const cacheFile = path.join(
-			tmp,
-			".pi-lens",
+			getProjectDataDir(tmp),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -128,7 +133,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 
 	it("fails open on a v2 cache so provenance-less diagnostics are re-collected (#2776)", () => {
 		saveWorkspaceDiagnosticsCache(tmp, {
-			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION - 1,
+			version: 2,
 			entries: { "/a.ts": makeEntry() },
 		});
 		// Old records still parse safely, but the strict cache consumer refuses
@@ -138,8 +143,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 
 	it("fails open when entries is missing/malformed", () => {
 		const cacheFile = path.join(
-			tmp,
-			".pi-lens",
+			getProjectDataDir(tmp),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);
@@ -151,7 +155,7 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
 	});
 
-	it("rejects only a v3 entry whose diagnostic lacks serverId (#2776)", () => {
+	it("rejects only a current-version entry whose diagnostic lacks serverId (#2776)", () => {
 		saveWorkspaceDiagnosticsCache(tmp, {
 			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {
@@ -202,6 +206,22 @@ describe("loadWorkspaceDiagnosticsCache / saveWorkspaceDiagnosticsCache (#671)",
 		expect(group?.count).toBe(1);
 		expect(group?.latestReasons[0]?.reason).toContain("v2");
 		expect(group?.latestReasons[0]?.reason).toContain("2 entries");
+	});
+
+	it("rejects a v3 cache, whose clean entries may rest on auxiliaries alone (#4322)", () => {
+		// A well-formed v3 entry: provenance present, so only the version
+		// guard can keep its (possibly false) clean from replaying.
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: 3,
+			entries: { a: makeEntry() },
+		});
+		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
+		const group = getDegradationSummary().find(
+			(entry) => entry.kind === "lsp-workspace-cache-migration",
+		);
+		expect(group?.count).toBe(1);
+		expect(group?.latestReasons[0]?.reason).toContain("v3");
+		expect(group?.latestReasons[0]?.reason).toContain("1 entries");
 	});
 });
 
@@ -356,6 +376,29 @@ describe("buildScopeKey / cacheKeyFor (#671)", () => {
 	it("distinguishes scopes that differ in clientScope or exclusions", () => {
 		expect(buildScopeKey("all")).not.toBe(buildScopeKey("primary"));
 		expect(buildScopeKey("all", ["opengrep"])).not.toBe(buildScopeKey("all"));
+	});
+
+	it("keeps a probe key with a config-disabled auxiliary apart from the sweep key (#4323)", () => {
+		// The workspace sweep records before `pi-lens-ignore` and leaves
+		// Opengrep out; the probe records the suppressed set. Same coverage,
+		// different payload, so the keys must differ.
+		expect(buildProbeScopeKey("all", new Set(["opengrep"]))).not.toBe(
+			buildScopeKey("all", ["opengrep"]),
+		);
+		expect(buildProbeScopeKey("all", ["typos", "opengrep"])).toBe(
+			buildProbeScopeKey("all", ["opengrep", "typos"]),
+		);
+		expect(buildProbeScopeKey("all", ["opengrep"])).not.toBe(
+			buildProbeScopeKey("all", ["typos"]),
+		);
+		// Nothing turned off: the key master wrote, so existing entries serve.
+		expect(buildProbeScopeKey("all", new Set())).toBe(buildScopeKey("all"));
+		expect(buildProbeScopeKey("primary")).toBe(buildScopeKey("primary"));
+		// A primary-only check reads through a fallback that acquires
+		// auxiliaries, so its key carries the switched-off set as well.
+		expect(buildProbeScopeKey("primary", ["opengrep"])).not.toBe(
+			buildProbeScopeKey("primary"),
+		);
 	});
 
 	it("normalizes path separators/casing the same way for repeated calls", () => {
@@ -1010,6 +1053,7 @@ function makeTsServer(root: string, id = "typescript", extension = ".ts") {
 		id,
 		name: id,
 		extensions: [extension],
+		idleEviction: "resident",
 		root: async () => root,
 		spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 	};
@@ -1034,7 +1078,10 @@ function makeFakeClient(
 			getOperationSupport: () => ({}),
 			serverId,
 			root,
-			notify: { open: vi.fn(async () => {}) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn(async () => {}),
+			},
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
 				return undefined;
@@ -1373,7 +1420,7 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		fs.writeFileSync(file, "const z = 1;\n");
 		const stat = fs.statSync(file);
 		saveWorkspaceDiagnosticsCache(tmpSweep, {
-			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION - 1,
+			version: 2,
 			entries: {
 				[cacheKeyFor(file)]: {
 					diagnostics: [
@@ -1429,8 +1476,7 @@ describe("persist() write-failure retry (#1239)", () => {
 		// tmp-write-then-rename cannot replace a directory on any OS, so the
 		// save deterministically fails without mocks.
 		const target = path.join(
-			tmp,
-			".pi-lens",
+			getProjectDataDir(tmp),
 			"cache",
 			"lsp-workspace-diagnostics.json",
 		);

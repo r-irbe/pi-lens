@@ -1,7 +1,31 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import { getGlobalPiLensDir } from "../../clients/file-utils.js";
+import { setupTestEnvironment } from "./test-utils.js";
+
+const originalPiLensHome = process.env.PI_LENS_HOME;
+const probe = setupTestEnvironment("pi-lens-debug-handles-");
+process.env.PI_LENS_HOME = probe.tmpDir;
+
+beforeAll(() => {
+	process.env.PI_LENS_HOME = probe.tmpDir;
+});
+
+afterAll(() => {
+	if (originalPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = originalPiLensHome;
+	probe.cleanup();
+});
 
 function debugHandlesLogPath(): string {
 	return path.join(getGlobalPiLensDir(), "debug-handles.log");
@@ -15,9 +39,8 @@ function debugHandlesLogPath(): string {
  * reads elsewhere in this repo) would not take effect, by design: the whole
  * point is a flag baked in at startup, not re-read per call.
  *
- * `PI_LENS_HOME` is already pointed at a per-worker temp dir by
- * `tests/support/vitest-setup.ts`, so `getGlobalPiLensDir()` (which
- * `debug-handles.log` is written under) is hermetic with no extra setup here.
+ * This file points `PI_LENS_HOME` at its own tracked temp fixture so the log
+ * cannot survive a second invocation in the repository.
  */
 
 async function importFresh(enabled: boolean) {

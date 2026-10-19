@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import type {
 	SafeSpawnOptions,
 	SpawnResult,
@@ -12,6 +20,20 @@ type SafeSpawnAsync = (
 	args: string[],
 	options?: SafeSpawnOptions,
 ) => Promise<SpawnResult>;
+
+const { isolatedPiLensHome, previousPiLensHome } = await vi.hoisted(
+	async () => {
+		const nodeFs = await import("node:fs");
+		const nodeOs = await import("node:os");
+		const nodePath = await import("node:path");
+		const home = nodeFs.mkdtempSync(
+			nodePath.join(nodeOs.tmpdir(), "pi-lens-3884-home-"),
+		);
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = home;
+		return { isolatedPiLensHome: home, previousPiLensHome: previous };
+	},
+);
 
 const { findGlobalBinary, safeSpawnAsync } = vi.hoisted(() => ({
 	findGlobalBinary: vi.fn(async () => undefined),
@@ -37,7 +59,17 @@ import {
 	detectPythonEnvironment,
 	type PythonEnvironmentSource,
 } from "../../clients/python-environment.js";
+import { setProjectTrustState } from "../../clients/project-trust.js";
 import { RUNNERS, TestRunnerClient } from "../../clients/test-runner-client.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
+import {
+	clearLatencyLog,
+	flushLatencyLog,
+	getLatencyLogPath,
+} from "../../clients/latency-logger.js";
 
 const tempDirs: string[] = [];
 let originalVirtualEnv: string | undefined;
@@ -125,6 +157,10 @@ async function runPytest(
 // sets these same variables, and hooks scoped to one describe left the other
 // reading a leaked VIRTUAL_ENV (AGENTS.md test screen: env leakage).
 beforeEach(() => {
+	// This suite maps interpreter discovery, not the trust gate; the project
+	// `.venv` rungs are planted on purpose and the gate is witnessed in
+	// `project-local-bin-trust.test.ts`.
+	setProjectTrustState("trusted");
 	originalVirtualEnv = process.env.VIRTUAL_ENV;
 	originalCondaPrefix = process.env.CONDA_PREFIX;
 	originalUvProjectEnvironment = process.env.UV_PROJECT_ENVIRONMENT;
@@ -136,6 +172,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	resetDegradationLedger();
 	restoreEnvironmentVariable("VIRTUAL_ENV", originalVirtualEnv);
 	restoreEnvironmentVariable("CONDA_PREFIX", originalCondaPrefix);
 	restoreEnvironmentVariable(
@@ -147,7 +184,257 @@ afterEach(() => {
 	}
 });
 
+afterAll(() => {
+	fs.rmSync(isolatedPiLensHome, { recursive: true, force: true });
+	if (previousPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+	else process.env.PI_LENS_HOME = previousPiLensHome;
+});
+
 describe("pytest project environment", () => {
+	it("does not borrow an ambient environment for a linked-worktree root (#3871 V4)", async () => {
+		const project = createProject(false);
+		const ambient = createEnvironment(createTempDir("pi-lens-ambient-"));
+		process.env.VIRTUAL_ENV = ambient.root;
+
+		const result = await new TestRunnerClient(false).runTestFileAsync(
+			project.testFile,
+			project.root,
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				requireOwnInstall: true,
+			},
+		);
+
+		expect(result.notRun).toBe("no-runner-install");
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+	});
+
+	it("accepts an ambient environment inside a linked-worktree root (#3871 V4)", async () => {
+		const project = createProject(false);
+		const ambient = createEnvironment(path.join(project.root, ".ambient"));
+		process.env.CONDA_PREFIX = ambient.root;
+
+		const result = await new TestRunnerClient(false).runTestFileAsync(
+			project.testFile,
+			project.root,
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				requireOwnInstall: true,
+			},
+		);
+
+		expect(result.notRun).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledOnce();
+		expect(safeSpawnAsync.mock.calls[0][0]).toBe(ambient.pythonPath);
+	});
+
+	it("rejects an outside UV_PROJECT_ENVIRONMENT for own-install runs (#3871 F4)", async () => {
+		const project = createProject(false);
+		fs.writeFileSync(
+			path.join(project.root, "pyproject.toml"),
+			"[project]\nname='app'\n",
+		);
+		const ambient = createEnvironment(createTempDir("pi-lens-uv-ambient-"));
+		process.env.UV_PROJECT_ENVIRONMENT = ambient.root;
+
+		const result = await new TestRunnerClient(false).runTestFileAsync(
+			project.testFile,
+			project.root,
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				requireOwnInstall: true,
+			},
+		);
+
+		expect(result.notRun).toBe("no-runner-install");
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+	});
+
+	it("rejects an ambient environment on another Windows drive for a linked-worktree root (#3871 V1)", async () => {
+		// Recurrence (#3871 V1): round 2 dropped the `path.isAbsolute(relative)`
+		// leg, so `path.win32.relative("C:\\proj\\.worktrees\\x", "D:\\envs\\main")`
+		// ("D:\\envs\\main", no `..`) counted as inside and a linked-worktree
+		// run borrowed the other drive's environment again. The real resolver is
+		// loaded under win32 path semantics so the ubuntu lane runs the branch;
+		// only the interpreter probe (`access`, a host filesystem call) answers
+		// for the win32-shaped interpreter paths, which cannot exist on posix.
+		const worktree = "C:\\proj\\.worktrees\\x";
+		const home = "C:\\Users\\dev";
+		const interpreter = (root: string): string =>
+			path.win32.join(
+				root,
+				process.platform === "win32" ? "Scripts" : "bin",
+				process.platform === "win32" ? "python.exe" : "python",
+			);
+		const otherDrive = "D:\\envs\\main";
+		const inside = `${worktree}\\.ambient`;
+		const present = new Set([interpreter(otherDrive), interpreter(inside)]);
+		vi.resetModules();
+		vi.doMock("node:path", () => ({ ...path.win32, default: path.win32 }));
+		vi.doMock("node:fs/promises", async (importOriginal) => {
+			const actual = await importOriginal<typeof import("node:fs/promises")>();
+			return {
+				...actual,
+				access: async (file: fs.PathLike, mode?: number) => {
+					if (present.has(String(file))) return;
+					return actual.access(file, mode);
+				},
+			};
+		});
+		try {
+			const win = await import("../../clients/python-environment.js");
+			for (const name of ["VIRTUAL_ENV", "CONDA_PREFIX"] as const) {
+				delete process.env.VIRTUAL_ENV;
+				delete process.env.CONDA_PREFIX;
+				process.env[name] = otherDrive;
+				// Control: the session root itself still borrows it, so the
+				// double does present the interpreter and the gate is what rejects.
+				expect((await win.detectPythonEnvironment(worktree, home))?.root).toBe(
+					otherDrive,
+				);
+				expect(
+					await win.detectPythonEnvironment(worktree, home, {
+						allowAmbient: false,
+					}),
+				).toBeUndefined();
+				process.env[name] = inside;
+				expect(
+					(
+						await win.detectPythonEnvironment(worktree, home, {
+							allowAmbient: false,
+						})
+					)?.root,
+				).toBe(inside);
+			}
+		} finally {
+			vi.doUnmock("node:path");
+			vi.doUnmock("node:fs/promises");
+			vi.resetModules();
+		}
+	});
+
+	it("passes the display root through nested text-runner spawns (#3871 F3)", async () => {
+		const dispatchRoot = createTempDir("pi-lens-3871-f3-");
+		const spawnCwd = path.join(dispatchRoot, "pkg");
+		fs.mkdirSync(path.join(spawnCwd, "tests"), { recursive: true });
+		// `alsoUnderCwd` rows are the V2 both-bases rows, one per call site: the
+		// same relative name exists under the dispatch root and under the
+		// runner's own cwd, and only the `[spawnCwd, cwd]` order names the file
+		// the runner actually ran. The pytest stdout is real pytest 9.1.1 output
+		// for a nested `pytest.ini`.
+		const cases = [
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				marker: "pytest.ini",
+				file: "tests/test_widget.py",
+				line: "test_value",
+				alsoUnderCwd: false,
+				stdout:
+					"FAILED tests/test_widget.py::test_value - assert 1 == 2\n1 failed in 0.01s",
+			},
+			{
+				runner: "pytest",
+				config: RUNNERS.pytest,
+				marker: "pytest.ini",
+				file: "tests/test_a.py",
+				line: "test_a",
+				alsoUnderCwd: true,
+				stdout:
+					"FAILED tests/test_a.py::test_a - assert 1 == 2\n1 failed in 0.01s",
+			},
+			{
+				runner: "phpunit",
+				config: RUNNERS.phpunit,
+				marker: "phpunit.xml",
+				file: "tests/Foo.php",
+				line: "12",
+				alsoUnderCwd: false,
+				stdout:
+					"1) Foo\\\\BarTest::testValue\n\ntests/Foo.php:12\nTests: 1, Assertions: 1, Errors: 1, Failures: 0, Skipped: 0.",
+			},
+			{
+				runner: "mix",
+				config: RUNNERS.mix,
+				marker: "mix.exs",
+				file: "test/foo_test.exs",
+				line: "12",
+				alsoUnderCwd: false,
+				stdout:
+					"  1) test value (FooTest)\n\n  test/foo_test.exs:12\n3 tests, 1 failure",
+			},
+			{
+				runner: "generic",
+				config: RUNNERS.mix,
+				marker: "mix.exs",
+				file: "tests/widget.py",
+				line: "12",
+				alsoUnderCwd: false,
+				stdout: "FAILED tests/widget.py:12\n1 tests completed, 1 failed",
+			},
+			{
+				runner: "phpunit",
+				config: RUNNERS.phpunit,
+				marker: "phpunit.xml",
+				file: "tests/Both.php",
+				line: "7",
+				alsoUnderCwd: true,
+				stdout:
+					"1) Foo\\\\BothTest::testValue\n\ntests/Both.php:7\nTests: 1, Assertions: 1, Errors: 1, Failures: 0, Skipped: 0.",
+			},
+			{
+				runner: "mix",
+				config: RUNNERS.mix,
+				marker: "mix.exs",
+				file: "test/both_test.exs",
+				line: "7",
+				alsoUnderCwd: true,
+				stdout:
+					"  1) test both (BothTest)\n\n  test/both_test.exs:7\n3 tests, 1 failure",
+			},
+			{
+				runner: "generic",
+				config: RUNNERS.mix,
+				marker: "mix.exs",
+				file: "tests/both.py",
+				line: "7",
+				alsoUnderCwd: true,
+				stdout: "FAILED tests/both.py:7\n1 tests completed, 1 failed",
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			fs.writeFileSync(path.join(spawnCwd, testCase.marker), "");
+			const target = path.join(spawnCwd, testCase.file);
+			fs.mkdirSync(path.dirname(target), { recursive: true });
+			fs.writeFileSync(target, "");
+			if (testCase.alsoUnderCwd) {
+				const decoy = path.join(dispatchRoot, testCase.file);
+				fs.mkdirSync(path.dirname(decoy), { recursive: true });
+				fs.writeFileSync(decoy, "");
+			}
+			safeSpawnAsync.mockImplementationOnce(async () => ({
+				stdout: testCase.stdout,
+				stderr: "",
+				status: 1,
+			}));
+			const result = await new TestRunnerClient(false).runTestFileAsync(
+				target,
+				dispatchRoot,
+				{
+					runner: testCase.runner,
+					config: testCase.config,
+					displayRoot: path.dirname(dispatchRoot),
+				},
+			);
+			expect(result.failures[0]?.location).toBe(
+				`${path.relative(path.dirname(dispatchRoot), target).replaceAll(path.sep, "/")}:${testCase.line}`,
+			);
+		}
+	});
 	it("runs pytest with an unactivated project .venv", async () => {
 		const { root, testFile, pythonPath, binDir } = createProject(true);
 		const inheritedPath = process.env.PATH;
@@ -170,6 +457,97 @@ describe("pytest project environment", () => {
 		expect(process.env.VIRTUAL_ENV).toBeUndefined();
 		expect(process.env.PATH).toBe(inheritedPath);
 		expect(findGlobalBinary).not.toHaveBeenCalled();
+	});
+
+	it("records capped member globs through the UV consumer and real sink", async () => {
+		// F7 recurrence: a consumer test that stopped at the in-memory summary
+		// stayed green when the durable degradation sink was suppressed. #3880
+		// The sink is shared with the Cargo/LSP consumer, so assert this test's
+		// own workspace-glob-cap records instead of counting unrelated phases.
+		const previousTestMode = process.env.PI_LENS_TEST_MODE;
+		process.env.PI_LENS_TEST_MODE = "0";
+		clearLatencyLog();
+		await flushLatencyLog();
+		const makeWorkspace = (partCount: number) => {
+			const workspace = createProject(false);
+			const parts = Array.from({ length: partCount }, () => "a");
+			const relative = parts.join("/");
+			const member = path.join(workspace.root, ...parts);
+			fs.mkdirSync(member, { recursive: true });
+			fs.writeFileSync(
+				path.join(member, "pyproject.toml"),
+				"[project]\nname='member'\n",
+			);
+			fs.writeFileSync(
+				path.join(workspace.root, "pyproject.toml"),
+				`[tool.uv.workspace]\nmembers = ['${relative}']\n`,
+			);
+			createEnvironment(path.join(workspace.root, ".venv"));
+			return { member, relative };
+		};
+		const first = makeWorkspace(708);
+		const second = makeWorkspace(709);
+
+		try {
+			await detectPythonEnvironment(first.member, os.tmpdir());
+			await detectPythonEnvironment(first.member, os.tmpdir());
+			await detectPythonEnvironment(second.member, os.tmpdir());
+			resetDegradationLedger();
+			await detectPythonEnvironment(first.member, os.tmpdir());
+			await flushLatencyLog();
+
+			const rows = fs
+				.readFileSync(getLatencyLogPath(), "utf8")
+				.trim()
+				.split(/\r?\n/)
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							filePath?: string;
+							metadata?: Record<string, unknown>;
+						},
+				)
+				.filter(
+					(row) =>
+						row.phase === "degradation_ledger" &&
+						row.metadata?.kind === "workspace-glob-cap",
+				);
+			expect(rows).toHaveLength(3);
+			expect(rows.map((row) => row.metadata)).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "workspace-glob-cap",
+						subject: String(first.relative.length),
+						count: 1,
+					}),
+					expect.objectContaining({
+						kind: "workspace-glob-cap",
+						subject: String(second.relative.length),
+						count: 1,
+					}),
+				]),
+			);
+			expect(rows.map((row) => row.metadata?.subject)).toEqual([
+				String(first.relative.length),
+				String(second.relative.length),
+				String(first.relative.length),
+			]);
+			expect(rows.every((row) => row.metadata?.count === 1)).toBe(true);
+			expect(rows.every((row) => row.filePath === row.metadata?.subject)).toBe(
+				true,
+			);
+			expect(rows.every((row) => !row.filePath?.includes("/"))).toBe(true);
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ kind: "workspace-glob-cap" }),
+				]),
+			);
+		} finally {
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		}
 	});
 
 	it("keeps the generic Python fallback when no project environment exists", async () => {

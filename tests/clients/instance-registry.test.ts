@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { suspendAt } from "./interleaving-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
@@ -21,6 +22,24 @@ vi.mock("../../clients/file-utils.js", () => ({
 	// would diverge from production on the axis these tests measure.
 	getGlobalPiLensDir: () => dir,
 }));
+
+// #3602: a controllable pause point on `ownProcessStart`, the call
+// `registerInstanceNow` makes right after `rememberRegistrationRoot` and
+// before its own write. `ownStartRef.actual` is the real implementation
+// (captured fresh on every `vi.resetModules()` re-import below), passed
+// through `suspendAt` so exactly one call can be held open while a
+// concurrent `updateHeartbeat` runs to completion.
+const ownStartRef = vi.hoisted(() => ({
+	actual:
+		undefined as unknown as typeof import("../../clients/process-snapshot.js").ownProcessStart,
+}));
+
+vi.mock("../../clients/process-snapshot.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/process-snapshot.js")>();
+	ownStartRef.actual = actual.ownProcessStart;
+	return { ...actual, ownProcessStart: vi.fn(actual.ownProcessStart) };
+});
 
 describe("instance-registry", () => {
 	beforeEach(() => {
@@ -588,23 +607,6 @@ describe("instance-registry", () => {
 			expect(parsed.instances).toEqual([]);
 		});
 
-		it("does not resurrect an entry whose last root was deregistered", async () => {
-			const {
-				registerInstance,
-				deregisterInstanceRoot,
-				updateHeartbeat,
-				_settleRegistryMutationsForTests,
-			} = await import("../../clients/instance-registry.js");
-			await registerInstance("/some/project");
-			await deregisterInstanceRoot("/some/project");
-
-			await updateHeartbeat();
-			await _settleRegistryMutationsForTests();
-
-			const parsed = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
-			expect(parsed.instances).toEqual([]);
-		});
-
 		it("does not re-register a root deregistered while its entry was already missing", async () => {
 			const {
 				registerInstance,
@@ -616,12 +618,70 @@ describe("instance-registry", () => {
 			fs.writeFileSync(lock, `${process.ppid} ${Date.now()}\n`);
 			await registerInstance("/some/project");
 			fs.rmSync(lock);
-			await deregisterInstanceRoot("/some/project");
+			await deregisterInstanceRoot("/some/project", "holder-1");
 
 			await updateHeartbeat();
 			await _settleRegistryMutationsForTests();
 
 			expect(fs.existsSync(registryFilePath())).toBe(false);
+		});
+
+		// #3602: CI-red on PR #3602 via
+		// tests/index-1892-scanner-freshness-witness.test.ts. session_start's
+		// `void registerInstance(root)` is queued and, inside the queued op,
+		// `rememberRegistrationRoot` sets the repair-intent root BEFORE the
+		// registration's own write lands. Before this fix, turn_end's `void
+		// updateHeartbeat()` took the registry lock directly (not through the
+		// same tail), so it could land in that gap: read the registry before
+		// the write, find no own entry, and — because the intent was already
+		// set — record a spurious missing-registration and queue a redundant
+		// re-register.
+		it("does not record a spurious missing-registration when a heartbeat lands between the intent write and the registration's own write", async () => {
+			const processSnapshot = await import("../../clients/process-snapshot.js");
+			const {
+				registerInstance,
+				updateHeartbeat,
+				_settleRegistryMutationsForTests,
+			} = await import("../../clients/instance-registry.js");
+			const { getDegradationSummary } =
+				await import("../../clients/degradation-ledger.js");
+
+			// Pauses the FIRST call to ownProcessStart — registerInstanceNow's,
+			// which runs right after rememberRegistrationRoot — and lets every
+			// later call (updateHeartbeat's own) through immediately.
+			const suspension = suspendAt(
+				vi.mocked(processSnapshot.ownProcessStart),
+				ownStartRef.actual,
+				{ calls: 1 },
+			);
+			const registration = registerInstance("/some/project");
+			await suspension.admitted;
+
+			// The intent root is set; the registration's write has not landed.
+			// turn_end's `void updateHeartbeat()` lands here, exactly as #3602
+			// describes — kicked off now, awaited after the release below (the
+			// fix serializes it behind the still-pending registration; pre-fix
+			// it ran directly against the lock and could overtake it).
+			const heartbeat = updateHeartbeat();
+			suspension.release();
+			await Promise.all([registration, heartbeat]);
+			await _settleRegistryMutationsForTests();
+
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "instance-registry-registration-missing",
+				),
+			).toBeUndefined();
+			expect(
+				getDegradationSummary().find(
+					(group) => group.kind === "instance-registry-lock-timeout",
+				),
+			).toBeUndefined();
+			const parsed = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
+			expect(parsed.instances.map((e: { pid: number }) => e.pid)).toEqual([
+				process.pid,
+			]);
+			expect(parsed.instances[0].projectRoot).toContain("some/project");
 		});
 
 		it("never replays a registration into a different registry file", async () => {

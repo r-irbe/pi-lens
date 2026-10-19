@@ -28,34 +28,90 @@ import {
 } from "../scripts/strip-dev-deps-for-pack.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npx = process.platform === "win32" ? "npx.cmd" : "npx";
 
 /**
- * #2652: `npm pack` strips the LIVE checkout's manifest in prepack and puts
- * it back in postpack. Anything that stops npm in between -- a failing
- * `prepare`, a Ctrl-C to the process group -- skipped postpack and left the
- * checkout stripped with .pack-backup/ behind.
- *
- * `packWithRestore`'s `finally` restores whenever .pack-backup/ survives the
- * pack (postpack never ran).
- *
- * Signals need more than that: with no listener, Node's default action kills
- * this worker mid-`execFileSync` and no `finally` runs. So `onPackSignal` is
- * registered for the whole describe (beforeAll/afterAll), not per pack: a
- * signal that lands during the synchronous pack is delivered only AFTER it
- * returns, by which time a per-call listener would already be gone and the
- * Ctrl-C would be swallowed. The listener restores if a backup is still there
- * and re-raises, so the run still stops. SIGKILL cannot be trapped;
- * .pack-backup/ is then the manual path, as before.
+ * #4003: the real `npm pack` runs pi-lens's own `prepare`, whose first step is
+ * `build:dist`. Run in the checkout it wrote `dist/` there, so every file that
+ * needs `dist/` passed or failed by test order. Every pack in this file runs in
+ * an isolated copy of the checkout (package.json, lock and scripts byte for
+ * byte; `node_modules` linked, not copied), so the live checkout is never
+ * stripped, rebuilt or stamped. Skipped from the copy: dependencies, git,
+ * previous build output, and trees the pack and the build never read.
  */
-function packWithRestore(run: () => unknown): void {
-	try {
-		run();
-	} finally {
-		if (fs.existsSync(path.join(root, ".pack-backup"))) restorePackBackup();
-	}
+const PACK_COPY_SKIP = new Set([
+	"node_modules",
+	".git",
+	"dist",
+	".pack-backup",
+	".probe-home",
+	".claude",
+	".tmp",
+	"reports",
+	"tests",
+	"cases",
+	"formal",
+	"release-qa-evidence",
+]);
+
+function copyPackSource(dest: string): string {
+	fs.cpSync(root, dest, {
+		recursive: true,
+		filter: (src) => {
+			const rel = path.relative(root, src);
+			return rel === "" || !PACK_COPY_SKIP.has(rel.split(path.sep)[0] ?? "");
+		},
+	});
+	fs.symlinkSync(
+		path.join(root, "node_modules"),
+		path.join(dest, "node_modules"),
+		"junction",
+	);
+	return dest;
 }
 
+/**
+ * The live checkout's own state, which no pack in this file may touch.
+ * `dist/index.js` is recorded by inode and mtime, not existence: where `dist/`
+ * already exists (CI, any built tree) a pack that ran `prepare` in the
+ * checkout deletes and rebuilds it, which an existence check cannot see.
+ */
+function liveCheckoutState(): {
+	manifest: string;
+	lock: string;
+	distIndex: { ino: number; mtimeMs: number } | null;
+	packBackupExists: boolean;
+	distExists: boolean;
+} {
+	const index = fs.statSync(path.join(root, "dist", "index.js"), {
+		throwIfNoEntry: false,
+	});
+	return {
+		manifest: fs.readFileSync(path.join(root, "package.json"), "utf8"),
+		lock: fs.readFileSync(path.join(root, "package-lock.json"), "utf8"),
+		distIndex: index ? { ino: index.ino, mtimeMs: index.mtimeMs } : null,
+		packBackupExists: fs.existsSync(path.join(root, ".pack-backup")),
+		distExists: fs.existsSync(path.join(root, "dist")),
+	};
+}
+
+function expectLiveCheckoutUntouched(
+	before: ReturnType<typeof liveCheckoutState>,
+): void {
+	expect(liveCheckoutState()).toEqual(before);
+	expect(before.packBackupExists).toBe(false);
+	expect(liveCheckoutState().packBackupExists).toBe(false);
+}
+
+/**
+ * #2652: the SIGNAL case below still strips the LIVE manifest with the real
+ * script (no pack, no build) and needs `onPackSignal` registered for the whole
+ * describe (beforeAll/afterAll), not per call: a signal that lands during a
+ * synchronous child run is delivered only AFTER it returns, so a per-call
+ * listener would already be gone. The listener restores if a backup is still
+ * there and re-raises, so the run still stops. SIGKILL cannot be trapped;
+ * .pack-backup/ is then the manual path.
+ */
 let reraisePackSignal: (signal: NodeJS.Signals) => void = (signal) => {
 	process.kill(process.pid, signal);
 };
@@ -82,7 +138,22 @@ const pkg = JSON.parse(
 	devDependencies?: Record<string, string>;
 	dependencies?: Record<string, string>;
 	scripts: Record<string, string>;
+	packageManager?: string;
+	files?: string[];
 };
+// #3885: run the real pack through the repo's pinned npm -- the same
+// `npx -y "npm@<packageManager>"` argv `release.yml` and `ci.yml` publish and
+// install with. A host on npm 9 (pacote@13) does not forward `script-shell` to
+// the `prepare` lifecycle `npm pack` runs for a directory (`pacote/lib/dir.js`
+// `_prepareDir` builds its runScript options without `scriptShell`), so the
+// #2652 forced-failure wrapper below is inert and the pack wrongly exits 0.
+// npm 10+ forwards it. Pinning the npm keeps the test's observation on the
+// toolchain the project ships with instead of the host's npm.
+const npmPin = String(pkg.packageManager ?? "").replace(/^npm@/, "");
+
+function pinnedPackArgs(extra: string[]): string[] {
+	return ["-y", `npm@${npmPin}`, "pack", ...extra];
+}
 
 describe("published manifest carries no devDependencies", () => {
 	beforeAll(attachPackSignal);
@@ -106,6 +177,19 @@ describe("published manifest carries no devDependencies", () => {
 		});
 	});
 
+	// #4003 recurrence: a name added to PACK_COPY_SKIP that `files[]` ships would
+	// pack a tarball silently missing that tree, from a copy that dropped it.
+	// `dist` is skipped on purpose: `prepare` rebuilds it inside the copy.
+	it("copies every top-level tree package.json files[] ships", () => {
+		const shipped = new Set(
+			(pkg.files ?? []).map((entry) => entry.split("/")[0] ?? ""),
+		);
+		assertNonEmptyScan("files[] top-level entries", shipped.size, 5);
+		expect(
+			[...shipped].filter((top) => PACK_COPY_SKIP.has(top) && top !== "dist"),
+		).toEqual([]);
+	});
+
 	it("prepack strips and postpack restores, wired in package.json", () => {
 		expect(pkg.scripts.prepack).toBe(
 			"node scripts/strip-dev-deps-for-pack.mjs --strip",
@@ -116,17 +200,22 @@ describe("published manifest carries no devDependencies", () => {
 		expect(
 			pkg.devDependencies && Object.keys(pkg.devDependencies).length,
 		).toBeGreaterThan(0);
+		// The pack cases below invoke `npm@<pin>`; pin the shape so a missing or
+		// floating `packageManager` cannot silently resolve npm latest (#3885).
+		expect(pkg.packageManager).toMatch(/^npm@\d+\.\d+\.\d+$/);
 	});
 
 	it(
-		"restores the working manifest when a lifecycle step between prepack and postpack fails (#2652)",
+		"a lifecycle step failing between prepack and postpack leaves the live checkout untouched (#2652, #4003)",
 		{ timeout: 180_000 },
 		() => {
 			// npm runs prepack (strip), prepare, then postpack (restore). A failing
-			// `prepare` aborts before postpack, so the live checkout stayed
-			// stripped with .pack-backup/ left behind -- seen for real when this
-			// file's pack hit a registry error. A script-shell wrapper fails the
-			// `prepare` command deterministically; prepack still runs for real.
+			// `prepare` aborts before postpack, which used to leave the live checkout
+			// stripped with .pack-backup/ behind -- seen for real when this file's
+			// pack hit a registry error. The pack now runs in a copy, so the same
+			// failure strands only the copy; the live checkout must be byte-identical.
+			// A script-shell wrapper fails the `prepare` command deterministically;
+			// prepack still runs for real.
 			const scratch = fs.mkdtempSync(
 				path.join(os.tmpdir(), "pi-lens-pack-fail-"),
 			);
@@ -136,34 +225,26 @@ describe("published manifest carries no devDependencies", () => {
 				'#!/bin/sh\ncase "$2" in *build:dist*) echo "prepare forced to fail (#2652)" >&2; exit 1;; esac\nexec sh "$@"\n',
 				{ mode: 0o755 },
 			);
-			const before = fs.readFileSync(path.join(root, "package.json"), "utf8");
-			const lockBefore = fs.readFileSync(
-				path.join(root, "package-lock.json"),
-				"utf8",
-			);
+			const live = liveCheckoutState();
 			try {
+				const copy = copyPackSource(path.join(scratch, "src"));
 				expect(() =>
-					packWithRestore(() =>
-						execFileSync(npm, ["pack", "--pack-destination", scratch], {
-							cwd: root,
-							encoding: "utf8",
-							shell: process.platform === "win32",
-							timeout: 180_000,
-							stdio: ["ignore", "ignore", "pipe"],
-							env: {
-								...scratchEnv(scratch),
-								npm_config_script_shell: shell,
-							},
-						}),
-					),
+					execFileSync(npx, pinnedPackArgs(["--pack-destination", scratch]), {
+						cwd: copy,
+						encoding: "utf8",
+						shell: process.platform === "win32",
+						timeout: 180_000,
+						stdio: ["ignore", "ignore", "pipe"],
+						env: {
+							...scratchEnv(scratch),
+							npm_config_script_shell: shell,
+						},
+					}),
 				).toThrow();
-				expect(fs.readFileSync(path.join(root, "package.json"), "utf8")).toBe(
-					before,
-				);
-				expect(
-					fs.readFileSync(path.join(root, "package-lock.json"), "utf8"),
-				).toBe(lockBefore);
-				expect(fs.existsSync(path.join(root, ".pack-backup"))).toBe(false);
+				// The strip really ran in the copy (so the failure is the one this
+				// case is about), and the live checkout never saw it.
+				expect(fs.existsSync(path.join(copy, ".pack-backup"))).toBe(true);
+				expectLiveCheckoutUntouched(live);
 			} finally {
 				fs.rmSync(scratch, { recursive: true, force: true });
 			}
@@ -208,9 +289,14 @@ describe("published manifest carries no devDependencies", () => {
 		"the real `npm pack` tarball's package.json has no devDependencies, and the working manifest is restored",
 		{ timeout: 180_000 },
 		() => {
-			const before = fs.readFileSync(path.join(root, "package.json"), "utf8");
+			const live = liveCheckoutState();
+			const packRoot = copyPackSource(path.join(tmp, "pack-src"));
+			const before = fs.readFileSync(
+				path.join(packRoot, "package.json"),
+				"utf8",
+			);
 			const lockBefore = fs.readFileSync(
-				path.join(root, "package-lock.json"),
+				path.join(packRoot, "package-lock.json"),
 				"utf8",
 			);
 			// #2634: this `npm pack` runs OUR `prepare`, whose last step
@@ -228,20 +314,18 @@ describe("published manifest carries no devDependencies", () => {
 				: null;
 			// Not `--json`: `prepare` also runs on pack and its scripts write to stdout
 			// (setup-git-hooks on a fresh CI checkout), which corrupts the JSON payload.
-			packWithRestore(() =>
-				execFileSync(npm, ["pack", "--pack-destination", tmp], {
-					cwd: root,
-					encoding: "utf8",
-					shell: process.platform === "win32",
-					timeout: 180_000,
-					stdio: ["ignore", "ignore", "inherit"],
-					// scratchEnv pins PI_LENS_INSTALL_LOG (and HOME, PILENS_DATA_DIR,
-					// npm_config_cache) inside `tmp` — every writer this child's
-					// `prepare` lifecycle can reach lands in the scratch root, never in
-					// the real developer home (#2619 review F1, reused for #2634).
-					env: scratchEnv(tmp),
-				}),
-			);
+			execFileSync(npx, pinnedPackArgs(["--pack-destination", tmp]), {
+				cwd: packRoot,
+				encoding: "utf8",
+				shell: process.platform === "win32",
+				timeout: 180_000,
+				stdio: ["ignore", "ignore", "inherit"],
+				// scratchEnv pins PI_LENS_INSTALL_LOG (and HOME, PILENS_DATA_DIR,
+				// npm_config_cache) inside `tmp` — every writer this child's
+				// `prepare` lifecycle can reach lands in the scratch root, never in
+				// the real developer home (#2619 review F1, reused for #2634).
+				env: scratchEnv(tmp),
+			});
 			expect(
 				fs.existsSync(realInstallLog) ? fs.readFileSync(realInstallLog) : null,
 				"npm pack must not write into the real ~/.pi-lens/install.log (#2634), " +
@@ -275,21 +359,24 @@ describe("published manifest carries no devDependencies", () => {
 			expect(packed.name).toBe(pkg.name);
 			expect(packed.devDependencies).toBeUndefined();
 			expect(packed.dependencies).toEqual(pkg.dependencies);
-			// postpack put the working manifest back, byte for byte.
-			expect(fs.readFileSync(path.join(root, "package.json"), "utf8")).toBe(
+			// postpack put the packed copy's manifest back, byte for byte.
+			expect(fs.readFileSync(path.join(packRoot, "package.json"), "utf8")).toBe(
 				before,
 			);
-			expect(fs.existsSync(path.join(root, ".pack-backup"))).toBe(false);
+			expect(fs.existsSync(path.join(packRoot, ".pack-backup"))).toBe(false);
 			// npm re-syncs the lock from the stripped manifest during pack; postpack must put it back too.
 			expect(
-				fs.readFileSync(path.join(root, "package-lock.json"), "utf8"),
+				fs.readFileSync(path.join(packRoot, "package-lock.json"), "utf8"),
 			).toBe(lockBefore);
+			// #4003: the live checkout saw none of it -- manifest, lock, no
+			// .pack-backup/, and no dist/ written by the pack's `prepare`.
+			expectLiveCheckoutUntouched(live);
 		},
 	);
 
 	// #3219: the invariant "everything in the published package loads from the
 	// bundled tree", checked on the SAME real tarball the case above packed
-	// (one `npm pack` per run; it builds dist/ through `prepare`). Red on the
+	// (one `npm pack` per run, in an isolated copy; it builds that copy's dist/ through `prepare`). Red on the
 	// pre-#3219 layout: the tarball carried 477 files under dist/clients/ and
 	// dist/tools/, which the bins and both persist workers loaded from.
 	it("ships only the bundled tree, and both persist workers start from it (#3219)", async () => {

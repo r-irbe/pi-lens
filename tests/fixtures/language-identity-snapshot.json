@@ -701,9 +701,9 @@
 			"moduleReportGrammar": "kotlin"
 		},
 		".lean": {
-			"kind": "lean4",
-			"kindLanguageId": "lean4",
-			"lspId": "lean4",
+			"kind": "lean",
+			"kindLanguageId": "lean",
+			"lspId": "lean",
 			"treeSitterGrammar": null,
 			"scannerGrammar": null,
 			"readExpansionLang": null,

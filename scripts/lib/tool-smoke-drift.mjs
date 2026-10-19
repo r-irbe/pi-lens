@@ -21,9 +21,10 @@
 // a second time — it is a generic property of the platform (not an
 // install-smoke domain rule), and duplicating it would be exactly the
 // "hand-maintained list that mirrors a registry" AGENTS.md flags as a
-// defect. tool-smoke's four gating layer steps (Tool layer, LSP handshake
-// layer, LSP gate, Format layer — the only four WITHOUT `continue-on-error` in
-// tool-smoke.yml, so the only four whose `outcome` can actually turn the
+// defect. tool-smoke's six gating layer steps (Tool layer, LSP handshake
+// layer, LSP gate, lens_diagnostics mode=full row, Format layer, Resolution
+// layer — the only six WITHOUT `continue-on-error` in
+// tool-smoke.yml, so the only six whose `outcome` can actually turn the
 // job red) duck-type the exact same `{name, outcome}` shape those functions
 // already consume.
 // #2723 review F7: only decideAction (re-exported -- consumed directly by
@@ -67,10 +68,10 @@ export const TOOL_SMOKE_DRIFT_TITLE =
  */
 
 // scripts/smoke-tools.mjs's own `report()` prints this exact line for each
-// of the four layers this file tracks:
+// of the six layers this file tracks:
 //   `${pass} passed · ${fail} failed · ${setupFailed} setup-failed · ${skip} skipped (tool/config unavailable)`
 const SUMMARY_LINE_RE =
-	/(\d+) passed · (\d+) failed · (\d+) setup-failed · (\d+) skipped/;
+	/(SKIPPED:\s*)?(\d+) passed · (\d+) failed · (\d+) setup-failed · (\d+) skipped/;
 
 /**
  * Parse the "N passed · M failed · K setup-failed · S skipped" line
@@ -87,10 +88,10 @@ export function parseLayerSummary(text) {
 	const m = SUMMARY_LINE_RE.exec(text);
 	if (!m) return null;
 	return {
-		passed: Number(m[1]),
-		failed: Number(m[2]),
-		setupFailed: Number(m[3]),
-		skipped: Number(m[4]),
+		passed: Number(m[2]),
+		failed: Number(m[3]),
+		setupFailed: Number(m[4]),
+		skipped: Number(m[5]),
 	};
 }
 
@@ -182,19 +183,19 @@ export function nextConsecutiveRedCount(existingBody) {
 }
 
 /**
- * #2723 review F3: `decideAction`'s three-layer-outcome view cannot
- * distinguish "the job failed somewhere BEFORE the three tracked layers
+ * #2723 review F3: `decideAction`'s six-layer-outcome view cannot
+ * distinguish "the job failed somewhere BEFORE the six tracked layers
  * even started" (checkout, seven best-effort setup actions — already
  * `continue-on-error` and so cannot flip this, `npm install`, or
  * `build:dist`) from a genuine GitHub Actions cancellation: both leave
- * Tool/LSP handshake/LSP gate/Format layer all "skipped", which `decideAction` reads
+ * Tool/LSP handshake/LSP gate/lens_diagnostics full row/Format/Resolution layer all "skipped", which `decideAction` reads
  * as "no-action" either way (see install-smoke-drift.mjs's own
  * cancelled-mid-run/before-start attacks — the identical shape). GitHub's
  * `job.status` context (passed through as JOB_STATUS) disambiguates: it
  * reads "failure" only when a non-`continue-on-error` step genuinely failed
  * somewhere in the job; a plain cancellation reports "cancelled", never
  * "failure". This promotes "no-action" to "file-or-refresh" ONLY when the
- * job is genuinely red for a reason outside the three tracked layers, and
+ * job is genuinely red for a reason outside the six tracked layers, and
  * leaves an actual cancellation exactly as untouched as before.
  *
  * #2723 review F4: `set -o pipefail` on each layer step is load-bearing —
@@ -239,7 +240,10 @@ export function decideToolSmokeAction(report, jobStatus) {
 export function layersGenuinelyClean(layers) {
 	return layers.every(
 		(l) =>
-			!l.summary || (l.summary.failed === 0 && l.summary.setupFailed === 0),
+			!l.summary ||
+			(l.summary.failed === 0 &&
+				l.summary.setupFailed === 0 &&
+				!(l.summary.passed === 0 && l.summary.skipped > 0)),
 	);
 }
 
@@ -275,7 +279,7 @@ export function buildToolSmokeDriftBody(report, opts = {}) {
 		...layers.map((l) => {
 			const s = l.summary;
 			const summaryText = s
-				? `${s.passed} passed · ${s.failed} failed · ${s.setupFailed} setup-failed · ${s.skipped} skipped`
+				? `${s.passed === 0 && s.failed === 0 && s.setupFailed === 0 && s.skipped > 0 ? "SKIPPED: " : ""}${s.passed} passed · ${s.failed} failed · ${s.setupFailed} setup-failed · ${s.skipped} skipped`
 				: "(no report — step did not run)";
 			return `| ${l.name} | ${l.outcome} | ${summaryText} |`;
 		}),

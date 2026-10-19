@@ -4,8 +4,8 @@
  * Covers: env detection of `PI_SUBAGENT_CHILD=1` (nicobailon/pi-subagents)
  * and the `PI_SUBAGENT_CHILD_AGENT` + `PI_SUBAGENT_PARENT_PID` pair
  * (avtc-pi-subagent, #507), the `PI_LENS_SUBAGENT_FULL=1` override hatch for
- * both vocabularies, identity parsing (including the `marker` field), and
- * `_resetSubagentModeForTests`.
+ * both vocabularies, and identity parsing (including the `marker` field).
+ * `_resetSubagentModeForTests` is exercised by the hooks below, not by a case.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -188,11 +188,5 @@ describe("getSubagentIdentity", () => {
 describe("subagentLightModeNotice", () => {
 	it("mentions the override escape hatch", () => {
 		expect(subagentLightModeNotice()).toContain("PI_LENS_SUBAGENT_FULL=1");
-	});
-});
-
-describe("_resetSubagentModeForTests", () => {
-	it("is safe to call with no prior state (no-op today, but must not throw)", () => {
-		expect(() => _resetSubagentModeForTests()).not.toThrow();
 	});
 });

@@ -109,7 +109,7 @@ describe("debug-heap: pruneOldSnapshots (bounded on-disk axis, shape 9)", () => 
 		fs.writeFileSync(bystander, "keep-me");
 
 		// Import fresh AFTER files exist so nothing races the module writer.
-		return importFresh(false).then((mod) => {
+		return importFresh(false).then(async (mod) => {
 			const removed = mod.pruneOldSnapshots(dir, 3);
 			// Oldest two removed.
 			expect(removed.sort()).toEqual([created[0], created[1]].sort());
@@ -117,7 +117,10 @@ describe("debug-heap: pruneOldSnapshots (bounded on-disk axis, shape 9)", () => 
 			// The three newest survive.
 			for (const full of created.slice(2))
 				expect(fs.existsSync(full)).toBe(true);
-			// The breadcrumb log is untouched.
+			// The breadcrumb log is untouched. Drain first (#4381): the flag is off
+			// here, so no writer exists, but an "untouched" read of a sink file is
+			// only meaningful once nothing can still be queued for it.
+			await mod.flushHeapSnapshotLog();
 			expect(fs.readFileSync(bystander, "utf-8")).toBe("keep-me");
 		});
 	});

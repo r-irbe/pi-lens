@@ -14,7 +14,10 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
-import { tryAcquireGeneration } from "../../clients/generation-lock.js";
+import {
+	tryAcquireGeneration,
+	withGenerationLockSync,
+} from "../../clients/generation-lock.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const dirs: string[] = [];
@@ -539,5 +542,172 @@ describe("instance registry lock", () => {
 			}),
 		).toBe("blocked");
 		expect(fs.readFileSync(marker, "utf8")).toBe("sync body reached\n");
+	});
+
+	// Recurrence: #2146. pi evaluates this module more than once per process, so
+	// the in-flight own-hold counter must live in the process singleton. At
+	// module scope the sync call in the second evaluation sees no hold, spins
+	// the 500 ms wait against the async holder, and records a lock timeout.
+	it("skips the sync wait for an async hold taken in another module evaluation", async () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-registry-lock-"),
+		);
+		dirs.push(dir);
+		const target = path.join(dir, "instances.json");
+		vi.resetModules();
+		const other = await import("../../clients/instance-registry-lock.js");
+		const otherLedger = await import("../../clients/degradation-ledger.js");
+		expect(other.withInstanceRegistryLockSync).not.toBe(
+			withInstanceRegistryLockSync,
+		);
+
+		let during: string | undefined = "not run";
+		await expect(
+			withInstanceRegistryLock(target, async () => {
+				during = other.withInstanceRegistryLockSync(target, () => "entered");
+				return "held";
+			}),
+		).resolves.toBe("held");
+
+		expect(during).toBeUndefined();
+		const counts = new Map(
+			otherLedger.getDegradationSummary().map((g) => [g.kind, g.count]),
+		);
+		expect(counts.get("instance-registry-lock-own-hold")).toBe(1);
+		expect(counts.has("instance-registry-lock-timeout")).toBe(false);
+		// The hold is gone with its lock: the sync path enters again.
+		expect(other.withInstanceRegistryLockSync(target, () => "entered")).toBe(
+			"entered",
+		);
+	});
+
+	// Recurrence: a counter that is not decremented on a throwing op would turn
+	// every later sync removal into a skipped removal for the process lifetime.
+	it("enters the sync path again after an async hold whose op threw", async () => {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-registry-lock-"),
+		);
+		dirs.push(dir);
+		const target = path.join(dir, "instances.json");
+
+		await expect(
+			withInstanceRegistryLock(target, async () => {
+				throw new Error("op failed");
+			}),
+		).rejects.toThrow("op failed");
+
+		expect(withInstanceRegistryLockSync(target, () => "entered")).toBe(
+			"entered",
+		);
+		expect(degradationKinds()).not.toContain("instance-registry-lock-own-hold");
+	});
+});
+
+describe("withGenerationLockSync (#3509)", () => {
+	function lockDir(): string {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-gen-sync-"));
+		dirs.push(dir);
+		return path.join(dir, "cache.locks");
+	}
+
+	it("waits out a sibling's short hold and then runs op once", () => {
+		const dir = lockDir();
+		// A sibling won the exclusive create twice: this process backs off and
+		// retries inside its wait instead of giving the save up.
+		const realWrite = fs.writeFileSync;
+		let contended = 0;
+		fs.writeFileSync = ((...args: Parameters<typeof realWrite>) => {
+			const file = String(args[0]);
+			if (contended < 2 && /[\\/]lock\.\d+$/.test(file)) {
+				contended += 1;
+				throw Object.assign(new Error("EEXIST: file already exists"), {
+					code: "EEXIST",
+				});
+			}
+			return realWrite(...args);
+		}) as typeof fs.writeFileSync;
+		syncBuiltinESMExports();
+		let ran = 0;
+		let result: ReturnType<typeof withGenerationLockSync<string>>;
+		try {
+			result = withGenerationLockSync(
+				dir,
+				{ staleMs: 5_000, waitMs: 500 },
+				() => {
+					ran += 1;
+					return "entered";
+				},
+			);
+		} finally {
+			fs.writeFileSync = realWrite;
+			syncBuiltinESMExports();
+		}
+		expect(contended).toBe(2);
+		expect(ran).toBe(1);
+		expect(result).toEqual({ held: true, value: "entered" });
+		// Waiting out a live holder is not a takeover.
+		expect(getDegradationSummary().map((row) => row.kind)).not.toContain(
+			"generation-lock-stale-takeover",
+		);
+	});
+
+	it("records a takeover from a dead holder, as every other generation-lock caller does (#3476 parity)", () => {
+		const dir = lockDir();
+		fs.mkdirSync(dir, { recursive: true });
+		let deadPid = 999_983;
+		for (; deadPid > 1000; deadPid -= 7919) {
+			try {
+				process.kill(deadPid, 0);
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === "ESRCH") break;
+			}
+		}
+		fs.writeFileSync(path.join(dir, "lock.1"), `${deadPid} ${Date.now()}\n`);
+		const result = withGenerationLockSync(
+			dir,
+			{ staleMs: 5_000, waitMs: 500 },
+			() => "entered",
+		);
+		expect(result).toEqual({ held: true, value: "entered" });
+		expect(getDegradationSummary()).toContainEqual(
+			expect.objectContaining({
+				kind: "generation-lock-stale-takeover",
+				count: 1,
+			}),
+		);
+	});
+
+	it("stops on a filesystem error other than contention and hands back its cause", () => {
+		const dir = lockDir();
+		const realMkdir = fs.mkdirSync;
+		fs.mkdirSync = ((...args: Parameters<typeof realMkdir>) => {
+			if (String(args[0]) === dir) {
+				throw Object.assign(new Error("EACCES: permission denied"), {
+					code: "EACCES",
+				});
+			}
+			return realMkdir(...args);
+		}) as typeof fs.mkdirSync;
+		syncBuiltinESMExports();
+		let ran = 0;
+		let result: ReturnType<typeof withGenerationLockSync<string>>;
+		try {
+			result = withGenerationLockSync(
+				dir,
+				{ staleMs: 5_000, waitMs: 500 },
+				() => {
+					ran += 1;
+					return "entered";
+				},
+			);
+		} finally {
+			fs.mkdirSync = realMkdir;
+			syncBuiltinESMExports();
+		}
+		expect(ran).toBe(0);
+		expect(result).toEqual({
+			held: false,
+			cause: expect.objectContaining({ code: "EACCES" }),
+		});
 	});
 });

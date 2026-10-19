@@ -1,0 +1,156 @@
+﻿2026-09-06T17:32:01.2831260Z Current runner version: '2.337.0'
+2026-09-06T17:32:01.2849990Z ##[group]Runner Image Provisioner
+2026-09-06T17:32:01.2850700Z Hosted Compute Agent
+2026-09-06T17:32:01.2851110Z Version: 20260828.587
+2026-09-06T17:32:01.2851600Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-06T17:32:01.2852250Z Build Date: 2026-08-28T16:44:25Z
+2026-09-06T17:32:01.2852810Z Worker ID: {a0755627-9654-4042-8df4-bbfe9026b436}
+2026-09-06T17:32:01.2853340Z Azure Region: westus
+2026-09-06T17:32:01.2853760Z ##[endgroup]
+2026-09-06T17:32:01.2854830Z ##[group]Operating System
+2026-09-06T17:32:01.2855250Z macOS
+2026-09-06T17:32:01.2855590Z 26.6.2
+2026-09-06T17:32:01.2855990Z 25G83
+2026-09-06T17:32:01.2856370Z ##[endgroup]
+2026-09-06T17:32:01.2856730Z ##[group]Runner Image
+2026-09-06T17:32:01.2857200Z Image: macos-26-arm64
+2026-09-06T17:32:01.2857690Z Version: 20260831.0337.3
+2026-09-06T17:32:01.2858710Z Included Software: https://github.com/actions/runner-images/blob/macos-26-arm64/20260831.0337/images/macos/macos-26-arm64-Readme.md
+2026-09-06T17:32:01.2859930Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-26-arm64%2F20260831.0337
+2026-09-06T17:32:01.2860730Z ##[endgroup]
+2026-09-06T17:32:01.2861520Z ##[group]GITHUB_TOKEN Permissions
+2026-09-06T17:32:01.2862810Z Contents: read
+2026-09-06T17:32:01.2863320Z Metadata: read
+2026-09-06T17:32:01.2863870Z ##[endgroup]
+2026-09-06T17:32:01.2865440Z Secret source: Actions
+2026-09-06T17:32:01.2866300Z Prepare workflow directory
+2026-09-06T17:32:01.3083300Z Prepare all required actions
+2026-09-06T17:32:01.3115830Z Getting action download info
+2026-09-06T17:32:01.4287810Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+2026-09-06T17:32:01.6039650Z Download action repository 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020' (SHA:820762786026740c76f36085b0efc47a31fe5020)
+2026-09-06T17:32:01.7524460Z Complete job name: Install test (macos-latest)
+2026-09-06T17:32:01.8000630Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-09-06T17:32:01.8001280Z with:
+2026-09-06T17:32:01.8001580Z   ref: refs/pull/2623/merge
+2026-09-06T17:32:01.8001940Z   persist-credentials: false
+2026-09-06T17:32:01.8002300Z   repository: apmantza/pi-lens
+2026-09-06T17:32:01.8005080Z   token: ***
+2026-09-06T17:32:01.8005420Z   ssh-strict: true
+2026-09-06T17:32:01.8005740Z   ssh-user: git
+2026-09-06T17:32:01.8006050Z   clean: true
+2026-09-06T17:32:01.8006380Z   sparse-checkout-cone-mode: true
+2026-09-06T17:32:01.8006820Z   fetch-depth: 1
+2026-09-06T17:32:01.8007130Z   fetch-tags: false
+2026-09-06T17:32:01.8007460Z   show-progress: true
+2026-09-06T17:32:01.8007780Z   lfs: false
+2026-09-06T17:32:01.8008090Z   submodules: false
+2026-09-06T17:32:01.8008420Z   set-safe-directory: true
+2026-09-06T17:32:01.8008790Z   allow-unsafe-pr-checkout: false
+2026-09-06T17:32:01.8009280Z ##[endgroup]
+2026-09-06T17:32:02.0959090Z Syncing repository: apmantza/pi-lens
+2026-09-06T17:32:02.0961040Z ##[group]Getting Git version info
+2026-09-06T17:32:02.0961850Z Working directory is '/Users/runner/work/pi-lens/pi-lens'
+2026-09-06T17:32:02.0962830Z [command]/opt/homebrew/bin/git version
+2026-09-06T17:32:02.1217330Z git version 2.55.0
+2026-09-06T17:32:02.1232330Z ##[endgroup]
+2026-09-06T17:32:02.1237740Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/c16c099a-da17-43c3-bcf7-1f5636d5fbf4/.gitconfig'
+2026-09-06T17:32:02.1242350Z Temporarily overriding HOME='/Users/runner/work/_temp/c16c099a-da17-43c3-bcf7-1f5636d5fbf4' before making global git config changes
+2026-09-06T17:32:02.1243510Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-06T17:32:02.1245880Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/pi-lens/pi-lens
+2026-09-06T17:32:02.1339210Z Deleting the contents of '/Users/runner/work/pi-lens/pi-lens'
+2026-09-06T17:32:02.1341310Z ##[group]Determining repository object format
+2026-09-06T17:32:02.5633930Z ##[endgroup]
+2026-09-06T17:32:02.5638660Z ##[group]Initializing the repository
+2026-09-06T17:32:02.5645420Z [command]/opt/homebrew/bin/git init /Users/runner/work/pi-lens/pi-lens
+2026-09-06T17:32:02.6008850Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-06T17:32:02.6010330Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-06T17:32:02.6013240Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-06T17:32:02.6014150Z hint: call:
+2026-09-06T17:32:02.6014840Z hint:
+2026-09-06T17:32:02.6015450Z hint: 	git config --global init.defaultBranch <name>
+2026-09-06T17:32:02.6016220Z hint:
+2026-09-06T17:32:02.6017000Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-06T17:32:02.6018740Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-06T17:32:02.6019660Z hint:
+2026-09-06T17:32:02.6020120Z hint: 	git branch -m <name>
+2026-09-06T17:32:02.6020640Z hint:
+2026-09-06T17:32:02.6021280Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-06T17:32:02.6022310Z Initialized empty Git repository in /Users/runner/work/pi-lens/pi-lens/.git/
+2026-09-06T17:32:02.6024480Z [command]/opt/homebrew/bin/git remote add origin https://github.com/apmantza/pi-lens
+2026-09-06T17:32:02.6116800Z ##[endgroup]
+2026-09-06T17:32:02.6118310Z ##[group]Disabling automatic garbage collection
+2026-09-06T17:32:02.6119530Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+2026-09-06T17:32:02.6197530Z ##[endgroup]
+2026-09-06T17:32:02.6198310Z ##[group]Setting up auth
+2026-09-06T17:32:02.6198900Z Removing SSH command configuration
+2026-09-06T17:32:02.6201400Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-06T17:32:02.6272940Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-06T17:32:02.7259040Z Removing HTTP extra header
+2026-09-06T17:32:02.7261680Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-06T17:32:02.7319570Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-06T17:32:02.8113630Z Removing includeIf entries pointing to credentials config files
+2026-09-06T17:32:02.8117680Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-06T17:32:02.8122450Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-06T17:32:02.8801500Z [command]/opt/homebrew/bin/git config --file /Users/runner/work/_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-06T17:32:02.8857190Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/Users/runner/work/pi-lens/pi-lens/.git.path /Users/runner/work/_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:02.8907140Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/Users/runner/work/pi-lens/pi-lens/.git/worktrees/*.path /Users/runner/work/_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:02.8972080Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:02.9015780Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:02.9065150Z ##[endgroup]
+2026-09-06T17:32:02.9066510Z ##[group]Fetching the repository
+2026-09-06T17:32:02.9069680Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +refs/pull/2623/merge:refs/remotes/pull/2623/merge
+2026-09-06T17:32:03.4018630Z ##[error]fatal: couldn't find remote ref refs/pull/2623/merge
+2026-09-06T17:32:03.4024000Z The process '/opt/homebrew/bin/git' failed with exit code 128
+2026-09-06T17:32:03.4025240Z Waiting 13 seconds before trying again
+2026-09-06T17:32:16.4099610Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +refs/pull/2623/merge:refs/remotes/pull/2623/merge
+2026-09-06T17:32:16.8663070Z ##[error]fatal: couldn't find remote ref refs/pull/2623/merge
+2026-09-06T17:32:16.8673810Z The process '/opt/homebrew/bin/git' failed with exit code 128
+2026-09-06T17:32:16.8674420Z Waiting 19 seconds before trying again
+2026-09-06T17:32:35.8800660Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +refs/pull/2623/merge:refs/remotes/pull/2623/merge
+2026-09-06T17:32:36.3601920Z ##[error]fatal: couldn't find remote ref refs/pull/2623/merge
+2026-09-06T17:32:36.3621700Z ##[group]Removing auth
+2026-09-06T17:32:36.3622290Z Removing SSH command configuration
+2026-09-06T17:32:36.3626890Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-06T17:32:36.3705810Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-06T17:32:36.4578620Z Removing HTTP extra header
+2026-09-06T17:32:36.4581440Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-06T17:32:36.4657230Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-06T17:32:36.5377870Z Removing includeIf entries pointing to credentials config files
+2026-09-06T17:32:36.5379960Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-06T17:32:36.5432370Z includeif.gitdir:/Users/runner/work/pi-lens/pi-lens/.git.path
+2026-09-06T17:32:36.5433160Z includeif.gitdir:/Users/runner/work/pi-lens/pi-lens/.git/worktrees/*.path
+2026-09-06T17:32:36.5433900Z includeif.gitdir:/github/workspace/.git.path
+2026-09-06T17:32:36.5434590Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-06T17:32:36.5442350Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/Users/runner/work/pi-lens/pi-lens/.git.path
+2026-09-06T17:32:36.5495480Z /Users/runner/work/_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:36.5505060Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/Users/runner/work/pi-lens/pi-lens/.git.path \/Users\/runner\/work\/_temp\/git\-credentials\-262c6055\-38f5\-4d32\-b264\-149f180e5cae\.config
+2026-09-06T17:32:36.5579690Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/Users/runner/work/pi-lens/pi-lens/.git/worktrees/*.path
+2026-09-06T17:32:36.5632670Z /Users/runner/work/_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:36.5638790Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/Users/runner/work/pi-lens/pi-lens/.git/worktrees/*.path \/Users\/runner\/work\/_temp\/git\-credentials\-262c6055\-38f5\-4d32\-b264\-149f180e5cae\.config
+2026-09-06T17:32:36.5696490Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-09-06T17:32:36.5743470Z /github/runner_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:36.5748650Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-262c6055\-38f5\-4d32\-b264\-149f180e5cae\.config
+2026-09-06T17:32:36.5804040Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-06T17:32:36.5851410Z /github/runner_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config
+2026-09-06T17:32:36.5857580Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-262c6055\-38f5\-4d32\-b264\-149f180e5cae\.config
+2026-09-06T17:32:36.5917190Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-06T17:32:36.6559190Z Removing credentials config '/Users/runner/work/_temp/git-credentials-262c6055-38f5-4d32-b264-149f180e5cae.config'
+2026-09-06T17:32:36.6569910Z ##[endgroup]
+2026-09-06T17:32:36.6590480Z ##[error]The process '/opt/homebrew/bin/git' failed with exit code 128
+2026-09-06T17:32:36.7005860Z Post job cleanup.
+2026-09-06T17:32:36.8468480Z [command]/opt/homebrew/bin/git version
+2026-09-06T17:32:36.8550540Z git version 2.55.0
+2026-09-06T17:32:36.8569050Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/52125bb5-64a7-431d-8b95-66b85a29bb28/.gitconfig'
+2026-09-06T17:32:36.8576360Z Temporarily overriding HOME='/Users/runner/work/_temp/52125bb5-64a7-431d-8b95-66b85a29bb28' before making global git config changes
+2026-09-06T17:32:36.8577380Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-06T17:32:36.8580980Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/pi-lens/pi-lens
+2026-09-06T17:32:36.8648790Z Removing SSH command configuration
+2026-09-06T17:32:36.8654470Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-06T17:32:36.8722690Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-06T17:32:36.9423970Z Removing HTTP extra header
+2026-09-06T17:32:36.9427890Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-06T17:32:36.9480730Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-06T17:32:37.0836670Z Removing includeIf entries pointing to credentials config files
+2026-09-06T17:32:37.0938460Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-06T17:32:37.1242740Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-06T17:32:37.2343460Z Cleaning up orphan processes

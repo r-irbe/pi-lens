@@ -35,11 +35,20 @@ import {
 	type LSPDiagnostic,
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../../clients/lsp/wait-policy/strategies.js";
 import { createMockState } from "./mock-client-state.js";
 
 const FILE = "/project/app.php";
 const KEY = normalizeMapKey(FILE);
 const PHP_DEBOUNCE_MS = 150;
+// Keep one explicit row per marker server: a new marker must add its consumer
+// cases here, and removing a marker leaves the stale row red. This prevents a
+// parameterized suite from silently shrinking when the strategy table drifts.
+const EMPTY_FIRST_PUBLISH_CONSUMER_SERVERS = [
+	"php",
+	"terraform",
+	"typescript",
+] as const;
 
 const FINDING: LSPDiagnostic = {
 	severity: 1,
@@ -83,6 +92,15 @@ describe("#3310 empty-first-publish hold (php/intelephense class)", () => {
 		vi.useFakeTimers();
 		logLatency.mockClear();
 	});
+	it("has one consumer row for every empty-first-publish marker", () => {
+		const markedServers = Object.entries(SERVER_DIAGNOSTIC_STRATEGIES)
+			.filter(([, strategy]) => strategy.emptyFirstPublish === "indexing")
+			.map(([serverId]) => serverId)
+			.sort();
+		expect([...EMPTY_FIRST_PUBLISH_CONSUMER_SERVERS].sort()).toEqual(
+			markedServers,
+		);
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 	});
@@ -117,33 +135,39 @@ describe("#3310 empty-first-publish hold (php/intelephense class)", () => {
 		});
 	});
 
-	it("releases the hold on the server's next publish — the real set after indexing", () => {
-		const { state, publish, emitted } = armHandler("php");
+	it.each(EMPTY_FIRST_PUBLISH_CONSUMER_SERVERS)(
+		"%s releases the hold on the server's next publish — the real set after indexing",
+		(serverId) => {
+			const { state, publish, emitted } = armHandler(serverId);
 
-		publish({ uri, diagnostics: [] });
-		vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
-		publish({ uri, diagnostics: [FINDING] });
-		vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
+			publish({ uri, diagnostics: [] });
+			vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
+			publish({ uri, diagnostics: [FINDING] });
+			vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
 
-		expect(state.pushDiagnostics.get(KEY)).toHaveLength(1);
-		expect(state.diagnosticsVersionsByPath.get(KEY)).toBeGreaterThan(0);
-		expect(emitted).toEqual([KEY]);
-	});
+			expect(state.pushDiagnostics.get(KEY)).toHaveLength(1);
+			expect(state.diagnosticsVersionsByPath.get(KEY)).toBeGreaterThan(0);
+			expect(emitted).toEqual([KEY]);
+		},
+	);
 
-	it("releases the hold on a SECOND empty publish, so a genuinely clean file still confirms", () => {
-		// Measured: intelephense re-publishes `[]` right after `indexingEnded` for
-		// a clean file, which is what makes the hold releasable by the server
-		// itself rather than by a timer.
-		const { state, publish, emitted } = armHandler("php");
+	it.each(EMPTY_FIRST_PUBLISH_CONSUMER_SERVERS)(
+		"%s releases the hold on a SECOND empty publish, so a genuinely clean file still confirms",
+		(serverId) => {
+			// Measured: intelephense re-publishes `[]` right after `indexingEnded` for
+			// a clean file, which is what makes the hold releasable by the server
+			// itself rather than by a timer.
+			const { state, publish, emitted } = armHandler(serverId);
 
-		publish({ uri, diagnostics: [] });
-		vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
-		publish({ uri, diagnostics: [] });
-		vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
+			publish({ uri, diagnostics: [] });
+			vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
+			publish({ uri, diagnostics: [] });
+			vi.advanceTimersByTime(PHP_DEBOUNCE_MS * 2);
 
-		expect(state.pushDiagnostics.get(KEY)).toEqual([]);
-		expect(emitted).toEqual([KEY]);
-	});
+			expect(state.pushDiagnostics.get(KEY)).toEqual([]);
+			expect(emitted).toEqual([KEY]);
+		},
+	);
 
 	it("holds at most ONE publish per client session", () => {
 		const { state, publish } = armHandler("php");
@@ -223,15 +247,29 @@ describe("#3310 empty-first-publish hold (php/intelephense class)", () => {
 		).toEqual([]);
 	});
 
-	it("leaves a class server that publishes nothing on the timeout path", () => {
-		// F5: no publish at all is still no answer — the hold cannot manufacture
-		// one, and the state stays exactly as an unanswered wait leaves it.
-		const { state, emitted } = armHandler("php");
+	it.each(EMPTY_FIRST_PUBLISH_CONSUMER_SERVERS)(
+		"%s leaves an empty-only first publish unanswered at the caller ceiling",
+		(serverId) => {
+			// F5: no publish at all is still no answer — the hold cannot manufacture
+			// one. An empty-only publish is likewise deliberately indeterminate: the
+			// #3310 trade-off is an unanswered caller rather than a false clean.
+			const { state, publish, emitted } = armHandler(serverId);
+			publish({ uri, diagnostics: [] });
 
-		vi.advanceTimersByTime(1000);
+			vi.advanceTimersByTime(
+				SERVER_DIAGNOSTIC_STRATEGIES[serverId]?.aggregateWaitMs ?? 1500,
+			);
 
-		expect(state.pushDiagnostics.size).toBe(0);
-		expect(state.emptyFirstPublishHoldSpent).toBe(false);
-		expect(emitted).toEqual([]);
-	});
+			expect(state.pushDiagnostics.size).toBe(0);
+			expect(state.emptyFirstPublishHoldSpent).toBe(true);
+			expect(emitted).toEqual([]);
+			expect(
+				logLatency.mock.calls.filter(
+					([row]) =>
+						(row as { phase?: string }).phase ===
+						"lsp_empty_first_publish_held",
+				),
+			).toHaveLength(1);
+		},
+	);
 });

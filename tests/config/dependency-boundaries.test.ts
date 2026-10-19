@@ -32,6 +32,13 @@ function cruiseBuiltGraph(): {
 			dynamic?: boolean;
 		}>;
 	}>;
+	summary: {
+		violations: Array<{
+			from: string;
+			to: string;
+			rule: { name: string; severity: string };
+		}>;
+	};
 } {
 	const output = execFileSync(
 		process.execPath,
@@ -51,7 +58,42 @@ function cruiseBuiltGraph(): {
 	return JSON.parse(output) as ReturnType<typeof cruiseBuiltGraph>;
 }
 
+/**
+ * The violations CI's Dependency boundaries job (`npm run depcruise:check`)
+ * would fail on: every violation in the cruise that the known-violations
+ * baseline does not list. JSON mode exits 0 whatever it finds, so the
+ * caller must read the summary.
+ */
+function unexpectedViolations(): string[] {
+	const key = (violation: {
+		from: string;
+		to: string;
+		rule: { name: string };
+	}) => `${violation.rule.name}: ${violation.from} -> ${violation.to}`;
+	const known = new Set(
+		(
+			parseJson5(
+				readFileSync(
+					resolve(repoRoot, ".dependency-cruiser-known-violations.json"),
+					"utf8",
+				),
+			) as Array<{ from: string; to: string; rule: { name: string } }>
+		).map(key),
+	);
+	return cruiseBuiltGraph()
+		.summary.violations.filter((violation) => !known.has(key(violation)))
+		.map((violation) => `${violation.rule.severity} ${key(violation)}`);
+}
+
 describe("dependency boundary governance", () => {
+	// #4344 r2: `workspace-diagnostics-session.js -> bounded-cache.js` broke
+	// the declared-client-leaf rule. CI's Dependency boundaries job went red,
+	// but this suite stayed green: it cruised in JSON mode, which exits 0 with
+	// errors, and asserted only rule names and counts.
+	it("finds no boundary violation outside the known-violations baseline", () => {
+		expect(unexpectedViolations()).toEqual([]);
+	}, 60_000);
+
 	it("keeps the configured boundary rules present", () => {
 		const config = require(resolve(repoRoot, ".dependency-cruiser.cjs")) as {
 			forbidden: Array<{ name?: string }>;
@@ -138,6 +180,13 @@ describe("dependency boundary governance", () => {
 		// `instance-reaper`) once the shorter one was gone — not new coupling.
 		// `file-utils.js` is still on that remaining cycle, which is why the
 		// resolver must stay off it. Reduction stays tracked in #2125.
+		//
+		// #4314: 12 -> 5, ZERO entries added. no-client-cycles now skips any
+		// cycle that a dynamic import closes (`viaOnly.dependencyTypesNot`),
+		// which the rule's first-edge-only `dependencyTypesNot` always meant. All
+		// seven dropped entries carry a dynamic-import edge; two were already
+		// stale. This is what lets clients/lsp-lazy.ts keep the literal
+		// `import("./lsp/capabilities.js")` that esbuild has to see.
 		const baseline = parseJson5(
 			readFileSync(
 				resolve(repoRoot, ".dependency-cruiser-known-violations.json"),
@@ -145,6 +194,6 @@ describe("dependency boundary governance", () => {
 			),
 		) as unknown[];
 
-		expect(baseline).toHaveLength(12);
+		expect(baseline).toHaveLength(5);
 	}, 30_000);
 });

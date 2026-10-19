@@ -9,11 +9,13 @@ import {
 } from "../../../clients/review-graph/builder.js";
 import { removeTempDirSync } from "../test-utils.js";
 
-// #886 / #931 review: the builder releases full source content it seeded into a
-// shared FactStore, but must NEVER release content the DISPATCH put there — the
-// incremental blast-radius path runs fire-and-forget against the live dispatch
-// store, and inline suppressions / dispositions / fact rules still read
-// file.content after the runner groups settle. A delete would race them.
+// #886 / #931 review, restated for #3552: full source content must never
+// linger in, or be freed from, a shared FactStore by the graph. The graph now
+// derives into a run-local store, so it neither seeds nor releases content in
+// the store it is handed: the incremental blast-radius path runs fire-and-forget
+// against the live dispatch store, and inline suppressions / dispositions / fact
+// rules still read file.content after the runner groups settle. Any write or
+// delete here would race them.
 describe("review-graph builder — file.content release ownership", () => {
 	const dirs: string[] = [];
 

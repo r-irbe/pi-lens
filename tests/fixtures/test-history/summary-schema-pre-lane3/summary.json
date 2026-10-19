@@ -1,0 +1,40 @@
+{
+  "rowCount": 373337,
+  "files": [
+    {
+      "file": "/home/runner/work/pi-lens/pi-lens/tests/build-freshness-guard.test.ts",
+      "passCount": 593,
+      "failCount": 0,
+      "lastFailHead": null,
+      "meanDurationMs": 10.451580285623946
+    },
+    {
+      "file": "/home/runner/work/pi-lens/pi-lens/tests/clients/actionable-warnings-agreement.test.ts",
+      "passCount": 593,
+      "failCount": 0,
+      "lastFailHead": null,
+      "meanDurationMs": 47.24382237760856
+    },
+    {
+      "file": "/home/runner/work/pi-lens/pi-lens/tests/clients/actionable-warnings-bounds.test.ts",
+      "passCount": 593,
+      "failCount": 0,
+      "lastFailHead": null,
+      "meanDurationMs": 362.5518459172112
+    }
+  ],
+  "flakeCandidates": [
+    {
+      "file": "/home/runner/work/pi-lens/pi-lens/tests/clients/sgconfig-scratch-bound.test.ts",
+      "headSha": "becd6dfff71dbaf37539b0dfa56395ab7cd575d0"
+    },
+    {
+      "file": "/home/runner/work/pi-lens/pi-lens/tests/config/tmp-fixture-hygiene.test.ts",
+      "headSha": "f07d73f1c6aaf811ba2df996129c893cab9435e4"
+    },
+    {
+      "file": "/home/runner/work/pi-lens/pi-lens/tests/index-integration.test.ts",
+      "headSha": "265779689e539b574c3056d809a05e120cca8040"
+    }
+  ]
+}

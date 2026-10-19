@@ -31,6 +31,11 @@ name: Subagent-extension compat smoke (nightly)
 # reds on a genuine infra failure (e.g. `npm pack`/install of OUR OWN
 # package failing) — both scripts exit 2 (not 1) for infra errors so that
 # distinction is visible in the logs even though the step is non-blocking.
+#
+# Two jobs (#4077): GitHub permissions are job-scoped, so the smoke job holds
+# only `contents: read` and runs on a dispatch from ANY ref, while the one job
+# that writes the tracking issue (`compat-smoke-alert`) is guarded to the
+# schedule or master and receives the layer outcomes through job outputs.
 
 on:
   schedule:
@@ -45,13 +50,21 @@ jobs:
   compat-smoke:
     name: Subagent compat smoke
     runs-on: ubuntu-latest
+    # What the alert job needs: both layers' raw step outcomes, Layer A's own
+    # verified/drift/infra kind, and the installed versions (#2581).
+    outputs:
+      layer_a_step_outcome: ${{ steps.layer_a.outcome }}
+      layer_a_kind: ${{ steps.layer_a.outputs.outcome || 'unknown' }}
+      layer_b_outcome: ${{ steps.layer_b.outcome }}
+      layer_a_versions: >-
+        ${{ steps.layer_a.outputs.versions ||
+        'unavailable (Layer A install did not complete)' }}
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 91s; timeout = floor of
     # 10 min.
     timeout-minutes: 10
     permissions:
       contents: read
-      issues: write # create-or-update the single drift-alert issue
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -59,7 +72,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "22"
 
@@ -97,6 +110,35 @@ jobs:
           ANTHROPIC_API_KEY: sk-ant-dummy-ci-no-credits-needed
         run: node scripts/compat-smoke-behavioral.mjs
 
+  # The only writer (#4077). A branch dispatch skips this job and still runs
+  # the smoke above; its token is `issues: write` and nothing else but the
+  # checkout read, and it takes the smoke's verdict through job outputs.
+  # timeout-minutes: the step is one upsert; 5 minutes is far above a `gh`
+  # round trip and half the smoke job's cap.
+  compat-smoke-alert:
+    name: Subagent compat alert
+    needs: compat-smoke
+    if: >-
+      always() && (github.event_name == 'schedule' || github.ref == 'refs/heads/master') &&
+      (needs.compat-smoke.outputs.layer_a_step_outcome == 'failure' ||
+      needs.compat-smoke.outputs.layer_b_outcome == 'failure' ||
+      (needs.compat-smoke.outputs.layer_a_step_outcome == 'success' && needs.compat-smoke.outputs.layer_b_outcome == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # create-or-update the single drift-alert issue
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
       # Alert whenever either layer's step outcome is non-success — this
       # covers BOTH real content drift and an infra failure (a dependency's
       # file layout moved, npm install failed, ...): an infra failure means
@@ -114,19 +156,13 @@ jobs:
       # issue instead of piling up; the title itself stays constant so that
       # search keeps finding it regardless of which outcome kind is current.
       - name: Alert on contract drift or infra failure (create-or-update tracking issue)
-        if: >-
-          always() && (steps.layer_a.outcome == 'failure' ||
-          steps.layer_b.outcome == 'failure' ||
-          (steps.layer_a.outcome == 'success' && steps.layer_b.outcome == 'success'))
         # Tracker maintenance must not mask the smoke job's own verdict.
         continue-on-error: true
         env:
-          LAYER_A_STEP_OUTCOME: ${{ steps.layer_a.outcome }}
-          LAYER_A_KIND: ${{ steps.layer_a.outputs.outcome || 'unknown' }}
-          LAYER_B_OUTCOME: ${{ steps.layer_b.outcome }}
-          LAYER_A_VERSIONS: >-
-            ${{ steps.layer_a.outputs.versions ||
-            'unavailable (Layer A install did not complete)' }}
+          LAYER_A_STEP_OUTCOME: ${{ needs.compat-smoke.outputs.layer_a_step_outcome }}
+          LAYER_A_KIND: ${{ needs.compat-smoke.outputs.layer_a_kind }}
+          LAYER_B_OUTCOME: ${{ needs.compat-smoke.outputs.layer_b_outcome }}
+          LAYER_A_VERSIONS: ${{ needs.compat-smoke.outputs.layer_a_versions }}
         run: |
           set -uo pipefail
           TITLE="compat-smoke: third-party contract drift detected"

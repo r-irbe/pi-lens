@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * Warm build-staleness guard (#535) — real end-to-end smoke: spawns the actual
  * server subprocess, then bumps an isolated "entry" file's mtime (simulating a

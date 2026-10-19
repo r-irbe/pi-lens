@@ -1,0 +1,33 @@
+
+<ESC>[1m<ESC>[30m<ESC>[46m RUN <ESC>[49m<ESC>[39m<ESC>[22m <ESC>[36mv5.0.3 <ESC>[39m<ESC>[90m/repo<ESC>[39m
+
+[pi-lens test setup] pre-fetching 12 missing tree-sitter grammar(s) once, before test workers spawn: tree-sitter-typescript.wasm, tree-sitter-tsx.wasm, tree-sitter-javascript.wasm, tree-sitter-python.wasm, tree-sitter-go.wasm, tree-sitter-rust.wasm, tree-sitter-json.wasm, tree-sitter-yaml.wasm, tree-sitter-bash.wasm, tree-sitter-html.wasm, tree-sitter-css.wasm, tree-sitter-java.wasm
+ <ESC>[31m❯<ESC>[39m <ESC>[30m<ESC>[42m default <ESC>[49m<ESC>[39m tests/scripts/zz-probe-4087.test.ts <ESC>[2m(<ESC>[22m<ESC>[2m4 tests<ESC>[22m<ESC>[2m | <ESC>[22m<ESC>[31m1 failed<ESC>[39m<ESC>[2m | <ESC>[22m<ESC>[33m1 skipped<ESC>[39m<ESC>[2m)<ESC>[22m<ESC>[32m 9<ESC>[2mms<ESC>[22m<ESC>[39m
+<ESC>[31m   <ESC>[31m×<ESC>[31m probe red<ESC>[39m<ESC>[32m 5<ESC>[2mms<ESC>[22m<ESC>[39m
+
+<ESC>[31m⎯⎯⎯⎯⎯⎯⎯<ESC>[39m<ESC>[1m<ESC>[41m Failed Tests 1 <ESC>[49m<ESC>[22m<ESC>[31m⎯⎯⎯⎯⎯⎯⎯<ESC>[39m
+
+<ESC>[41m<ESC>[1m FAIL <ESC>[22m<ESC>[49m <ESC>[30m<ESC>[42m default <ESC>[49m<ESC>[39m tests/scripts/zz-probe-4087.test.ts<ESC>[2m > <ESC>[22mprobe red
+<ESC>[31m<ESC>[1mAssertionError<ESC>[22m: expected 1 to be 2 // Object.is equality<ESC>[39m
+
+<ESC>[32m- Expected<ESC>[39m
+<ESC>[31m+ Received<ESC>[39m
+
+<ESC>[32m- 2<ESC>[39m
+<ESC>[31m+ 1<ESC>[39m
+
+<ESC>[36m <ESC>[2m❯<ESC>[22m tests/scripts/zz-probe-4087.test.ts:<ESC>[2m5:35<ESC>[22m<ESC>[39m
+    <ESC>[90m  3|<ESC>[39m it("probe green two", () => {});
+    <ESC>[90m  4|<ESC>[39m it.skip("probe skipped", () => {});
+    <ESC>[90m  5|<ESC>[39m it("probe red", () => { expect(1).toBe(2); });
+    <ESC>[90m   |<ESC>[39m                                   <ESC>[31m^<ESC>[39m
+    <ESC>[90m  6|<ESC>[39m
+
+<ESC>[31m<ESC>[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯<ESC>[22m<ESC>[39m
+
+
+<ESC>[2m Test Files <ESC>[22m <ESC>[1m<ESC>[31m1 failed<ESC>[39m<ESC>[22m<ESC>[90m (1)<ESC>[39m
+<ESC>[2m      Tests <ESC>[22m <ESC>[1m<ESC>[31m1 failed<ESC>[39m<ESC>[22m<ESC>[2m | <ESC>[22m<ESC>[1m<ESC>[32m2 passed<ESC>[39m<ESC>[22m<ESC>[2m | <ESC>[22m<ESC>[33m1 skipped<ESC>[39m<ESC>[90m (4)<ESC>[39m
+<ESC>[2m   Start at <ESC>[22m 18:35:43
+<ESC>[2m   Duration <ESC>[22m 1.43s<ESC>[2m (transform 65%, setup 21%, tests 9%, worker 3%, import 2%)<ESC>[22m
+

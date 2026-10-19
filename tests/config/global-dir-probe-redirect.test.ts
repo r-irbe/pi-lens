@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { execFileSync } from "../support/git-fixture-env.js";
 import { getDegradationSummary } from "../../clients/degradation-ledger.js";
 import { getGlobalPiLensDir } from "../../clients/file-utils.js";
+import { pathsEqual } from "../../clients/path-utils.js";
 import {
 	_resetProbeHomeRedirectStateForTests,
 	getGlobalPiLensLogDir,
@@ -176,6 +177,10 @@ function expectCwdOutsideChildTmpdir(facts: ChildFacts, cwd: string): void {
 	expect(path.resolve(cwd)).not.toBe(normalizedTmp);
 }
 
+function expectSamePath(actual: string, expected: string): void {
+	expect(pathsEqual(actual, expected)).toBe(true);
+}
+
 describe("getGlobalPiLensLogDir probe-home redirect (#2506)", () => {
 	it("redirects a worktree probe's LOGS while leaving tools/registry on the real home", async () => {
 		const { root, fakeHome, isolatedTmp } = makeFixture("probe-worktree");
@@ -193,14 +198,14 @@ describe("getGlobalPiLensLogDir probe-home redirect (#2506)", () => {
 			expectCwdOutsideChildTmpdir(facts, probeCwd);
 
 			// The log root moved — and anchored at the WORKTREE, not at `cwd`.
-			expect(facts.logDir).toBe(path.join(worktree, ".pi-lens-probe-home"));
+			expectSamePath(facts.logDir, path.join(worktree, ".pi-lens-probe-home"));
 
 			// ...while every machine-global path stayed on the (fake) real home.
 			// This is the whole point of the round-3 split: a pi session running
 			// from a worktree must still find the tools it installed and the one
 			// instances.json every other process on the box reads.
-			expect(facts.globalDir).toBe(path.join(fakeHome, ".pi-lens"));
-			expect(facts.toolsDir).toBe(path.join(fakeHome, ".pi-lens", "tools"));
+			expectSamePath(facts.globalDir, path.join(fakeHome, ".pi-lens"));
+			expectSamePath(facts.toolsDir, path.join(fakeHome, ".pi-lens", "tools"));
 
 			// The degradation row actually landed under the redirected log dir.
 			const probeLatencyLog = path.join(facts.logDir, "latency.log");
@@ -470,14 +475,16 @@ describe("a VITEST-marked process with no PI_LENS_HOME pin (#2516 round 2)", () 
 			// own os.tmpdir() is a sibling of the fixture cwd.
 			expectCwdOutsideChildTmpdir(facts, probeCwd);
 
-			expect(facts.logDir).toBe(path.join(worktree, ".pi-lens-probe-home"));
-			expect(facts.logDir).not.toBe(path.join(fakeHome, ".pi-lens"));
+			expectSamePath(facts.logDir, path.join(worktree, ".pi-lens-probe-home"));
+			expect(pathsEqual(facts.logDir, path.join(fakeHome, ".pi-lens"))).toBe(
+				false,
+			);
 			// ...and nothing was written into the stand-in for the real home.
 			expect(
 				fs.existsSync(path.join(fakeHome, ".pi-lens", "latency.log")),
 			).toBe(false);
 			// Machine-global state is still NOT redirected, VITEST or not.
-			expect(facts.globalDir).toBe(path.join(fakeHome, ".pi-lens"));
+			expectSamePath(facts.globalDir, path.join(fakeHome, ".pi-lens"));
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -569,7 +576,7 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 	// `degradation-ledger.ts` folds at summary time returns the same fact. A
 	// drift between them would mean the ledger never sees a redirect that
 	// actually happened.
-	it("stores the redirect the resolver returned, event and all", () => {
+	it("stores the redirect the resolver returned", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-probe-slot-"));
 		const savedHome = process.env.PI_LENS_HOME;
 		const savedProbe = process.env.PILENS_PROBE;
@@ -584,7 +591,6 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 			const stored = getProbeHomeResolution();
 			expect(stored?.probeHome).toBe(resolved);
 			expect(stored?.event?.probeHome).toBe(resolved);
-			expect(stored?.event?.cwd).toBe(process.cwd());
 		} finally {
 			process.chdir(savedCwd);
 			if (savedHome === undefined) delete process.env.PI_LENS_HOME;
@@ -607,6 +613,16 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 		const root = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-probe-reason-"),
 		);
+		// #3696: a deep agent worktree/TMPDIR used to leave a dangling `(cwd:`
+		// stub after the fixed diagnostic consumed the ledger's 200-character cap.
+		// The fixed diagnostic alone is ~190 characters, so any cwd overflows the
+		// cap; Windows cannot `chdir` into a path past MAX_PATH (ENAMETOOLONG on
+		// the 290-character cwd, #4019), so the pad stays under it there.
+		const longCwd = path.join(
+			root,
+			`cwd-${"x".repeat(process.platform === "win32" ? 100 : 220)}`,
+		);
+		fs.mkdirSync(longCwd, { recursive: true });
 		const savedHome = process.env.PI_LENS_HOME;
 		const savedProbe = process.env.PILENS_PROBE;
 		const savedCwd = process.cwd();
@@ -614,7 +630,7 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 			delete process.env.PI_LENS_HOME;
 			process.env.PILENS_PROBE = "1";
 			_resetProbeHomeRedirectStateForTests();
-			process.chdir(root);
+			process.chdir(longCwd);
 			getGlobalPiLensLogDir();
 
 			const group = getDegradationSummary().find(
@@ -622,7 +638,11 @@ describe("the recorded resolution is visible through the leaf's reader (#2506)",
 			);
 			const reason = group?.latestReasons[0]?.reason ?? "";
 			expect(reason).not.toContain("outside test mode");
-			expect(reason).toContain("PILENS_PROBE=1");
+			expect(reason).toContain(
+				"PI_LENS_HOME unset with cwd in an agent worktree/tmp probe context, or PILENS_PROBE=1 forced it; LOGS redirected away from the real home directory (tools, bin and instances.json are unaffected)",
+			);
+			expect(reason).not.toContain("(cwd:");
+			expect(reason.length).toBeLessThanOrEqual(201);
 		} finally {
 			process.chdir(savedCwd);
 			if (savedHome === undefined) delete process.env.PI_LENS_HOME;

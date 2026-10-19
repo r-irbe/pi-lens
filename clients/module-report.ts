@@ -48,6 +48,7 @@ import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import { buildSymbolId } from "./review-graph/symbol-id.js";
 import type { ReviewGraph, ReviewGraphEdgeKind } from "./review-graph/types.js";
 import type { Symbol as ExtractedSymbol } from "./symbol-types.js";
+import { classifyTreeSitterWasmError } from "./tree-sitter-client.js";
 import {
 	getSharedTreeSitterClient,
 	resolveTreeSitterLanguage,
@@ -548,8 +549,17 @@ async function extractFile(
 						languageId,
 						warnings,
 					);
-				} catch (error) {
-					callbackError = diagnosticMessage(error);
+				} catch (thrown) {
+					// #3996: a wasm trap while reading the tree is the runtime's
+					// failure, not an extractor bug. Report it to the client so
+					// #3605's containment counts it, charges this input and recycles
+					// the parsers; this consumer still returns the symbols it has.
+					if (classifyTreeSitterWasmError(thrown)) {
+						tsClient.reportWasmAbort(thrown);
+						callbackError = `tree-sitter wasm runtime failure (${diagnosticMessage(thrown)})`;
+					} else {
+						callbackError = diagnosticMessage(thrown);
+					}
 				}
 				return {
 					symbols: result.symbols,
@@ -559,6 +569,7 @@ async function extractFile(
 					warnings,
 				};
 			},
+			"module-report",
 		);
 		if (!extracted.parsed) {
 			return {

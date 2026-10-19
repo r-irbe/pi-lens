@@ -76,7 +76,9 @@ type InjectedByteSource =
 export type InjectedBytes = Record<InjectedByteSource, number>;
 export type CacheContextPlacement =
 	| "prepend"
+	// Retired by #3693; kept so old latency logs still parse.
 	| "insert-before-final"
+	| "append-to-last-user"
 	| "append"
 	| "none";
 export type CachePrefixObservation =

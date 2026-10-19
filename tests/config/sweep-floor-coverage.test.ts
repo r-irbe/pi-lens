@@ -80,6 +80,10 @@ function sweepShapeFiles(): Array<{ file: string; source: string }> {
 }
 
 const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
+	"tests/clients/ast-grep-rule-regex-budget.test.ts":
+		"rule YAML corpus enumeration, not a production population sweep",
+	"tests/config/lsp-idle-eviction-registry.test.ts":
+		"LSP registry policy census; its registry-specific boundary tests are not a sweep-kit floor",
 	"tests/config/github-token-write-gates.test.ts":
 		"workflow population governance sweep; its own detector is not a production registry sweep",
 	// #2725: two-direction set equality over every .d.mts/.mjs sibling pair; the
@@ -96,14 +100,20 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"runtime seam behavior cases; filesystem counters verify re-detection, not a population sweep",
 	"tests/clients/sg-runner.test.ts":
 		"fault-injection cases enumerate one real temporary namespace seam; the test asserts cleanup for each setup operation, not a source population sweep",
+	"tests/support/tmp-root-teardown.test.ts":
+		"lists the private tmpdir of one child Vitest run to assert what its forks left behind; a fixture-behaviour check, not a registered-or-fail source population sweep (#2912)",
 	"tests/clients/language-policy.test.ts":
 		"policy unit cases over synthetic language definitions, not a production walk",
 	"tests/clients/lsp/lsp-primary-reachability.test.ts":
 		"synthetic candidate-routing behavior tests; server population coverage is lsp-fixture-coverage",
+	"tests/clients/lsp/docker-official-fallback.test.ts":
+		"docker-official acquisition and argv behavior matrix; the registry/admission population is guarded by lsp-gate-population, lsp-fixture-coverage and the idle-eviction census",
 	"tests/clients/lsp/lsp-registry-consistency.test.ts":
 		"registry relation assertions without a blindable source walk",
 	"tests/clients/lsp/server-policy.test.ts":
 		"server policy behavior cases, not the LSP fixture population sweep",
+	"tests/clients/ephemeral-root.test.ts":
+		"temporary-checkout behavior cases (#1129); it lists one fixture checkout and one sweep directory, not a source population sweep",
 	"tests/tools/lens-diagnostics.test.ts":
 		"diagnostic projection behavior cases, not a production population sweep",
 	"tests/clients/ast-grep-rule-precedence-followups.test.ts":
@@ -168,6 +178,8 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"scanner behavior cases, not a production population sweep",
 	"tests/clients/project-snapshot.test.ts":
 		"snapshot behavior cases, not a production population sweep",
+	"tests/clients/project-snapshot-cross-process.test.ts":
+		"cross-process project-snapshot cases; it lists one cache directory's stage files and asserts none are left, not a production population sweep",
 	"tests/clients/recent-touches.test.ts":
 		"touch behavior cases, not a production population sweep",
 	"tests/clients/review-graph-git-stamp.test.ts":
@@ -188,6 +200,13 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"host type cases, not a production population sweep",
 	"tests/packaging.test.ts":
 		"packaging behavior cases, not a production population sweep",
+	"tests/mcp/harness-socket-teardown.test.ts":
+		"lists one harness-owned TMPDIR root after dispose() and asserts no " +
+		"socket remains (#4353); a behavior case over a fixture root, not a " +
+		"production population sweep",
+	"tests/scripts/guard-bash-probe.test.ts":
+		"corpus-runner behavior cases over fixture rows and stub hooks (#4071), " +
+		"not a production source-population sweep",
 	"tests/scripts/exec-isolation.test.ts":
 		"checks a freshly created temp directory is empty, not a production " +
 		"population sweep",
@@ -195,6 +214,16 @@ const DECLARED_EXCEPTIONS: Readonly<Record<string, string>> = {
 		"enumerates .github/workflows/*.yml job names for gating/advisory " +
 		"classification (#2618 F3) -- an external CI-contract governance " +
 		"walk, not a clients/ production module registry sweep",
+	"tests/scripts/lane-check.test.ts":
+		"asserts empty failedFiles/scratch results of CLI fixture runs " +
+		"(toEqual([])); behavior cases, not a production population sweep",
+	"tests/scripts/red-on-base.test.ts":
+		"lists one TMPDIR-scoped scratch directory of a CLI fixture run and " +
+		"asserts it is empty after cleanup; not a production population sweep",
+	"tests/scripts/stryker-diff.test.ts":
+		"fake-Stryker fixture; linkRealNodeModules enumerates the local " +
+		"node_modules install and the emptiness assertions are on mapRelatedTests " +
+		"result sets (behavior cases), not a production source-population sweep",
 	"tests/scripts/no-hardcoded-machine-paths.test.ts":
 		"carries its own declared floor at the 'scans a nonzero number of " +
 		"script files' check (files.length > 10)",

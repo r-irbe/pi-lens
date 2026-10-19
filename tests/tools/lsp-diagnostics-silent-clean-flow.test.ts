@@ -66,10 +66,10 @@ vi.mock("../../clients/widget-state.js", async () => {
 });
 
 let service: unknown;
-vi.mock("../../clients/lsp/index.js", async () => {
+vi.mock("../../clients/lsp/capabilities.js", async () => {
 	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/index.js")
-	>("../../clients/lsp/index.js");
+		typeof import("../../clients/lsp/capabilities.js")
+	>("../../clients/lsp/capabilities.js");
 	return { ...actual, getLSPService: () => service };
 });
 
@@ -119,7 +119,10 @@ function makeSilentClient(serverId: string, root: string) {
 		getLaunchVariant: () => undefined,
 		serverId,
 		root,
-		notify: { open: vi.fn(async () => {}) },
+		notify: {
+			announceCreated: () => undefined,
+			open: vi.fn(async () => {}),
+		},
 		waitForDiagnostics: vi.fn(async (_filePath: string, ms: number) => {
 			await new Promise<void>((resolve) => {
 				const t = setTimeout(resolve, ms);

@@ -118,7 +118,16 @@ function workspaceHash(
 }
 
 /** PID-scoped endpoint used by pi sessions. The legacy MCP analyze endpoint
- * remains workspace-scoped for compatibility with the PostToolUse hook. */
+ * remains workspace-scoped for compatibility with the PostToolUse hook.
+ *
+ * POSIX shape `pi-lens-mcp-<pid>-diagnostics-<hash>.sock`: the pid comes BEFORE
+ * the hash so it survives the `sun_path` cut (see {@link boundUnixSocketPath}),
+ * which removes the tail of a long path. With the pid last, a TMPDIR of 66
+ * bytes or more cut it out and every pi session in a workspace bound one name
+ * (#4376 review r1, F1). A pid is unique on a host, so the name stays unique
+ * while the pid is inside the bound name; the hash is the part that goes first.
+ * Consumers: the warm-attach server (`clients/warm-attach.ts`), both pid-scoped
+ * clients below, and the harness teardown; they all derive the name here. */
 export function diagnosticsIpcPathForCwd(
 	cwd: string,
 	pid: number,
@@ -126,7 +135,78 @@ export function diagnosticsIpcPathForCwd(
 ): string {
 	const base = ipcPathForCwd(cwd, platform);
 	if (platform === "win32") return `${base}-diagnostics-${pid}`;
-	return base.replace(/\.sock$/, `-diagnostics-${pid}.sock`);
+	const hash = workspaceHash(cwd, platform);
+	return path.join(
+		path.dirname(base),
+		`pi-lens-mcp-${pid}-diagnostics-${hash}.sock`,
+	);
+}
+
+/**
+ * The file name Node actually binds for a Unix socket path (#4353). A path past
+ * the `sun_path` size is cut to its first 108 bytes (104 on darwin) without an
+ * error, so under a long TMPDIR (a 79-character root already reaches it for
+ * the 33-character socket name) the bound file has lost its `.sock` tail.
+ * Every stale-socket `unlink` of an endpoint must name THIS path: unlinking the
+ * untruncated one misses the file, the next `listen` then fails `EADDRINUSE`,
+ * and the warm channel stays down until the file is removed by hand. Connects
+ * need no change, because `net.createConnection` truncates the same way.
+ * Windows pipes and paths that fit come back unchanged.
+ *
+ * Decision: unlink the bound name rather than move long paths to a short
+ * directory. A relocation would change where the server and the hook meet and
+ * who may create the entry; the unlink changes neither.
+ */
+export function boundUnixSocketPath(
+	endpoint: string,
+	platform: NodeJS.Platform = process.platform,
+): string {
+	const limit = platform === "darwin" ? 104 : platform === "win32" ? 0 : 108;
+	const bytes = Buffer.from(endpoint);
+	if (limit === 0 || bytes.length <= limit) return endpoint;
+	return bytes.subarray(0, limit).toString();
+}
+
+export type StaleSocketOutcome =
+	| "absent"
+	| "unlinked"
+	| "not-a-socket"
+	| "shared-name";
+
+/**
+ * The one stale-socket unlink for every endpoint a listener is about to bind
+ * (#4376 review r1, F1 and F2). It names the BOUND file, and it removes:
+ *
+ * - only a socket (`lstat`): the cut can land on an unrelated file such as
+ *   `$TMPDIR/pi-lens`, and unlinking that destroyed user data;
+ * - for a pid-scoped endpoint (`ownerPid`), only a name that still carries the
+ *   owner's pid. A truncated name without it is shared by every session, so a
+ *   socket there may belong to a LIVE session; clearing it would replace that
+ *   listener and orphan it. The listen then fails EADDRINUSE and the caller
+ *   falls back cold, as it did before the unlink named the bound file.
+ *
+ * Windows named pipes have no file to remove. A failed `lstat` or unlink is
+ * `absent`: the `listen` that follows reports any real conflict.
+ */
+export function unlinkStaleUnixSocket(
+	endpoint: string,
+	options: { ownerPid?: number; platform?: NodeJS.Platform } = {},
+): StaleSocketOutcome {
+	if ((options.platform ?? process.platform) === "win32") return "absent";
+	const bound = boundUnixSocketPath(endpoint, options.platform);
+	if (
+		options.ownerPid !== undefined &&
+		bound !== endpoint &&
+		!bound.includes(`${path.sep}pi-lens-mcp-${options.ownerPid}-`)
+	)
+		return "shared-name";
+	try {
+		if (!fs.lstatSync(bound).isSocket()) return "not-a-socket";
+		fs.unlinkSync(bound);
+		return "unlinked";
+	} catch {
+		return "absent";
+	}
 }
 
 export interface WarmDiagnosticsRequest {
@@ -508,9 +588,13 @@ export async function requestWarmTurnEnd(
 export interface TurnEndStatus {
 	ran: number;
 	skipped: number;
+	failed: number;
 	lastSkipReason?: string;
 	lastRunAt?: string;
 	lastSkipAt?: string;
+	lastFailureOperation?: "analyze" | "turn-end";
+	lastFailureReason?: string;
+	lastFailureAt?: string;
 }
 
 /** Per-workspace status file, keyed by the same hash as the IPC endpoint. */
@@ -535,9 +619,13 @@ export function readTurnEndStatus(
 		return {
 			ran: typeof parsed.ran === "number" ? parsed.ran : 0,
 			skipped: typeof parsed.skipped === "number" ? parsed.skipped : 0,
+			failed: typeof parsed.failed === "number" ? parsed.failed : 0,
 			lastSkipReason: parsed.lastSkipReason,
 			lastRunAt: parsed.lastRunAt,
 			lastSkipAt: parsed.lastSkipAt,
+			lastFailureOperation: parsed.lastFailureOperation,
+			lastFailureReason: parsed.lastFailureReason,
+			lastFailureAt: parsed.lastFailureAt,
 		};
 	} catch {
 		// never written, unreadable, or corrupt — "no turn-end activity recorded"
@@ -546,7 +634,7 @@ export function readTurnEndStatus(
 }
 
 /**
- * Append one turn-end outcome from the hook process. Never throws.
+ * Append a turn-end outcome or an unrunnable CLI/hook invocation. Never throws.
  *
  * Read-modify-write against a shared per-workspace tmpdir file: two Stop
  * hooks for the same workspace can race this concurrently (separate
@@ -561,20 +649,38 @@ export function readTurnEndStatus(
  */
 export function recordTurnEndOutcome(
 	cwd: string,
-	outcome: { ran: true } | { ran: false; reason: string },
+	outcome:
+		| { ran: true }
+		| { ran: false; reason: string }
+		| { failed: true; operation: "analyze" | "turn-end"; reason: string },
 	platform: NodeJS.Platform = process.platform,
 ): void {
 	try {
 		const now = new Date().toISOString();
-		const previous = readTurnEndStatus(cwd, platform) ?? { ran: 0, skipped: 0 };
-		const next: TurnEndStatus = outcome.ran
-			? { ...previous, ran: previous.ran + 1, lastRunAt: now }
-			: {
-					...previous,
-					skipped: previous.skipped + 1,
-					lastSkipReason: outcome.reason,
-					lastSkipAt: now,
-				};
+		const previous = readTurnEndStatus(cwd, platform) ?? {
+			ran: 0,
+			skipped: 0,
+			failed: 0,
+		};
+		let next: TurnEndStatus;
+		if ("failed" in outcome) {
+			next = {
+				...previous,
+				failed: previous.failed + 1,
+				lastFailureOperation: outcome.operation,
+				lastFailureReason: outcome.reason,
+				lastFailureAt: now,
+			};
+		} else {
+			next = outcome.ran
+				? { ...previous, ran: previous.ran + 1, lastRunAt: now }
+				: {
+						...previous,
+						skipped: previous.skipped + 1,
+						lastSkipReason: outcome.reason,
+						lastSkipAt: now,
+					};
+		}
 		// Writes THIS workspace's file and nothing else. #3255 round 2 also deleted
 		// the file at the retired always-fold name; round 3 removed that, because
 		// on a case-sensitive host that name is not an orphan — it is the live

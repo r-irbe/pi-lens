@@ -12,6 +12,7 @@ import { toPosix } from "../../clients/path-utils.js";
 import vitestConfig, { wallClockBudgetInclude } from "../../vitest.config.ts";
 import {
 	assertNonEmptyScan,
+	auditRegistry,
 	listSourceFiles,
 	readWalkedFiles,
 } from "../support/sweep-kit.js";
@@ -37,8 +38,6 @@ const timingMeasurementOnly = ["tests/support/perf-harness.test.ts"];
 const timingSensitiveNonSamplerMembers: Readonly<Record<string, string>> = {
 	"tests/clients/instance-registry-lock.test.ts":
 		"real child-process lock contention with a scheduling budget; unsuitable for the default fork storm (#2173)",
-	"tests/clients/instance-registry-race.test.ts":
-		"real node child-process barrier race; process scheduling makes this unsuitable for the default fork storm (#2173)",
 	"tests/clients/review-graph-retention.test.ts":
 		"forced-GC heap-retention guard whose MiB deltas need a quiet host (#2073)",
 	"tests/clients/review-graph-superseded-persist.test.ts":
@@ -152,35 +151,22 @@ describe("timing-sensitive Vitest project coverage", () => {
 	// non-timing file to it — is green either way and the lane roster rots.
 	it("included entries are sampler/cpuUsage tests or documented non-sampler members", () => {
 		const included = timingSensitiveInclude();
-		const nonSampler = included.filter((file) => {
-			const source = fs.readFileSync(path.join(repoRoot, file), "utf8");
-			return (
-				!isTimingSensitive(source) &&
-				!(file in timingSensitiveNonSamplerMembers)
-			);
+		const nonSampler = included.filter(
+			(file) =>
+				!isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")),
+		);
+		const audit = auditRegistry({
+			sweepName: "timing-sensitive lane roster",
+			flagged: nonSampler,
+			registered: [],
+			exemptions: timingSensitiveNonSamplerMembers,
+			minReasonLength: 15,
+			remediation:
+				"Add the timing-sensitive file to the documented non-sampler members with a reason, or remove it from the lane.",
 		});
-		expect(
-			nonSampler,
-			"non-sampler files must carry a reason in timingSensitiveNonSamplerMembers",
-		).toEqual([]);
-
-		const staleReasons = Object.keys(timingSensitiveNonSamplerMembers).filter(
-			(file) => !included.includes(file),
-		);
-		expect(
-			staleReasons,
-			"non-sampler reasons must still name lane members",
-		).toEqual([]);
-
-		const samplerNowCovered = Object.keys(
-			timingSensitiveNonSamplerMembers,
-		).filter((file) =>
-			isTimingSensitive(fs.readFileSync(path.join(repoRoot, file), "utf8")),
-		);
-		expect(
-			samplerNowCovered,
-			"non-sampler reasons must not cover sampler/cpuUsage tests",
-		).toEqual([]);
+		expect(audit.unaccounted).toEqual([]);
+		expect(audit.staleExemptions).toEqual([]);
+		expect(audit.reasonlessExemptions).toEqual([]);
 	});
 
 	// #1920: the "wall-clock-budget" project's entries are likewise excluded

@@ -49,6 +49,7 @@ function makeTsServer(root: string) {
 		id: "typescript",
 		name: "typescript",
 		extensions: [".ts"],
+		idleEviction: "resident",
 		root: async () => root,
 		spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 	};
@@ -71,7 +72,10 @@ function makeFakeClient(root: string, serverId = "typescript") {
 			getRawCapabilityKeys: () => [],
 			serverId,
 			root,
-			notify: { open: vi.fn(async () => {}) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn(async () => {}),
+			},
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				waitCalls.push({ filePath, ms });
 				return undefined;
@@ -293,6 +297,7 @@ function makeServer(id: string, ext: string, root: string) {
 		id,
 		name: id,
 		extensions: [ext],
+		idleEviction: "resident",
 		root: async () => root,
 		spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 	};
@@ -325,7 +330,10 @@ function makeControlledClient(
 			getOperationSupport: () => ({}),
 			serverId,
 			root,
-			notify: { open: vi.fn(async () => {}) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn(async () => {}),
+			},
 			waitForDiagnostics: vi.fn(async (filePath: string, ms: number) => {
 				const outcome = plan[Math.min(call, plan.length - 1)] ?? "warm";
 				call += 1;
@@ -768,6 +776,7 @@ describe("LSP warm-up telemetry pairing (#1374)", () => {
 			name: "deno",
 			fallbackFor: "typescript",
 			extensions: [".ts"],
+			idleEviction: "resident",
 			root: async () => undefined,
 			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 		};
@@ -794,5 +803,133 @@ describe("LSP warm-up telemetry pairing (#1374)", () => {
 			expect(metadata.serverIds).toEqual(["typescript"]);
 			expect(metadata.unrootedCandidates).toEqual({ count: 1, ids: ["deno"] });
 		}
+	});
+});
+
+/**
+ * #3939 F1 (PR #3966): a `fallbackFor` pair is ONE family for the warm-up's
+ * required set. The real-registry, real-sweep proof for docker/expert/
+ * python-jedi is `sweep-warmup-fallback-family.test.ts`; these cases pin the
+ * shapes the registry cannot supply: a chain of alternates (the registry has
+ * none today, but `getClientsForFile` documents chained fallbacks), and the
+ * negative-cache exit, which must name only members the family did not satisfy.
+ * Recurrence guarded: a never-spawned alternate (or a cold preferred shadowed
+ * by its working alternate) reported as a warm-up failure.
+ */
+describe("LSPService.ensureWarmForSweep fallbackFor family (#3939)", () => {
+	let tmp: string;
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-warmup-3939-"));
+		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
+		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
+		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
+		removeTempDirSync(tmp);
+	});
+
+	const family = (id: string, fallbackFor?: string, spawns = true) => ({
+		...makeServer(id, ".md", tmp),
+		...(fallbackFor !== undefined && { fallbackFor }),
+		spawn: vi.fn(async () =>
+			spawns ? { process: {}, source: "test" } : undefined,
+		),
+	});
+
+	it("a chained alternate that serves the file satisfies every member of its chain", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		// a <- b <- c: a and b decline (binary absent); c spawns and answers.
+		const a = family("chain-a", undefined, false);
+		const b = family("chain-b", "chain-a", false);
+		const c = family("chain-c", "chain-b");
+		getServersForFileWithConfig.mockReturnValue([a, b, c]);
+		const { client } = makeControlledClient("chain-c", tmp, ["warm"]);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const result = await service.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(result.performedWarmup).toBe(true);
+		expect(result.failedServerIds).toEqual([]);
+	});
+
+	it("a preferred that serves leaves its never-spawned alternate out of the required set", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const preferred = family("pref");
+		const alternate = family("alt", "pref");
+		getServersForFileWithConfig.mockReturnValue([preferred, alternate]);
+		const { client } = makeControlledClient("pref", tmp, ["warm"]);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const first = await service.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(first.failedServerIds).toEqual([]);
+		expect(alternate.spawn).not.toHaveBeenCalled();
+		// Warm now: the next sweep is the documented no-op, not a second round trip.
+		const second = await service.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(second.performedWarmup).toBe(false);
+	});
+
+	it("the negative cache names only the members the family did not satisfy", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const silent = (id: string) =>
+			makeControlledClient(id, tmp, ["timeout"]).client;
+		const warm = (id: string) => makeControlledClient(id, tmp, ["warm"]).client;
+		const clients = new Map<string, unknown>([
+			["alt", silent("alt")],
+			["other", silent("other")],
+			["pref", warm("pref")],
+		]);
+		createLSPClient.mockImplementation(async (opts: { serverId: string }) =>
+			clients.get(opts.serverId),
+		);
+		const pref = family("pref");
+		// `alt` is an alternate of `pref` that, alone (preferred not attached),
+		// failed an earlier warm-up and is cached cold.
+		const alt = family("alt", "pref");
+		const other = family("other");
+		getServersForFileWithConfig.mockReturnValue([alt]);
+		expect(
+			(await service.ensureWarmForSweep(filePath, { timeoutMs: 500 }))
+				.failedServerIds,
+		).toEqual(["alt"]);
+		getServersForFileWithConfig.mockReturnValue([other]);
+		expect(
+			(await service.ensureWarmForSweep(filePath, { timeoutMs: 500 }))
+				.failedServerIds,
+		).toEqual(["other"]);
+		getServersForFileWithConfig.mockReturnValue([pref]);
+		expect(
+			(await service.ensureWarmForSweep(filePath, { timeoutMs: 500 }))
+				.failedServerIds,
+		).toEqual([]);
+
+		// `pref` is ready, so `alt` (cached cold) is satisfied through its family;
+		// only the unrelated cold `other` is reported, from the cache.
+		getServersForFileWithConfig.mockReturnValue([pref, alt, other]);
+		const cached = await service.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(cached).toEqual({
+			performedWarmup: false,
+			failedServerIds: ["other"],
+			skippedFromCache: true,
+		});
 	});
 });

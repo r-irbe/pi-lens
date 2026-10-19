@@ -31,8 +31,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest";
 import { SCRATCH_DIR_ROOT } from "../../scripts/lib/scratch-dir.mjs";
+import { requireBuiltDist } from "../support/require-built-dist.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -73,6 +82,15 @@ describe("bootstrapFixtureWorkspace (#2670/#2658)", () => {
 	let fakeRepoRoot: string;
 
 	const fx = { lang: "test-lang", dir: "fx-dir", file: "a.txt" };
+
+	// #4003: loads the shipped dist/ modules the helper's session guard reads.
+	beforeAll(() => {
+		requireBuiltDist(
+			repoRoot,
+			"clients/lsp/config.js",
+			"clients/lsp/session-roots.js",
+		);
+	});
 
 	beforeEach(async () => {
 		({ bootstrapFixtureWorkspace } = await import(

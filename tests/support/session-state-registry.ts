@@ -123,9 +123,17 @@ import {
 	resetTreeSitterClientLoadState,
 } from "../../clients/tree-sitter-shared.js";
 import {
+	noteWorkspaceFileCreated,
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceDiagnosticsCacheSessionStart,
+	workspaceFileCreatedAtFor,
 } from "../../clients/lsp/workspace-diagnostics-session.js";
+import {
+	noteAtomicReplace,
+	notePathAppeared,
+	pathBirthtimeMs,
+	resetPathBirthForTests,
+} from "../../clients/path-birth.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 import { clearFormatterCache } from "../../clients/formatters.js";
 import * as formattersModule from "../../clients/formatters.js";
@@ -234,6 +242,39 @@ function scratchCwd(): string {
 	scratchDirs.push(dir);
 	return dir;
 }
+
+/**
+ * #3609 §3.8 item 1 (#3612): the state declared as a session store
+ * (`defineSessionStore` in `clients/session-scope.ts`), by store name. A
+ * store's transition behaviour is its declared policy, not a reset, so it has
+ * no `SESSION_STATE_REGISTRY` row. `tests/config/session-scope-sweep.test.ts`
+ * diffs this table both ways against the declared stores.
+ */
+export const SESSION_STORE_REGISTRY: Readonly<
+	Record<string, { module: string; state: string }>
+> = {
+	"agent-advisories": {
+		module: "agent-nudge.ts",
+		state: "the scope's queued, undelivered agent advisories (_advisories)",
+	},
+	"lazy-tool-memory": {
+		module: "tool-set-policy.ts",
+		state: "a per-scope Set of the lazy tools the conversation activated",
+	},
+	"read-guard": {
+		module: "read-guard-branch.ts",
+		state:
+			"the reads of the ReadGuard bound to the scope (RuntimeCoordinator._readGuard)",
+	},
+	"read-guard-authorship": {
+		module: "read-guard-branch.ts",
+		state: "the ReadGuard's writtenThisSession",
+	},
+	widget: {
+		module: "widget-state.ts",
+		state: "the widget's files and sessionLanguages",
+	},
+};
 
 export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
@@ -809,6 +850,24 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		},
 	},
 	{
+		id: "lsp-workspace-diagnostics-cache:fileCreatedAt",
+		module: "lsp/workspace-diagnostics-session.ts",
+		state: "_fileCreations; _evictedCreatedAt",
+		policy: "session_start",
+		resetName: "resetWorkspaceDiagnosticsCacheSession",
+		reason:
+			"#4320: each client's latest Created send drops older cached findings of that server under that root, and `_evictedCreatedAt` holds what the bound evicted; kept across sessions they would drop every later session's findings entries.",
+		probe: {
+			arm: () => noteWorkspaceFileCreated("probe-server", "/", 1),
+			isArmed: () =>
+				workspaceFileCreatedAtFor(
+					() => true,
+					() => true,
+				) === 0,
+			reset: () => resetWorkspaceDiagnosticsCacheSession(),
+		},
+	},
+	{
 		id: "lsp-workspace-diagnostics-cache:sessionClock",
 		module: "lsp/workspace-diagnostics-session.ts",
 		state: "_sessionStartedAt",
@@ -930,11 +989,11 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 	{
 		id: "opaque-mutation-scan:baselineStore+gitMemo",
 		module: "opaque-mutation-scan.ts",
-		state: "OpaqueBaselineStore byCwd map, gitRepoMemo, gitToplevelMemo",
+		state: "OpaqueBaselineStore pending map, gitRepoMemo, gitToplevelMemo",
 		policy: "session_start",
 		resetName: "resetOpaqueMutationState",
 		reason:
-			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever.",
+			"#2000 phase 2: pending pre-command baselines are keyed cwd:generation (plus the tool-call id, #4137) and become unreachable when the session generation advances; and the git-worktree and toplevel memos must re-probe after a session that may have seen a directory become a worktree, or become a LINKED worktree of another (#2007). Without the reset the baselines leak per session and the memos mis-answer forever.",
 	},
 
 	// ── The rest of the session_start reset chain ────────────────────────────
@@ -957,6 +1016,50 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		sessionStartClosureReset: true,
 		reason:
 			"#2319: the verified path-attribution guess tally is a per-session counter that emits one path_attribution_verified_rollup row at session end; PR #2312's class sweep flagged the module-scope `let` as the same latent shape as the bind rollup, so it now rides getProcessSingleton (shape 25). Its reset runs in index.ts's session_start closure after the #473 decision and only on the primary path, so a secondary cannot erase the primary's tally; the count is memory-only best-effort observability, so a lost tally is noise, not data.",
+	},
+	{
+		id: "path-birth:appearedPaths",
+		module: "path-birth.ts",
+		state: "appearedPaths",
+		policy: "process_lifetime",
+		resetName: "resetPathBirthForTests",
+		reason:
+			"#4368 r1 row 13: `appearedPaths` records that the import resolver saw a path absent and then present, so a module moved into place (old inode) answers with that later observation. A fact about files on disk, not about a session: a client started after the observation reads the path as older than itself and sends nothing, so keeping it across sessions changes no answer, and a session_start clear would only lose the record for a client that is still live. Bounded (1024).",
+		probe: {
+			arm: () => notePathAppeared("/session-state-probe/moved.py", 20_000),
+			// Unarmed, the path answers its inode's own birth.
+			isArmed: () =>
+				pathBirthtimeMs(
+					{ dev: 1, ino: 7, birthtimeMs: 5_000, ctimeMs: 5_001 },
+					"/session-state-probe/moved.py",
+				) !== 20_000,
+			reset: () => resetPathBirthForTests(),
+		},
+	},
+	{
+		id: "path-birth:replacedPathBirths",
+		module: "path-birth.ts",
+		state: "replacedPathBirths; birthIsCtimeAlias",
+		policy: "process_lifetime",
+		resetName: "resetPathBirthForTests",
+		reason:
+			"#4320 r2: `replacedPathBirths` records that an inode pi-lens installed by an atomic partial edit stands for a path born earlier. That is a fact about files on disk, not about a session: a session_start clear would make the next first open of every file this process edited read as a creation and send the server a Created. Bounded (1024), keyed by the installed inode's own birth so a reused inode number never inherits it. `birthIsCtimeAlias` memoises whether libuv fell back from statx, a property of the process that cannot change.",
+		probe: {
+			arm: () =>
+				noteAtomicReplace(
+					{ dev: 1, ino: 7, birthtimeMs: 1_000, ctimeMs: 1_001 },
+					{ dev: 1, ino: 8, birthtimeMs: 9_000, ctimeMs: 9_001 },
+				),
+			// Unarmed, the installed inode answers anything but the carried birth.
+			isArmed: () =>
+				pathBirthtimeMs({
+					dev: 1,
+					ino: 8,
+					birthtimeMs: 9_000,
+					ctimeMs: 9_001,
+				}) !== 1_000,
+			reset: () => resetPathBirthForTests(),
+		},
 	},
 	{
 		id: "pending-runner-findings:pending",
@@ -1154,15 +1257,6 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#2366: staged test results belong to their owning session and must not cross a primary session replacement; the durable findings cache remains available to pull diagnostics.",
 	},
 	{
-		id: "tool-set-policy:rememberedLazyToolsBySessionFile",
-		module: "tool-set-policy.ts",
-		state: "rememberedLazyToolsBySessionFile",
-		policy: "process_lifetime",
-		resetName: "resetRememberedLazyToolsForTests",
-		reason:
-			"Activation posture must survive factory rebuilds and return-to-session transitions; the bounded FIFO cap limits process-lifetime retention without clearing live conversation memory.",
-	},
-	{
 		id: "tree-sitter-shared:webTreeSitterLoadFailed",
 		module: "tree-sitter-shared.ts",
 		state:
@@ -1338,10 +1432,26 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// config-ignored row while the config was still being ignored.
 	"config-warn.ts":
 		"ignored-config warn-once NOTIFICATION latch, tied to the config file it warned about; the per-session ledger row is bounded by the degradation ledger, not by this Set",
+	// #4212 round 4: turn-scoped working state, so a session_start reset would
+	// be redundant rather than missing. This is the per-dispatch-cycle
+	// rule-corpus fingerprint memo shared by the tree-sitter loader and the
+	// ast-grep source fingerprint. Every key begins with `getTurnId()`, and
+	// `resetTurnContext` moves that identity at session_start, so any entry a
+	// previous session could have written is already unreachable and is
+	// FIFO-evicted; the turn boundary is a strictly shorter lifetime than the
+	// session, and the map is bounded at 16 entries on top of that.
+	"custom-rule-locations.ts":
+		"the per-dispatch-cycle rule-corpus fingerprint memo, keyed on the turn identity and FIFO-bounded, so the turn boundary invalidates it rather than a session reset",
 	"diagnostic-line-freshness.ts":
 		"the #1641 past-EOF line-count memo, keyed on mtime AND size and re-stat'd on every read — a mismatch always recomputes, so it is invalidated by its own freshness check per file, not by the session boundary, same as git-tracked-ignore.ts",
 	"diagnostics-publish.ts":
 		"diagnostics publisher registration and dirty-path dedupe",
+	// #3968: registration identity, not session state — the Set is fed once
+	// per runner definition that enters a RunnerRegistry (the dispatcher's own
+	// population, re-derived at every process start; see the
+	// bounded-container-guard admission for the finite-vocabulary reason).
+	"dispatch/known-runner-ids.ts":
+		"runner-id identity registration state, fed by RunnerRegistry.register, re-derived every process start; not session-scoped",
 	"dispatch/runners/spotbugs.ts": "SpotBugs installation lookup, host-derived",
 	"disposition-publish.ts": "disposition publisher registration",
 
@@ -1374,10 +1484,12 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	// the session. Re-deriving per session would just re-pay a spawn. ---
 	"lsp/jvm-runtime.ts":
 		"resolved JVM location; a session boundary cannot move it",
+	"lsp/service-singleton.ts":
+		"the owner stores the process-wide singleton identity and pending teardown handoff; session-scoped resets are delegated to the registered implementation hooks, while the owner itself has no independent session verdict to re-arm",
 	"lsp/spawn-history.ts":
 		"successful spawn duration history intentionally spans session boundaries within the host process so later sessions can avoid waits that prior evidence proves cannot succeed",
 	"lsp/workspace-diagnostics-cache.ts":
-		"#1669 review F1/F2/N3: a sweep-cwd discovery registry (idempotent — re-registers on every createWorkspaceDiagnosticsCacheContext call) plus a per-cwd cache epoch. Neither needs a session_start reset, but a session boundary is NOT harmless for the registry: a refresh for a cwd this process has not yet swept clears nothing on disk (the review's N3 finding) until that cwd is finally reached, at which point clearWorkspaceDiagnosticsCache's state.root fallback and the epoch's on-disk generation field (durable across the boundary, unlike the in-memory map alone) recover it. A session_start wipe would only widen that window, not close it, so exemption is still correct — the fix is durability at the write site, not a reset seam here.",
+		"#1669 review F1/F2/N3: a sweep-cwd discovery registry (idempotent — re-registers on every createWorkspaceDiagnosticsCacheContext call) plus a per-cwd cache epoch. Neither needs a session_start reset, but a session boundary is NOT harmless for the registry: a refresh for a cwd this process has not yet swept clears nothing on disk (the review's N3 finding) until that cwd is finally reached, at which point clearWorkspaceDiagnosticsCache's state.root fallback and the epoch's on-disk generation field (durable across the boundary, unlike the in-memory map alone) recover it. A session_start wipe would only widen that window, not close it, so exemption is still correct — the fix is durability at the write site, not a reset seam here. #4322 adds `RELEASED_OLDER_CACHE_VERSIONS`, an import-time constant set of released cache versions that nothing writes after load (SWEEP_HEURISTIC_LIMITS item 5); a session boundary cannot change it.",
 	"mcp/analyze.ts":
 		"warm word-index cache keyed by path with its own freshness check. #2455 fix round 2: the widened detector (any class declared in clients/, not just clear()/delete()-owning ones) also now flags `warmGraphFacts`, a module-scope FactStore. #2455 fix round 3, F3: an earlier draft of this exemption claimed the MCP server has no pi session_start boundary to hook into. That is false — `clients/mcp/session.ts`'s runSessionStart calls handleSessionStart, and `mcp/server.ts` runs it both at boot (:252) and from the `pilens_session_start` tool (:1631) — so the exemption rests only on its real merits. `warmGraphFacts` is deliberately reused across calls by design (#536: buildOrUpdateGraph's incremental/cached tiers key off a stable instance, so a fresh store per call would defeat that reuse), and its entity-snapshot diff self-heals on eviction (wasBoundedSessionFactEvicted). It is NOT risk-free: the entity-snapshot key has no cwd component, so a warm process serving two projects that share a relative path could cross-contaminate a diff — filed as #2477, out of scope for the detector fix itself.",
 	"mcp/session.ts":
@@ -1390,7 +1502,7 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"process-singletons.ts":
 		"the globalThis-keyed container for process-scope state (#2146). It owns storage, never lifecycle: every family keeps whatever boundary it already had, and each one is a PROCESS boundary rather than a session boundary. session-lifecycle.ts releases its registration at the primary's own session_shutdown (releasePrimarySession), not at session_start. startup-timing.ts's host-ready anchor is registered here as policy process_lifetime with a ForTests-only reset, because resetting it at a session boundary would fabricate host stalls from the original process boot. The instance-registry mutation tail must outlive every session by construction. A reset in this module would therefore wipe state no session boundary owns. Its only module-scope binding is the Symbol.for container key, a constant.",
 	"project-changes.ts":
-		"change-log sequence fold counter, an observability tally",
+		"change-log sequence fold counter, an observability tally; and (#3511) the per-log read cursor, a bounded (16) content-keyed memo of the append-only change log's byte offset and max seq. Every full read of the log re-seeds it, so a session_start reset would only force the next logged edit to re-read the whole log",
 	"project-lens-config.ts":
 		"project .pi-lens config cache with its own mtime-based invalidation",
 	"project-report.ts": "project-report build guard, per build",
@@ -1480,6 +1592,12 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// never written after module evaluation, so resetting it would be
 	// meaningless; the file's one real latch is still the warn-once Set above.
 	"config-warn.ts": 2,
+	// #4212 round 4: one bounded container — the per-dispatch-cycle rule-corpus
+	// fingerprint map (cap 16, FIFO eviction). The single-slot read-through in
+	// front of it and `_resetRuleCorpusCycleFingerprintsForTests` are the same
+	// state, not extra containers. See this file's EXEMPT_SESSION_STATE_FILES
+	// entry for why the turn boundary, not session_start, invalidates it.
+	"custom-rule-locations.ts": 1,
 	// #2505: 3 -> 4. The fourth symbol is `INFORMATIONAL_DEGRADATION_KINDS`,
 	// an import-time `ReadonlySet` of kind names the health renderer prints
 	// without the warning marker — a lookup table, not session state
@@ -1515,6 +1633,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// counted (10 -> 11). Import-time frozen vocabulary, same class as this
 	// file's other constant lookups above — SWEEP_HEURISTIC_LIMITS item 5.
 	"dispatch/integration.ts": 11,
+	// #3968: the runner-id identity leaf beside the dispatcher — one Set fed
+	// by `RunnerRegistry.register` and re-derived at every process start
+	// (registration state, not session state); see the file-level exemption
+	// above and the bounded-container admission row.
+	"dispatch/known-runner-ids.ts": 1,
 	// #2215 added the language matrix's two derived lookups
 	// (`BINDING_BY_EXTENSION`, `LSP_ONLY_RULE_LANGUAGES`) (5 → 7). Both are
 	// import-time frozen lookups with no session lifetime —
@@ -1599,16 +1722,25 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// cannot be evicted while its root is still served. `configInFlight` alone
 	// remains here.
 	"lsp/config.ts": 1,
-	"lsp/index.ts": 2,
+	// #2372 slice 3: 2 -> 1. The never-mutated `OPTIONAL_LSP_SERVER_IDS` set
+	// moved to lsp/client-registry.ts with the spawn path that reads it; that
+	// module exports no reset, so the scan does not flag it.
+	"lsp/index.ts": 1,
 	"lsp/jvm-runtime.ts": 0,
 	// #2324 R2-A added `napiFallbackCoverage`, the napi-run hand-off map
 	// (1 → 2). Registered above and cleared by the same
 	// `resetPendingAuxiliaryCoverage`.
 	"lsp/pending-aux-coverage.ts": 2,
-	"lsp/server.ts": 6,
+	"lsp/server.ts": 7,
+	"lsp/service-singleton.ts": 0,
 	"lsp/session-roots.ts": 1,
 	"lsp/spawn-history.ts": 1,
-	"lsp/workspace-diagnostics-cache.ts": 1,
+	// #4322: `RELEASED_OLDER_CACHE_VERSIONS`, an import-time constant set the
+	// scan cannot tell from state (1 -> 2). Exempted above, never written.
+	"lsp/workspace-diagnostics-cache.ts": 2,
+	// #4320 r2: `_fileCreations`, the bounded per-(server, root) Created
+	// markers, registered above with `_evictedCreatedAt`.
+	"lsp/workspace-diagnostics-session.ts": 1,
 	"lsp/workspace-sweep-hold.ts": 0,
 	// #2455 fix round 2: `warmGraphFacts` (`new FactStore("mcp-analyze")`) is now
 	// counted (1 → 2) under the widened "declared in clients/" predicate. See
@@ -1642,6 +1774,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// module-scope scan sees no container here; the getProcessSingleton SIGNAL
 	// is what flags this file now.
 	"path-attribution-telemetry.ts": 0,
+	// #4320 r2: `replacedPathBirths`, registered above (process_lifetime).
+	// #4368 r1 row 13: `appearedPaths` (1 -> 2), registered above.
+	"path-birth.ts": 2,
 	// #2506: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here — the same shape as
 	// process-singletons.ts just below.
@@ -1649,7 +1784,8 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// #2146: the container key is a Symbol.for constant, so the scan sees no
 	// mutable module-scope container here.
 	"process-singletons.ts": 0,
-	"project-changes.ts": 0,
+	// #3511: 0 -> 1 for changeLogCursors, the change-log read cursor.
+	"project-changes.ts": 1,
 	// #2418: 3 -> 2, the warn-once set moved to config-warn.ts.
 	"project-lens-config.ts": 2,
 	"project-report.ts": 1,
@@ -1661,7 +1797,11 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"quiet-window-config.ts": 0,
 	"quiet-window.ts": 0,
 	"recent-touches.ts": 1,
-	"review-graph/builder.ts": 19,
+	// #3605: 19 -> 20 for _wasmTrappedFiles, process-lifetime like the
+	// tree-sitter client's trap map it follows: a session boundary resets
+	// neither the wasm heap nor the client's charges, and each extraction
+	// rewrites its file's entry, so a session_start clear would re-arm nothing.
+	"review-graph/builder.ts": 20,
 	// #3417: the module-level git-dir memo is gone; the count is pinned at 0 so a
 	// re-hoisted memo (the stale-negative shape) fails this sweep, not just the
 	// lifecycle test.
@@ -1729,7 +1869,6 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	// `let`) plus its `_resetBundledQueriesRootHealthForTests` export (the
 	// scan's reset-signal detector) — see this file's EXEMPT_SESSION_STATE_FILES
 	// entry above for why it is exempt rather than registered.
-	"tool-set-policy.ts": 1,
 	"tree-sitter-query-loader.ts": 2,
 	"tree-sitter-shared.ts": 0,
 	"turn-context.ts": 0,
@@ -1744,7 +1883,9 @@ export const SESSION_STATE_SYMBOL_COUNTS: Readonly<Record<string, number>> = {
 	"widget-state.ts": 5,
 	// #2068 added the per-index dirty-file set; it is process-local wire-cache
 	// state and is cleared by serialization, so it needs no session reset.
-	"word-index.ts": 4,
+	// #4129 added the serialized-source WeakMap used to publish persist-owned
+	// wire bytes; it follows the WordIndex object's lifetime and needs no reset.
+	"word-index.ts": 5,
 	"workspace-topology.ts": 2,
 	"zizmor-config.ts": 0,
 };

@@ -105,6 +105,7 @@ async function setup() {
 		getAllDiagnostics: vi.fn(() => new Map()),
 		getDiagnosticBinding: vi.fn(() => undefined),
 		notify: {
+			announceCreated: () => undefined,
 			open: (
 				filePath: string,
 				content: string,
@@ -135,6 +136,7 @@ async function setup() {
 			id: "typescript",
 			name: "typescript",
 			extensions: [".ts"],
+			idleEviction: "resident",
 			root: async () => ROOT,
 			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 		},
@@ -164,7 +166,7 @@ async function setup() {
 				documentDrift: { peek(p: string): { fingerprint: string } | undefined };
 			}
 		).documentDrift.peek(FILE)?.fingerprint;
-	return { state, wire, gates, touch, pendingQueued, recordFp };
+	return { state, wire, gates, touch, pendingQueued, recordFp, service };
 }
 
 describe("#3481 — the notify queue sends the latest read, not the latest enqueued", () => {
@@ -361,5 +363,139 @@ describe("#3481 — the notify queue sends the latest read, not the latest enque
 		await touch(A, 3);
 
 		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`, `didChange:${A}`]);
+	});
+});
+
+// #3543: a touch whose content never reached the wire is not a landed write,
+// so `touchFile` writes neither the debounce entry nor the drift record for
+// it. Recurrence: a dead client resolved `true` (up front, or from a queued
+// run that found it dead), and the next touch of that content was then
+// debounced as already pushed.
+describe("#3543 — a touch on a dead client records nothing", () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("writes no debounce entry or drift record for a touch on a dead client", async () => {
+		const { state, wire, touch, recordFp } = await setup();
+		state.isConnected = false;
+		logLatency.mockClear();
+		await touch(B);
+
+		expect(wire).toEqual([`didOpen:${A}`]);
+		expect(recordFp()).toBe(fingerprintDocumentContent(A));
+		// The row says which server did not take the content.
+		const rows = logLatency.mock.calls
+			.map(
+				([entry]) =>
+					entry as {
+						phase?: string;
+						metadata?: { supersededServerIds?: string[] };
+					},
+			)
+			.filter((entry) => entry.phase === "lsp_touch_file")
+			.map((entry) => entry.metadata?.supersededServerIds);
+		expect(rows).toEqual([["typescript"]]);
+		// Inside the debounce window: B was never pushed, so it goes out now.
+		state.isConnected = true;
+		await touch(B);
+		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`]);
+	});
+
+	it("writes no debounce entry or drift record for a queued touch the client died under", async () => {
+		const { state, wire, gates, touch, pendingQueued, recordFp } =
+			await setup();
+		const gate = gatedPromise<void>();
+		gates.set(B, gate);
+		const inFlight = touch(B);
+		await waitFor(
+			() => wire.length,
+			(n) => n === 2,
+		);
+		const queued = touch(C);
+		await pendingQueued();
+		state.isConnected = false;
+		gate.resolve();
+		await Promise.all([inFlight, queued]);
+
+		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`]);
+		expect(recordFp()).toBe(fingerprintDocumentContent(B));
+		state.isConnected = true;
+		await touch(C);
+		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`, `didChange:${C}`]);
+	});
+
+	// #3564: `openFile` is the second writer of the drift record (#1783), and it
+	// stamped content its `notify.open` never sent. The drift sweep then read the
+	// server as holding it and never re-pushed.
+	it("openFile writes no drift record for content a dead client never received", async () => {
+		const { state, wire, recordFp, service } = await setup();
+		state.isConnected = false;
+		await service.openFile(FILE, B);
+
+		expect(wire).toEqual([`didOpen:${A}`]);
+		expect(recordFp()).toBe(fingerprintDocumentContent(A));
+	});
+});
+
+// #3544: an unstamped touch is never dropped for a stamp that belongs to
+// other content. Recurrence: an older read replaced a pending unstamped touch
+// (or the unstamped touch inherited the older read's stamp), and the runner
+// dropped the entry as stale, so the newest content never reached the server.
+describe("#3544 — an older read never drops a newer unstamped touch", () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("sends a pending unstamped touch when an older read arrives behind it", async () => {
+		const { wire, gates, touch, pendingQueued, recordFp } = await setup();
+		const gate = gatedPromise<void>();
+		gates.set(B, gate);
+		const newestRead = touch(B, 600);
+		await waitFor(
+			() => wire.length,
+			(n) => n === 2,
+		);
+		const unstamped = touch(C);
+		await pendingQueued();
+		const olderRead = touch(P, 2);
+		await pendingQueued(2);
+		gate.resolve();
+		await Promise.all([newestRead, unstamped, olderRead]);
+
+		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`, `didChange:${C}`]);
+		expect(recordFp()).toBe(fingerprintDocumentContent(C));
+	});
+
+	it("sends an unstamped touch that replaces a pending older read", async () => {
+		const { wire, gates, touch, pendingQueued, recordFp } = await setup();
+		const gate = gatedPromise<void>();
+		gates.set(B, gate);
+		const newestRead = touch(B, 600);
+		await waitFor(
+			() => wire.length,
+			(n) => n === 2,
+		);
+		const olderRead = touch(P, 2);
+		await pendingQueued();
+		const unstamped = touch(C);
+		await pendingQueued(2);
+		gate.resolve();
+		await Promise.all([newestRead, olderRead, unstamped]);
+
+		expect(wire).toEqual([`didOpen:${A}`, `didChange:${B}`, `didChange:${C}`]);
+		expect(recordFp()).toBe(fingerprintDocumentContent(C));
 	});
 });

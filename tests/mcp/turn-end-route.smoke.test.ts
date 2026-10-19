@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * Warm turn-end IPC route (#538) — real end-to-end smoke: spawns the actual
  * server subprocess and drives its workspace socket directly with node:net,

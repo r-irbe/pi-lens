@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
 	buildIsolatedExecInvocation,
 	createIsolatedExecPrefix,
+	readLockedToolVersion,
 } from "../../scripts/lib/exec-isolation.mjs";
 
 // #2590, #2593: shared isolation for `npm exec --package <spec>` spawns
@@ -86,6 +87,7 @@ describe("buildIsolatedExecInvocation (#2593)", () => {
 			"--prefix",
 			"/fake/prefix",
 			"--yes",
+			"--allow-scripts=some-pkg@1.2.3",
 			"--package",
 			"some-pkg@1.2.3",
 			"--",
@@ -93,5 +95,137 @@ describe("buildIsolatedExecInvocation (#2593)", () => {
 			"--flag",
 		]);
 		expect(options).toEqual({ cwd: "/fake/cwd", stdio: "inherit" });
+	});
+
+	// Recurrence: master red at b9eda404c (#4028). The outer
+	// `npm install --strict-allow-scripts` runs `prepare` -> bundle:dist, and npm
+	// hands the strict policy to every lifecycle child through its environment.
+	// The nested `npm exec --prefix <empty dir>` reads no package.json, so no
+	// allowScripts policy: `esbuild@0.28.1 (postinstall: node install.js)` was
+	// "not covered" and the whole install failed (ESTRICTALLOWSCRIPTS). The spawn
+	// must approve exactly the one package spec it installs: not a wildcard, not
+	// a bypass, and not a version other than the one --package names.
+	it("approves exactly its own package spec for lifecycle scripts, never a wildcard or a bypass", () => {
+		const { argv } = buildIsolatedExecInvocation({
+			npmCli: "/fake/npm-cli.js",
+			execPrefix: "/fake/prefix",
+			cwd: "/fake/cwd",
+			packageSpec: "esbuild@0.28.1",
+			execArgv: ["esbuild"],
+		});
+		const approvals = argv.filter((a) => a.startsWith("--allow-scripts"));
+		expect(approvals).toEqual(["--allow-scripts=esbuild@0.28.1"]);
+		expect(argv).not.toContain("--dangerously-allow-all-scripts");
+		// The approval precedes `--`: after it npm would hand it to the binary.
+		expect(argv.indexOf(approvals[0] ?? "")).toBeLessThan(argv.indexOf("--"));
+	});
+});
+
+// #4066: reject absent or nonexact tool pins instead of reverting to a stale
+// source constant. Real lockfile fixtures keep the resolver independent of npm.
+describe("readLockedToolVersion (#4066)", () => {
+	function withLock(contents: string | undefined, run: (root: string) => void) {
+		const root = createIsolatedExecPrefix();
+		try {
+			if (contents !== undefined)
+				fs.writeFileSync(path.join(root, "package-lock.json"), contents);
+			run(root);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	}
+
+	it("reads the root package version without an installed dependency tree", () => {
+		withLock(
+			JSON.stringify({
+				packages: {
+					"": { devDependencies: { esbuild: "^0.28.0" } },
+					"node_modules/esbuild": { version: "0.28.2" },
+					"node_modules/nested/node_modules/esbuild": { version: "0.28.1" },
+				},
+			}),
+			(root) => {
+				expect(readLockedToolVersion({ root, packageName: "esbuild" })).toBe(
+					"0.28.2",
+				);
+			},
+		);
+	});
+
+	it("accepts exact prerelease and build metadata versions", () => {
+		withLock(
+			JSON.stringify({
+				packages: {
+					"node_modules/typescript": { version: "7.1.0-beta.1+build.2" },
+				},
+			}),
+			(root) => {
+				expect(readLockedToolVersion({ root, packageName: "typescript" })).toBe(
+					"7.1.0-beta.1+build.2",
+				);
+			},
+		);
+	});
+
+	it.each([undefined, null, 7, "", "^7.0.2", "latest", "7.0"])(
+		"rejects missing or nonexact package version %s",
+		(version) => {
+			withLock(
+				JSON.stringify({
+					packages: { "node_modules/typescript": { version } },
+				}),
+				(root) => {
+					expect(() =>
+						readLockedToolVersion({ root, packageName: "typescript" }),
+					).toThrow("node_modules/typescript needs an exact locked version");
+				},
+			);
+		},
+	);
+
+	it("rejects an array version even when string coercion looks exact", () => {
+		withLock(
+			JSON.stringify({
+				packages: { "node_modules/typescript": { version: ["7.0.2"] } },
+			}),
+			(root) => {
+				expect(() =>
+					readLockedToolVersion({ root, packageName: "typescript" }),
+				).toThrow("node_modules/typescript needs an exact locked version");
+			},
+		);
+	});
+
+	it.each([
+		{},
+		null,
+		{ packages: {} },
+		{
+			packages: {
+				"node_modules/other/node_modules/esbuild": { version: "0.28.1" },
+			},
+		},
+	])("rejects a lockfile without the root tool entry %j", (lock) => {
+		withLock(JSON.stringify(lock), (root) => {
+			expect(() =>
+				readLockedToolVersion({ root, packageName: "esbuild" }),
+			).toThrow("node_modules/esbuild needs an exact locked version");
+		});
+	});
+
+	it("reports a missing source lockfile instead of consulting installed modules", () => {
+		withLock(undefined, (root) => {
+			expect(() =>
+				readLockedToolVersion({ root, packageName: "esbuild" }),
+			).toThrow("package-lock.json");
+		});
+	});
+
+	it("reports malformed source lockfile JSON", () => {
+		withLock("{", (root) => {
+			expect(() =>
+				readLockedToolVersion({ root, packageName: "esbuild" }),
+			).toThrow(SyntaxError);
+		});
 	});
 });

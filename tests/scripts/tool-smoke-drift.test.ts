@@ -47,6 +47,21 @@ describe("parseLayerSummary (#2723)", () => {
 		expect(parseLayerSummary(null)).toBeNull();
 		expect(parseLayerSummary(undefined)).toBeNull();
 	});
+
+	it("preserves an all-skipped lane as visibly skipped and not genuinely clean", () => {
+		const log = "SKIPPED: 0 passed · 0 failed · 0 setup-failed · 1 skipped\n";
+		const layer = buildLayer("lens_diagnostics mode=full row", "failure", log);
+		expect(layer.summary).toEqual({
+			passed: 0,
+			failed: 0,
+			setupFailed: 0,
+			skipped: 1,
+		});
+		expect(layersGenuinelyClean([layer])).toBe(false);
+		expect(buildToolSmokeDriftBody({ layers: [layer] })).toContain(
+			"SKIPPED: 0 passed · 0 failed · 0 setup-failed · 1 skipped",
+		);
+	});
 });
 
 describe("parseFailingRows (#2723)", () => {
@@ -316,7 +331,7 @@ describe("buildToolSmokeDriftComment (#2723)", () => {
 	});
 });
 
-// #2723 review F3: a job failure BEFORE the three tracked layers even start
+// #2723 review F3: a job failure BEFORE the six tracked layers even start
 // (checkout, a best-effort setup action, npm install, build:dist) leaves
 // Tool/LSP handshake/Format layer all "skipped" — the EXACT SAME shape a
 // genuine GitHub Actions cancellation produces (install-smoke-drift.mjs's

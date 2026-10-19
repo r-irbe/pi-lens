@@ -102,6 +102,27 @@ function ownsPid(pid: number): boolean {
 	return true;
 }
 
+/**
+ * Adopt the descendants a tree kill is about to signal (#4081, #4082 r3).
+ *
+ * `pids` is one `ps` snapshot of `root`'s tree, taken just before the caller
+ * signals it. Ownership is decided here, BEFORE any signal, because after one
+ * the kernel keeps no evidence: a killed (or self-exiting) parent's children
+ * are reparented at its exit, so a re-read of `/proc` at signal time sees an
+ * outside parent and refuses a kill of our own grandchild. The snapshot is
+ * the kernel's ancestry at that moment; it is trusted only under a `root` this
+ * worker owns by {@link ownsPid}'s own rule, so a fake child carrying a
+ * fabricated pid adopts nothing and every signal it leads to is recorded.
+ *
+ * Test support only (`tests/support/process-tree.ts#killProcessTree`): the
+ * production seams this guard polices never call it.
+ */
+export function adoptProcessTree(root: number, pids: readonly number[]): void {
+	if (!ownsPid(root)) return;
+	for (const pid of pids)
+		if (Number.isInteger(pid) && pid > 0) ownedSeen.set(pid, true);
+}
+
 function record(site: "kill" | "register", target: number, detail: string) {
 	if (violations.length >= MAX_VIOLATIONS) {
 		dropped++;
@@ -178,4 +199,18 @@ export function killGuardReport(): string | undefined {
 		"teardown, which is how the Unit lane killed its own npm. Give the fake a pid this " +
 		"process really owns (`process.pid`), or keep it out of the production seam."
 	);
+}
+
+/**
+ * Take this worker's records whose target is in `targets`, in order, and
+ * leave every other record for the `afterAll` that fails the file. Only for
+ * the guard's own tests, which provoke violations at named pids on purpose.
+ */
+export function takeKillGuardViolationsForTest(
+	targets: readonly number[],
+): KillGuardViolation[] {
+	const taken = violations.filter((v) => targets.includes(v.target));
+	const kept = violations.filter((v) => !targets.includes(v.target));
+	violations.splice(0, violations.length, ...kept);
+	return taken;
 }

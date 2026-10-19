@@ -16,6 +16,10 @@ import {
 	getDegradationSummary,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
+import {
+	releaseGeneration,
+	tryAcquireGeneration,
+} from "../../clients/generation-lock.js";
 
 const tempDirs: string[] = [];
 
@@ -679,5 +683,297 @@ describe("acquireQuarantinePidFileLock across versions (#3476)", () => {
 		const release = await take(lockPath);
 		expect(release).toBeTypeOf("function");
 		await release?.();
+	});
+});
+
+describe("acquireBoundedPidFileLock: remembered-holder skip (#3594)", () => {
+	function lockIn(): { lockPath: string; gens: string } {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pid-lock-"));
+		tempDirs.push(dir);
+		const lockPath = path.join(dir, "state.lock");
+		return { lockPath, gens: `${lockPath}s` };
+	}
+
+	function degradationCount(kind: string): number {
+		return (
+			getDegradationSummary().find((group) => group.kind === kind)?.count ?? 0
+		);
+	}
+
+	function take(
+		lockPath: string,
+		waitMs: number,
+		retryMs = 10,
+		logContention: () => void = () => {},
+	) {
+		return acquireBoundedPidFileLock(lockPath, {
+			waitMs,
+			retryMs,
+			timeoutMessage: "bounded lock timed out",
+			onContention: "skip-log",
+			logContention,
+		});
+	}
+
+	/**
+	 * Fake time: each `Atomics.wait` backoff advances the fake clock the
+	 * deadline reads, instead of blocking. `slept` is the time the main
+	 * thread would have been blocked. Mirrors the sibling #3578 skip's own
+	 * `fakeBackoff` in `tests/clients/project-changes.test.ts`.
+	 */
+	function fakeBackoff(): { slept: number } {
+		const backoff = { slept: 0 };
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.spyOn(Atomics, "wait").mockImplementation(((
+			_array: unknown,
+			_index: unknown,
+			_value: unknown,
+			timeout?: number,
+		) => {
+			backoff.slept += timeout ?? 0;
+			vi.setSystemTime(Date.now() + (timeout ?? 0));
+			return "timed-out";
+		}) as typeof Atomics.wait);
+		return backoff;
+	}
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		resetDegradationLedger();
+	});
+
+	/**
+	 * Recurrence: #3578's shape, unapplied here. Every call waited afresh on
+	 * a holder an earlier wait had already run out on: ten calls under a
+	 * stuck holder blocked the main thread for ten full waits.
+	 *
+	 * Review F2 (round 2): `logContention` is asserted called on EVERY one of
+	 * the ten calls, skipped or not — in production that callback is
+	 * actionable-warnings' own `warning_state_write_dropped` emission for
+	 * each dropped write, and `recordDegradationOnce` fires only once per
+	 * session, so a skip that forgot to call it would silence every later
+	 * dropped write with nothing else to notice.
+	 */
+	it("ten calls under a stuck holder wait once, not ten (#3594)", () => {
+		const { lockPath, gens } = lockIn();
+		const backoff = fakeBackoff();
+		const hold = tryAcquireGeneration(gens, 60_000);
+		expect(hold).toBeDefined();
+		const logContention = vi.fn();
+		try {
+			for (let i = 0; i < 10; i++) {
+				expect(take(lockPath, 500, 10, logContention)).toBeNull();
+			}
+		} finally {
+			if (hold) releaseGeneration(hold);
+		}
+		expect(backoff.slept).toBeGreaterThanOrEqual(500);
+		expect(backoff.slept).toBeLessThan(1_000);
+		expect(degradationCount("bounded-pid-lock-wait-skipped")).toBe(1);
+		expect(logContention).toHaveBeenCalledTimes(10);
+	});
+
+	/**
+	 * Recurrence: review F1 (round 2). A generation only has a 5s lease
+	 * (`UNREADABLE_LOCK_STALE_MS`) and no heartbeat, so a holder stuck past
+	 * 5s is taken over by the next contender's own always-run first try —
+	 * which then finds the SAME live pid still holding the pre-#3476 bridge
+	 * file (`lockPath` itself) and returns `"legacy-held"`. This is the
+	 * NORMAL state of a holder stuck more than a few seconds, not an edge
+	 * case: both real callers wait 2000ms
+	 * (`clients/actionable-warnings.ts:398`, `clients/diagnostic-dispositions.ts:318`),
+	 * so the first timeout alone reaches roughly t=2s, past the lease.
+	 * Naming only the generation-file identity (`topGenerationHolder`) left
+	 * this state unrecognized on every later call — a released, taken-over
+	 * generation is a fresh name every time — so the skip stopped firing
+	 * again after the first ~3s of a longer stall: pre-fix, ten calls in
+	 * this shape cost ten full 2000ms waits, not one.
+	 */
+	it("ten calls under a holder stuck past its 5s lease wait once, not ten (#3594 review F1)", () => {
+		const { lockPath, gens } = lockIn();
+		const backoff = fakeBackoff();
+		// This version's own holder, abandoned without releasing: a
+		// generation whose lease has already run out, plus the pre-#3476
+		// bridge file carrying this same live pid's token — the shape a
+		// stuck (not crashed) holder of this version leaves behind.
+		const stuck = tryAcquireGeneration(gens, 60_000);
+		expect(stuck).toBeDefined();
+		const old = new Date(Date.now() - 10_000);
+		fs.utimesSync(path.join(gens, "lock.1"), old, old);
+		fs.writeFileSync(lockPath, `${process.pid}:${Date.now()}:stuck`, "utf8");
+		const logContention = vi.fn();
+		try {
+			for (let i = 0; i < 10; i++) {
+				expect(take(lockPath, 2_000, 10, logContention)).toBeNull();
+			}
+		} finally {
+			fs.unlinkSync(lockPath);
+		}
+		expect(backoff.slept).toBeGreaterThanOrEqual(2_000);
+		expect(backoff.slept).toBeLessThan(4_000);
+		expect(degradationCount("bounded-pid-lock-wait-skipped")).toBe(1);
+		expect(logContention).toHaveBeenCalledTimes(10);
+	});
+
+	it("a new holder after the stuck one gets the full wait again (#3594)", () => {
+		const { lockPath, gens } = lockIn();
+		const backoff = fakeBackoff();
+		const stuck = tryAcquireGeneration(gens, 60_000);
+		expect(stuck).toBeDefined();
+		expect(take(lockPath, 500)).toBeNull();
+		if (stuck) releaseGeneration(stuck);
+
+		const next = tryAcquireGeneration(gens, 60_000);
+		expect(next).toBeDefined();
+		const before = backoff.slept;
+		expect(take(lockPath, 500)).toBeNull();
+		if (next) releaseGeneration(next);
+		expect(backoff.slept - before).toBeGreaterThanOrEqual(500);
+	});
+
+	it("once the stuck holder releases, the next call takes the lock on its first try (#3594)", () => {
+		const { lockPath, gens } = lockIn();
+		const backoff = fakeBackoff();
+		const stuck = tryAcquireGeneration(gens, 60_000);
+		expect(stuck).toBeDefined();
+		expect(take(lockPath, 500)).toBeNull();
+		if (stuck) releaseGeneration(stuck);
+
+		const before = backoff.slept;
+		const release = take(lockPath, 500);
+		expect(release).toBeTypeOf("function");
+		(release as (() => void) | null)?.();
+		expect(backoff.slept).toBe(before);
+	});
+
+	/**
+	 * Mutation direction for dropping `timedOutHolder !== undefined`: without
+	 * it, an unreadable holder (`undefined`) on the FIRST wait would match
+	 * the also-`undefined` "nothing remembered yet" state and skip a wait
+	 * that never happened. Mirrors the sibling #3578 test of the same name in
+	 * `tests/clients/project-changes.test.ts`.
+	 */
+	it("a first wait is never skipped, even when the holder's generation file cannot be read (#3594)", () => {
+		const { lockPath, gens } = lockIn();
+		const backoff = fakeBackoff();
+		const hold = tryAcquireGeneration(gens, 60_000);
+		expect(hold).toBeDefined();
+		const prefix = path.join(gens, "lock.");
+		const realReadFileSync = mutableFs.readFileSync;
+		mutableFs.readFileSync = ((
+			...args: Parameters<typeof realReadFileSync>
+		) => {
+			if (String(args[0]).startsWith(prefix)) {
+				throw Object.assign(new Error("EACCES: permission denied"), {
+					code: "EACCES",
+				});
+			}
+			return realReadFileSync(...args);
+		}) as typeof realReadFileSync;
+		syncBuiltinESMExports();
+		try {
+			expect(take(lockPath, 500)).toBeNull();
+		} finally {
+			mutableFs.readFileSync = realReadFileSync;
+			syncBuiltinESMExports();
+			if (hold) releaseGeneration(hold);
+		}
+		expect(backoff.slept).toBeGreaterThanOrEqual(500);
+	});
+
+	// The skip's throw-on-timeout contract: a skip surfaces exactly like an
+	// ordinary timeout, with THIS call's own message, not a cached one.
+	it("throws with the caller's own timeout message, skipped or not (#3594)", () => {
+		const { lockPath, gens } = lockIn();
+		fakeBackoff();
+		const hold = tryAcquireGeneration(gens, 60_000);
+		expect(hold).toBeDefined();
+		try {
+			expect(() =>
+				acquireBoundedPidFileLock(lockPath, {
+					waitMs: 500,
+					retryMs: 10,
+					timeoutMessage: "first wait timed out",
+				}),
+			).toThrow("first wait timed out");
+			// Skipped: no wait, but the same throwing contract with THIS call's
+			// own message.
+			expect(() =>
+				acquireBoundedPidFileLock(lockPath, {
+					waitMs: 500,
+					retryMs: 10,
+					timeoutMessage: "second wait timed out",
+				}),
+			).toThrow("second wait timed out");
+		} finally {
+			if (hold) releaseGeneration(hold);
+		}
+	});
+
+	/**
+	 * A "legacy-held" retry (the pre-#3476 bridge file is live, not the
+	 * generation) always creates and releases its OWN fresh generation, so
+	 * its top-generation identity never coincides with a holder an earlier
+	 * BUSY wait remembered — the skip's check is unscoped by outcome (see
+	 * the production doc comment), and this is why that is safe.
+	 */
+	it("a live legacy holder is never skipped by an unrelated stuck holder's memory (#3594)", () => {
+		const { lockPath, gens } = lockIn();
+		const backoff = fakeBackoff();
+
+		// First, time out against a busy generation holder so `dir` has a
+		// remembered holder identity.
+		const stuck = tryAcquireGeneration(gens, 60_000);
+		expect(stuck).toBeDefined();
+		expect(take(lockPath, 500)).toBeNull();
+		expect(degradationCount("bounded-pid-lock-wait-skipped")).toBe(0);
+		if (stuck) releaseGeneration(stuck);
+
+		// Now a live legacy-file holder (this process's own pid, so it reads
+		// as alive) blocks the pre-#3476 bridge file instead. Every retry
+		// takes and releases a fresh generation of its own.
+		fs.writeFileSync(lockPath, `${process.pid}:${Date.now()}:older`);
+		const before = backoff.slept;
+		expect(take(lockPath, 500)).toBeNull();
+		expect(backoff.slept - before).toBeGreaterThanOrEqual(500);
+		expect(degradationCount("generation-lock-legacy-held")).toBe(1);
+		// Still zero: the busy holder's remembered name (round 2's
+		// `currentHolderIdentity` for "busy") is a different shape than a
+		// legacy identity, so it can never cross-match. This call is also
+		// its OWN first wait against the legacy holder (nothing was
+		// remembered for it before now), so it is never skipped either —
+		// only remembered for a NEXT call, which is what the round-2 review
+		// F1 regression test above proves goes on to skip.
+		expect(degradationCount("bounded-pid-lock-wait-skipped")).toBe(0);
+
+		fs.unlinkSync(lockPath);
+	});
+
+	/**
+	 * Recurrence: review round 2's residual edge (R2, "Item 1: verified
+	 * fixed"). The bridge file's create (`wx`) and its token write are
+	 * separate steps, so a reader can meet it empty. An empty read used to
+	 * produce the identity `"legacy "` (a non-`undefined` string) — two such
+	 * reads, from two DIFFERENT holders that both happened to be caught
+	 * empty, would then falsely match each other. Empty is now treated the
+	 * same as unreadable: `undefined`, which never matches.
+	 */
+	it("an empty bridge file is never remembered as a holder's identity (#3594 review R2 residual)", () => {
+		const { lockPath } = lockIn();
+		const backoff = fakeBackoff();
+		// The exact create/token-write gap: exists, empty, fresh mtime — live
+		// (not stale), but with nothing yet written to name a holder.
+		fs.writeFileSync(lockPath, "");
+		expect(take(lockPath, 500)).toBeNull();
+		expect(degradationCount("generation-lock-legacy-held")).toBe(1);
+		// The SAME still-empty bridge gets the full wait again on the next
+		// call too — nothing was remembered for it to (falsely) match.
+		const before = backoff.slept;
+		expect(take(lockPath, 500)).toBeNull();
+		expect(backoff.slept - before).toBeGreaterThanOrEqual(500);
+		expect(degradationCount("bounded-pid-lock-wait-skipped")).toBe(0);
+
+		fs.unlinkSync(lockPath);
 	});
 });

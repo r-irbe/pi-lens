@@ -8,8 +8,19 @@ export type DenyRule =
 	| "reset"
 	| "worktreeForce"
 	| "worktreeSymlink"
+	| "worktreeUnresolved"
 	| "probe"
-	| "tmpdirCollision";
+	| "tmpdirCollision"
+	| "sharedKill"
+	| "tmpCheckout"
+	| "tmpWrite"
+	| "checkUngated"
+	| "hookBypass"
+	| "forcePush"
+	| "ciVerdictStatus"
+	| "rebase"
+	| "npmLinkedInstall"
+	| "linkedNodeModulesDelete";
 
 export const RULE_MESSAGES: Readonly<Record<DenyRule, string>>;
 
@@ -22,6 +33,14 @@ export function scannableRegions(commandText: string): string[];
 
 export function splitSegments(region: string): string[];
 
+/**
+ * {@link splitSegments}'s sibling for #3471: the same split, with each
+ * segment's preceding separator kept (`null` for a region's first segment).
+ */
+export function splitSegmentsWithSeparators(
+	region: string,
+): Array<{ text: string; sep: string | null }>;
+
 export function splitWords(segment: string): string[];
 
 export function stripEnvAssignments(words: string[]): {
@@ -33,6 +52,7 @@ export function classifySegment(
 	rawSegment: string,
 	sharedEnv?: Record<string, string>,
 	cwd?: string,
+	originCwd?: string,
 ): DenyRule | null;
 
 export function findDeny(commandText: string, cwd?: string): DenyRule | null;

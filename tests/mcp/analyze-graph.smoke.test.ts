@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * Warm `pilens_analyze` review-graph maintenance (#536, item 1).
  *

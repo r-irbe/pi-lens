@@ -1,35 +1,64 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, vi } from "vitest";
+import {
+	getTmpRootRegistry,
+	registerTmpRoot,
+} from "../support/tmp-root-registry.js";
 
-// Windows keeps a file handle inside a just-used temp dir alive briefly after
-// a child process/watcher/background scan exits (AV scanning, delayed handle
-// release, or — as in #810's runtime-session.test.ts case — a fire-and-forget
-// background task the test didn't wait to settle before tearing down). An
-// immediate recursive `rm` can race that and throw EPERM/ENOTEMPTY (#793,
-// #810). `maxRetries`/`retryDelay` gives Windows a moment to release the
-// handle; if it's STILL held after retrying, a leftover temp dir under the
-// OS temp root is harmless (the OS reclaims it eventually) while failing the
-// whole test run over teardown is not — so the final failure warns instead
-// of throwing. This is the ONE shared cleanup helper for test temp dirs
-// (#810's pattern-class rule) — route every ad-hoc `fs.rmSync(dir, {
-// recursive: true, force: true })` teardown through this instead of
-// hand-rolling retries per suite.
+// A just-used temp dir can still be written to after the owning test is done:
+// a Windows file handle held briefly after a child/watcher/background scan
+// exits (AV scanning, delayed handle release, #793, #810), or — measured on
+// Linux, #4081 — a grandchild of a SIGKILLed real child still writing under
+// the scratch home. An immediate recursive `rm` then throws EPERM/ENOTEMPTY.
+// Node's in-call `maxRetries` does not recover that on Node 22 (it stalls
+// ~3 s and still throws), so this loops over FRESH `rmSync` calls, each one
+// re-walking the directory, for at most REMOVE_BUDGET_MS in total. If the dir
+// is STILL there, a leftover temp dir under the OS temp root is harmless (the
+// OS reclaims it eventually) while failing the whole test run over teardown
+// is not — so the final failure warns instead of throwing. This is the ONE
+// shared cleanup helper for test temp dirs (#810's pattern-class rule) —
+// route every ad-hoc `fs.rmSync(dir, { recursive: true, force: true })`
+// teardown through this instead of hand-rolling retries per suite.
+const REMOVE_BUDGET_MS = 2_000;
+const REMOVE_RETRY_MS = 50;
+// The errnos Node's own `maxRetries` retries; anything else is not transient.
+const RETRYABLE_REMOVE_CODES = new Set([
+	"EBUSY",
+	"EMFILE",
+	"ENFILE",
+	"ENOTEMPTY",
+	"EPERM",
+]);
 export function removeTempDirSync(dir: string): void {
-	try {
-		fs.rmSync(dir, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 200,
-		});
-	} catch (err) {
-		process.stderr.write(
-			`[test cleanup] could not remove temp dir ${dir}: ${
-				err instanceof Error ? err.message : String(err)
-			}\n`,
-		);
+	const deadline = Date.now() + REMOVE_BUDGET_MS;
+	for (;;) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+			return;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (
+				code === undefined ||
+				!RETRYABLE_REMOVE_CODES.has(code) ||
+				Date.now() >= deadline
+			) {
+				process.stderr.write(
+					`[test cleanup] could not remove temp dir ${dir}: ${
+						err instanceof Error ? err.message : String(err)
+					}\n`,
+				);
+				return;
+			}
+			Atomics.wait(
+				new Int32Array(new SharedArrayBuffer(4)),
+				0,
+				0,
+				REMOVE_RETRY_MS,
+			);
+		}
 	}
 }
 
@@ -39,6 +68,9 @@ export function setupTestEnvironment(prefix = "pi-lens-test-"): {
 } {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	activeTestEnvironments.add(tmpDir);
+	// #2912: the shared setup removes this root at file teardown and on SIGTERM,
+	// so a timeout or a failed assertion before `cleanup()` cannot leak it.
+	registerTmpRoot(getTmpRootRegistry(), tmpDir, "registered");
 	return {
 		tmpDir,
 		cleanup: () => {
@@ -136,6 +168,24 @@ export async function drainBackgroundWritesForTests(): Promise<void> {
 }
 
 /**
+ * Drain in-flight jscpd scans started by the resident analyzer bootstrap before
+ * a test removes its fixture roots (#4133). A session-start jscpd scan is
+ * fire-and-forget; if the test file ends while one is still running, Vitest
+ * SIGTERMs the worker before the scan's `finally` removes its report directory
+ * and the `pi-lens-jscpd-*` entry is stranded in the shared tmpdir. The
+ * `JscpdClient.shutdown()` barrier (#3338) waits for it. `peek` resolves the
+ * already-loaded client without forcing a load, and the method is optional so a
+ * stub bootstrap double is a no-op rather than a crash.
+ */
+export async function drainResidentJscpdScans(): Promise<void> {
+	const { peekBootstrapClients } = await import("../../clients/bootstrap.js");
+	const client = peekBootstrapClients()?.jscpdClient as
+		| { shutdown?: () => Promise<void> }
+		| undefined;
+	await client?.shutdown?.();
+}
+
+/**
  * Drain deferred fixture producers before the final cleanup pass. Keeping
  * roots tracked until the last tick preserves the hygiene sweep's handle.
  * The known background writers are drained first unless `drainWrites` is
@@ -167,6 +217,12 @@ export async function cleanupTestEnvironmentsDrained(
  */
 export function useTrackedTempDirs(...prefixes: string[]): void {
 	afterEach(async () => {
+		// The drain below parks on `setImmediate`, which a fake-timer test has
+		// replaced. Vitest runs `afterEach` hooks in reverse registration order, so
+		// this hook runs BEFORE the file's own `vi.useRealTimers()` teardown and
+		// hung to the 10 s hook timeout, failing the faking test and every test
+		// after it (launch.test.ts on Windows, #4019). Restore the real clock first.
+		vi.useRealTimers();
 		for (const prefix of prefixes) await cleanupTestEnvironmentsDrained(prefix);
 	});
 }
@@ -250,4 +306,35 @@ export function createTempFile(
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, content);
 	return filePath;
+}
+
+/** How a connect to a Unix socket path ends: `connected` when a server
+ *  listens there, otherwise the errno code (a stale socket or a regular file
+ *  refuses with `ECONNREFUSED`). */
+export function connectOutcome(endpoint: string): Promise<string> {
+	return new Promise((resolve) => {
+		const probe = net.createConnection(endpoint);
+		probe.once("connect", () => {
+			probe.destroy();
+			resolve("connected");
+		});
+		probe.once("error", (error) =>
+			resolve((error as NodeJS.ErrnoException).code ?? String(error)),
+		);
+	});
+}
+
+/** Leave a stale Unix socket file at `file`, as a killed host does, without a
+ *  child process: bind, move the file aside so the close-time unlink finds
+ *  nothing, close the listener, move the file back. */
+export async function plantStaleUnixSocket(file: string): Promise<void> {
+	const parked = `${file}.parked`;
+	const server = net.createServer();
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(file, resolve);
+	});
+	fs.renameSync(file, parked);
+	await new Promise<void>((resolve) => server.close(() => resolve()));
+	fs.renameSync(parked, file);
 }

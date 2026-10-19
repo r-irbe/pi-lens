@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { stripCommentsAndStrings } from "../support/session-state-scan.js";
 import { assertNonEmptyScan, listSourceFiles } from "../support/sweep-kit.js";
+import { toPosix } from "../../clients/path-utils.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 const LANE_DIR = path.join(REPO_ROOT, "clients/turn-end");
@@ -22,7 +23,7 @@ function laneSources(): Array<{ file: string; stripped: string }> {
 	// than read as clean. The floor is the interface plus one lane module.
 	assertNonEmptyScan("turn-end lane modules", files.length, 2);
 	return files.map((full) => ({
-		file: path.relative(REPO_ROOT, full),
+		file: toPosix(path.relative(REPO_ROOT, full)),
 		stripped: stripCommentsAndStrings(fs.readFileSync(full, "utf8")),
 	}));
 }

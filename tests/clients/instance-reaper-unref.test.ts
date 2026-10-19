@@ -73,6 +73,11 @@ vi.mock("node:child_process", () => ({
 	spawn: vi.fn(() => h.makeFakeChild()),
 }));
 
+// #3917 opt-in: the sweep's enumeration spawn is the subject. The setup's
+// default scope answers the backstop's `Name`-filtered table query with an
+// empty table before any spawn; `node:child_process` is mocked above, so the
+// real table is never read.
+vi.unmock("../../clients/process-snapshot.js");
 vi.mock("../../clients/instance-registry.js", () => ({
 	isInstanceRegistryEnabled: () => h.state.enabled,
 	readInstanceRegistry: async () => h.state.registry,

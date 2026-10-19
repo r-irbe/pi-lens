@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { setupTestEnvironment } from "../test-utils.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
@@ -17,8 +18,13 @@ import {
 import { CacheManager } from "../../../clients/cache-manager.js";
 import { importFactsApplyTo } from "../../../clients/dispatch/facts/import-facts.js";
 import { LANGUAGES } from "../../../clients/language-registry.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../clients/project-trust.js";
 
-const root = fs.mkdtempSync(path.join(process.cwd(), ".probe-lsp-language-"));
+const probe = setupTestEnvironment("pi-lens-lsp-language-");
+const root = probe.tmpDir;
 const workspace = path.join(root, "workspace");
 const fakeServer = fileURLToPath(
 	new URL("../../fixtures/fake-lsp-server.mjs", import.meta.url),
@@ -49,11 +55,16 @@ describe("language-neutral workspace resync (#2817)", () => {
 	const factsImporter = path.join(workspace, `consumer${factsExtension}`);
 	const fallbackImporter = path.join(workspace, `consumer${fallbackExtension}`);
 	const traceFile = path.join(root, "fake-lsp.trace");
+	let originalPiLensHome: string | undefined;
 	console.log(
 		`workspace diagnostics language matrix: facts=${factsLanguage.id}; no-facts=${fallbackLanguage.id}`,
 	);
 
 	beforeAll(async () => {
+		// Host-boundary stub: this fixture intentionally uses a trusted project
+		// custom server to exercise workspace resynchronization.
+		setProjectTrustState("trusted");
+		originalPiLensHome = process.env.PI_LENS_HOME;
 		fs.mkdirSync(path.join(workspace, ".pi-lens"), { recursive: true });
 		for (const [file, content] of [
 			[factsDependency, "value = 1\n"],
@@ -116,10 +127,13 @@ describe("language-neutral workspace resync (#2817)", () => {
 	});
 
 	afterAll(async () => {
+		resetProjectTrust();
 		const { resetLSPService } = await import("../../../clients/lsp/index.js");
 		resetLSPService({ reason: "test" });
-		fs.rmSync(root, { recursive: true, force: true });
 		delete process.env.FAKE_LSP_TRACE_FILE;
+		if (originalPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = originalPiLensHome;
+		probe.cleanup();
 	});
 
 	it("resyncs one facts and one no-facts registry language via the real server", async () => {

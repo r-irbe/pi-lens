@@ -9,7 +9,7 @@
  * - Conditional runners (when)
  */
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	clearCoverageNoticeState,
 	clearLatencyReports,
@@ -56,6 +56,44 @@ describe("Dispatch Flow", () => {
 	});
 
 	describe("Runner Registration", () => {
+		it("refuses all dispatch runners for an adopted root at the dispatch entry", async () => {
+			// Recurrence: #4257 F1 allowed project-configured runners to execute
+			// after the adopted-root notice, despite the caller's root classification.
+			const run = vi.fn(async () => ({
+				status: "succeeded" as const,
+				diagnostics: [],
+				semantic: "none" as const,
+			}));
+			registerRunner({
+				id: "adopted-runner",
+				appliesTo: ["jsts"],
+				priority: 1,
+				run,
+			});
+			const ctx = createDispatchContext(
+				"test.ts",
+				"/project",
+				{ getFlag: () => false },
+				new FactStore(),
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				"adopted",
+			);
+			const result = await runDispatchForFile(
+				ctx,
+				[{ mode: "all", runnerIds: ["adopted-runner"] }],
+				registry,
+			);
+			expect(run).not.toHaveBeenCalled();
+			expect(result.diagnostics).toEqual([]);
+		});
+
 		it("registers and retrieves a runner by id", () => {
 			const runner = createCleanRunner("test-runner");
 			registerRunner(runner);
@@ -268,6 +306,134 @@ describe("Dispatch Flow", () => {
 				"Pi-lens go analysis unavailable",
 			);
 		}, 30000);
+
+		it("repeats the coverage notice for a pull dispatch and leaves the push latch untouched (#3791)", async () => {
+			// #3791: the pi push surface latches the notice once per session (the
+			// sibling test above). A pull surface (`pilens_analyze`, connected by
+			// `dedupeCoverageNotice: false`) must say so on every call, and must
+			// not consume the latch a later push still needs.
+			registerRunner({
+				id: "lsp",
+				appliesTo: ["go"],
+				priority: 4,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "go-vet",
+				appliesTo: ["go"],
+				priority: 12,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "golangci-lint",
+				appliesTo: ["go"],
+				priority: 14,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "tree-sitter",
+				appliesTo: ["go"],
+				priority: 20,
+				async run() {
+					return { status: "succeeded", diagnostics: [], semantic: "none" };
+				},
+			});
+
+			const ctx = createMockContext("main.go");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["lsp", "go-vet", "golangci-lint", "tree-sitter"],
+				},
+			];
+			const notice = "Pi-lens go analysis unavailable";
+			const pull = () =>
+				runDispatchForFile(ctx, groups, registry, undefined, {
+					dedupeCoverageNotice: false,
+				});
+
+			// Pay the push latch first so the pull call has to ignore it, not just
+			// start from a clean session.
+			const pushFirst = await runDispatchForFile(ctx, groups, registry);
+			expect(pushFirst.output).toContain(notice);
+			const pushSecond = await runDispatchForFile(ctx, groups, registry);
+			expect(pushSecond.output).not.toContain(notice);
+
+			const pullFirst = await pull();
+			expect(pullFirst.output).toContain(notice);
+			expect(pullFirst.warnings.map((w) => w.message)).toContainEqual(
+				expect.stringContaining(notice),
+			);
+			const pullSecond = await pull();
+			expect(pullSecond.output).toContain(notice);
+			expect(pullSecond.warnings.map((w) => w.message)).toContainEqual(
+				expect.stringContaining(notice),
+			);
+
+			// The pull runs did not write the latch: the next push is still
+			// suppressed, exactly as it would have been without the pulls.
+			const pushThird = await runDispatchForFile(ctx, groups, registry);
+			expect(pushThird.output).not.toContain(notice);
+		}, 30000);
+
+		it("does not let pull dispatches consume a fresh push notice (#3791 F2)", async () => {
+			registerRunner({
+				id: "lsp",
+				appliesTo: ["go"],
+				priority: 4,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "go-vet",
+				appliesTo: ["go"],
+				priority: 12,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "golangci-lint",
+				appliesTo: ["go"],
+				priority: 14,
+				async run() {
+					return { status: "skipped", diagnostics: [], semantic: "none" };
+				},
+			});
+			registerRunner({
+				id: "tree-sitter",
+				appliesTo: ["go"],
+				priority: 20,
+				async run() {
+					return { status: "succeeded", diagnostics: [], semantic: "none" };
+				},
+			});
+
+			const ctx = createMockContext("main.go");
+			const groups: RunnerGroup[] = [
+				{
+					mode: "all",
+					runnerIds: ["lsp", "go-vet", "golangci-lint", "tree-sitter"],
+				},
+			];
+			const notice = "Pi-lens go analysis unavailable";
+			const pull = () =>
+				runDispatchForFile(ctx, groups, registry, undefined, {
+					dedupeCoverageNotice: false,
+				});
+
+			expect((await pull()).output).toContain(notice);
+			expect((await pull()).output).toContain(notice);
+			const firstPush = await runDispatchForFile(ctx, groups, registry);
+			expect(firstPush.output).toContain(notice);
+		});
 
 		it("does not let unrelated runner coverage suppress missing-tool notices", async () => {
 			registerRunner({
@@ -722,6 +888,142 @@ describe("Dispatch Flow", () => {
 			expect(result.diagnostics[0].semantic).toBe("blocking");
 			expect(result.diagnostics[0].severity).toBe("error");
 			expect(result.hasBlockers).toBe(true);
+		});
+
+		it("states why a delta-promoted unused finding blocks, once for several items (#3218)", async () => {
+			// Recurrence (2026-09-19 live session): the agent's own edit promoted
+			// two hint-severity ts:6133 findings to `blocking`, but the STOP block
+			// gave only the tier, so the agent re-ran lens_diagnostics to reconcile
+			// "all listed items are ℹ️ tier" with the blocker header.
+			const facts = new FactStore();
+			setBaselineFacts(facts, "/project/test.ts", []);
+
+			registerRunner(
+				createMockRunner({
+					id: "reporter",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "new-unused-a",
+								message: "'tmpdir' is declared but its value is never read.",
+								filePath: "test.ts",
+								line: 12,
+								severity: "hint",
+								semantic: "none",
+								tool: "lsp",
+								code: "6133",
+							},
+							{
+								id: "new-unused-b",
+								message:
+									"'FetchError' is declared but its value is never read.",
+								filePath: "test.ts",
+								line: 18,
+								severity: "hint",
+								semantic: "none",
+								tool: "lsp",
+								code: "6133",
+							},
+						],
+						semantic: "warning",
+					},
+				}),
+			);
+
+			const ctx = createDispatchContext(
+				"test.ts",
+				"/project",
+				{ getFlag: () => false },
+				facts,
+			);
+			const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["reporter"] }];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.hasBlockers).toBe(true);
+			expect(result.blockerOutput).toContain(
+				"🔴 STOP — 2 issue(s) must be fixed",
+			);
+			const reason =
+				"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.";
+			expect(result.blockerOutput).toContain(reason);
+			// One line, never per-item boilerplate.
+			expect(result.blockerOutput.split(reason)).toHaveLength(2);
+		});
+
+		it("does not stamp the promotion reason on a natively blocking or baseline-preexisting unused finding (#3218)", async () => {
+			// Recurrence guard for the negative direction: only findings the
+			// promotion seam actually raised carry the reason. A natively blocking
+			// unused finding (already error/blocking) and a baseline-preexisting
+			// unused finding must render with no reason note, or every blocker
+			// would claim it was promoted.
+			const facts = new FactStore();
+			setBaselineFacts(facts, "/project/test.ts", [
+				{
+					id: "old-unused",
+					message: "'preexisting' is declared but its value is never read.",
+					filePath: "test.ts",
+					line: 30,
+					severity: "hint",
+					semantic: "none",
+					tool: "lsp",
+					code: "6133",
+				},
+			]);
+
+			registerRunner(
+				createMockRunner({
+					id: "reporter",
+					appliesTo: ["jsts"],
+					runResult: {
+						status: "succeeded",
+						diagnostics: [
+							{
+								id: "native-unused",
+								message: "'kept' is declared but its value is never read.",
+								filePath: "test.ts",
+								line: 5,
+								severity: "error",
+								semantic: "blocking",
+								tool: "lsp",
+								code: "6133",
+							},
+							{
+								id: "old-unused",
+								message:
+									"'preexisting' is declared but its value is never read.",
+								filePath: "test.ts",
+								line: 30,
+								severity: "hint",
+								semantic: "none",
+								tool: "lsp",
+								code: "6133",
+							},
+						],
+						semantic: "warning",
+					},
+				}),
+			);
+
+			const ctx = createDispatchContext(
+				"test.ts",
+				"/project",
+				{ getFlag: () => false },
+				facts,
+			);
+			const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["reporter"] }];
+
+			const result = await dispatchForFile(ctx, groups);
+
+			expect(result.hasBlockers).toBe(true);
+			expect(result.blockerOutput).toContain(
+				"🔴 STOP — 1 issue(s) must be fixed",
+			);
+			expect(result.blockerOutput).not.toContain(
+				"new in this edit → blocks in delta mode",
+			);
 		});
 
 		it("does not cross-contaminate delta baselines across cwds sharing a relative path (refs #2489)", async () => {

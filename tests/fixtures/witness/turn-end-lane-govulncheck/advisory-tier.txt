@@ -1,4 +1,6 @@
 === context message the agent receives ===
+keep working
+
 [pi-lens automated check — not a user request] Address 🔴 blockers before continuing; ℹ️ advisories are informational only.
 
 ℹ️ Advisory — no action required this turn:
@@ -13,5 +15,3 @@
 
 ℹ️ Advisory — no action required this turn:
 suppressed by disposition: 1 finding(s) dropped from this turn's gitleaks/govulncheck/trivy sections (govulncheck 1) (marked false-positive or won't-fix).
-
-keep working

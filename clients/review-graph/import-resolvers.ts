@@ -24,18 +24,23 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { normalizeMapKey } from "../path-utils.js";
+import { isUnderDir, normalizeMapKey } from "../path-utils.js";
 import {
 	aliasedImportTargets,
 	referencedProjectImportTarget,
 } from "./tsconfig-paths.js";
 import { buildModuleGraph, type WorkspaceModule } from "./workspace-modules.js";
 
-/** True when `p` is inside (or equal to) `cwd` — blocks resolution escaping the workspace. */
+/**
+ * True when `p` is inside (or equal to) `cwd` — blocks resolution escaping the
+ * workspace. `isUnderDir` canonicalizes both sides (#4101): `p` is often
+ * derived from a canonical key (`normalizeMapKey`) while `cwd` is the caller's
+ * spelling of the root, and a lexical compare of the two dropped every edge
+ * when that spelling went through an 8.3 name, a junction or a subst drive.
+ * It does filesystem work, so callers stat first and ask this last.
+ */
 function isWithin(cwd: string, p: string): boolean {
-	const root = path.resolve(cwd);
-	const rp = path.resolve(p);
-	return rp === root || rp.startsWith(root + path.sep);
+	return isUnderDir(path.resolve(p), path.resolve(cwd));
 }
 
 function isFile(p: string): boolean {
@@ -57,14 +62,14 @@ function isDir(p: string): boolean {
 /** First candidate that exists as a file within cwd, normalized — or []. */
 function firstExistingFile(cwd: string, candidates: string[]): string[] {
 	for (const c of candidates) {
-		if (isWithin(cwd, c) && isFile(c)) return [normalizeMapKey(c)];
+		if (isFile(c) && isWithin(cwd, c)) return [normalizeMapKey(c)];
 	}
 	return [];
 }
 
 /** All `ext` files directly in `dir` (non-recursive), normalized — or []. */
 function sourceFilesIn(cwd: string, dir: string, ext: string): string[] {
-	if (!isWithin(cwd, dir) || !isDir(dir)) return [];
+	if (!isDir(dir) || !isWithin(cwd, dir)) return [];
 	try {
 		return fs
 			.readdirSync(dir)
@@ -385,7 +390,7 @@ function pythonRoots(cwd: string, fileDir: string): string[] {
 	// is anchored. Add cwd and cwd/src as conventional fallbacks.
 	let p = fileDir;
 	const root = path.resolve(cwd);
-	while (isWithin(cwd, p) && isFile(path.join(p, "__init__.py"))) {
+	while (isFile(path.join(p, "__init__.py")) && isWithin(cwd, p)) {
 		const parent = path.dirname(p);
 		if (parent === p) break;
 		p = parent;
@@ -438,7 +443,7 @@ function findGoModule(
 	while (true) {
 		try {
 			const content = fs.readFileSync(path.join(dir, "go.mod"), "utf-8");
-			const m = content.match(/^\s*module\s+(\S+)/m);
+			const m = content.match(/^[^\S\n\r\u2028\u2029]*module\s+(\S+)/m);
 			if (m) return { moduleDir: dir, modulePath: m[1] };
 		} catch {
 			// no go.mod here — keep climbing

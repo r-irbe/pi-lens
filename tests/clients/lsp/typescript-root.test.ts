@@ -15,10 +15,12 @@ type RootPolicyHarness = {
 		clients: Map<string, LSPClientInfo>;
 		inFlight: Map<string, Promise<unknown>>;
 	};
-	resolveServerRoot(
-		server: typeof TypeScriptServer,
-		filePath: string,
-	): Promise<string | undefined>;
+	clientRegistry: {
+		resolveServerRoot(
+			server: typeof TypeScriptServer,
+			filePath: string,
+		): Promise<string | undefined>;
+	};
 };
 
 const dirs: string[] = [];
@@ -78,7 +80,7 @@ describe("TypeScript config-aware roots (#1412)", () => {
 			isAlive: () => true,
 		} as unknown as LSPClientInfo);
 		await expect(
-			service.resolveServerRoot(TypeScriptServer, file),
+			service.clientRegistry.resolveServerRoot(TypeScriptServer, file),
 		).resolves.toBe(nested);
 	});
 

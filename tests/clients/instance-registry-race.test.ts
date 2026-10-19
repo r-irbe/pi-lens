@@ -1,3 +1,4 @@
+// flake-shape: real-process-spawn — six real Node writers must rendezvous on the OS barrier and persist registrations through the production cross-process lock; an in-process double cannot reproduce #2173.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";

@@ -1,0 +1,12 @@
+{
+  "name": "corpus",
+  "version": "1.0.0",
+  "private": true,
+  "tags": ["a", "b", null, true, false],
+  "limits": {
+    "ratio": 0.5,
+    "max": -12,
+    "big": 1.5e10
+  },
+  "nested": [{ "id": 1, "path": "C:\\tmp\\\"quoted\"" }, []]
+}

@@ -6,6 +6,7 @@ import {
 	DOTNET_CSHARP_ROOT_MARKERS,
 	DOTNET_FSHARP_ROOT_MARKERS,
 	KIND_EXTENSIONS,
+	LEAN_ROOT_MARKERS,
 	TERRAGRUNT_FILENAMES,
 	type FileKind,
 } from "./file-kinds.js";
@@ -56,6 +57,7 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	// spellings; java listed only the Groovy one.
 	java: ["pom.xml", "build.gradle", "build.gradle.kts", ".classpath"],
 	kotlin: ["build.gradle.kts", "build.gradle", "pom.xml"],
+	lean: LEAN_ROOT_MARKERS,
 	swift: ["Package.swift"],
 	dart: ["pubspec.yaml"],
 	elixir: ["mix.exs"],
@@ -67,7 +69,6 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 	csharp: DOTNET_CSHARP_ROOT_MARKERS,
 	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
-	lean4: ["lakefile.lean", "lakefile.toml", "lean-toolchain"],
 };
 
 const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
@@ -110,6 +111,7 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	// workspace root.
 	java: ["pom.xml", "build.gradle", "build.gradle.kts", ".classpath"],
 	kotlin: ["build.gradle.kts", "build.gradle", "pom.xml"],
+	lean: LEAN_ROOT_MARKERS,
 	swift: ["Package.swift"],
 	dart: ["pubspec.yaml"],
 	elixir: ["mix.exs"],
@@ -121,7 +123,6 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 	csharp: DOTNET_CSHARP_ROOT_MARKERS,
 	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
-	lean4: ["lakefile.lean", "lakefile.toml", "lean-toolchain"],
 };
 
 // Tool-owned configuration belongs beside the shared language vocabulary, but
@@ -328,8 +329,8 @@ const WARMUP_CODE_EXTS: ReadonlySet<string> = new Set(
 // warmup walk is hard-capped. Without this, a walk rooted at a too-broad directory
 // (e.g. $HOME, if startup-scan's canWarmCaches guard is bypassed) traverses the
 // entire tree — #250's multi-hour home-dir scans. Generous enough to detect every
-// language present in any real project (mirrors startup-scan's 2000 limit).
-const MAX_WARMUP_SOURCE_FILES = 2000;
+// language present in any real project (mirrors startup-scan's 2500 limit).
+const MAX_WARMUP_SOURCE_FILES = 2500;
 
 // Total matched-file ceiling for the warmup walk, as a multiple of `maxFiles`
 // (#894 review): with per-category budgets the walk no longer stops at the

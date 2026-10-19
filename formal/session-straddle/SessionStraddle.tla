@@ -2,40 +2,48 @@
 (***************************************************************************)
 (* Session-scoped runtime state across a same-process session replacement *)
 (* (pi's /new or /resume in the same cwd: the extension module is cached,  *)
-(* so the module-level `runtime` (index.ts:566) is shared by both          *)
+(* so the module-level `runtime` (index.ts) is shared by both              *)
 (* sessions).                                                              *)
 (*                                                                         *)
 (* Actors:                                                                 *)
 (*  - the host: session 1's agent_settled, session_shutdown, session 2's   *)
-(*    session_start (split at its awaits: the #2890 admission key is set   *)
-(*    first, index.ts:2077; the generation bump and the clear of           *)
-(*    _cascadeRuns/_pendingCascadeRuns happen later, in                    *)
-(*    handleSessionStart -> runtime.resetForSession,                       *)
-(*    runtime-session.ts:2408, runtime-coordinator.ts:434-443), a          *)
-(*    duplicate session_start for the same (reason, id) (#2890), and       *)
-(*    session 2's turn_end, which consumes and delivers the cascade runs   *)
-(*    (consumeCascadeRuns, runtime-turn.ts:1147);                          *)
-(*  - a session-1 cascade compute parked by appendCascadePromise           *)
-(*    (runtime-coordinator.ts:978), resolving at any time;                 *)
+(*    session_start (split at its awaits: the #2890 admission key is reserved *)
+(*    first in the process-lifetime session-scope registry; the generation bump and *)
+(*    the clear of _cascadeRuns/_pendingCascadeRuns happen later, in       *)
+(*    handleSessionStart -> runtime.resetForSession, runtime-session.ts,   *)
+(*    runtime-coordinator.ts), a duplicate session_start for the same      *)
+(*    (session key, reason, previous session file) (#2890), and session 2's *)
+(*    delivers the cascade runs (consumeCascadeRuns, runtime-turn.ts);     *)
+(*  - a session-1 cascade compute admitted by appendCascadePromise         *)
+(*    (runtime-coordinator.ts appendCascadePromise), resolving at any time.*)
+(*    It is parked in _pendingCascadeRuns or, past the 32-compute cap      *)
+(*    (Overflow, #3512), appended by a detached .then that the reset cannot*)
+(*    reach. Its handler can admit it after the reset (LateAdmit, #3512    *)
+(*    r1), with the generation it captured at dispatch (Dispatch1Gen);     *)
 (*  - session 1's quiet window, fire-and-forget from agent_settled         *)
-(*    (index.ts:3568). runQuietWindow captures the session generation      *)
-(*    as each task starts (quiet-window.ts:174, #3499) and runs its        *)
-(*    tasks in sequence: "cascade_carry_over_settle" (quiet-window.ts:225) *)
-(*    runs settleCascadeRuns, which takes the pending list, awaits up to   *)
-(*    15 s, then appends the settled runs and re-parks the rest            *)
-(*    (runtime-coordinator.ts:1025-1092); then the cascade-tier reconcile  *)
-(*    (cascade-tier.ts:479), whose onResolvedFound appends a run after its *)
-(*    own await (index.ts:3380-3389). The reconcile drains the tier-3      *)
-(*    touch registry, which the reset clears in the same tick as the       *)
-(*    generation bump (runtime-session.ts:2407-2408).                      *)
-(*  - session 2's cascade lane, which records its own tier-3 touch, and    *)
-(*    session 2's own quiet window, which reconciles it;                   *)
+(*    (index.ts runQuietWindow). runQuietWindow captures the session       *)
+(*    generation as each task starts (quiet-window.ts, #3499) and runs its *)
+(*    tasks in sequence: "cascade_carry_over_settle" (quiet-window.ts      *)
+(*    runQuietWindow) runs settleCascadeRuns, which takes the pending list,*)
+(*    awaits up to 15 s, then appends the settled runs and re-parks the    *)
+(*    rest (runtime-coordinator.ts settleCascadeRuns); then the            *)
+(*    cascade-tier reconcile (clients/lsp/cascade-tier.ts                  *)
+(*    reconcileOutstandingCascadeTouches), whose onResolvedFound appends a *)
+(*    run after its own await (index.ts onResolvedFound). The reconcile    *)
+(*    drains the tier-3 touch registry, which the reset clears in the same *)
+(*    tick as the generation bump (runtime-session.ts resetForSession).    *)
+(*  - session 2's cascade lane: a dispatch (runtime-tool-result.ts         *)
+(*    handleToolResult captures the generation) whose compute records its  *)
+(*    own tier-3 touch, and, under Overflow, a compute session 2 admits    *)
+(*    past the cap; session 2's own quiet window reconciles the touch;     *)
 (*  - optionally (Strays, #3512), the still-running session-1 compute,     *)
-(*    which records a touch after the reset.                               *)
-(* FixParts selects the #3499 guards. The shipped code is                  *)
-(* {"settle","reconcile","reconcileTaskCapture"}; {} is the code before    *)
-(* #3499. The model has no clock: it cannot see a touch that waits for a   *)
-(* later window, nor the 15-minute expiry (OUTSTANDING_TOUCH_MAX_AGE_MS).  *)
+(*    which records a touch after the reset (integration.ts                *)
+(*    recordOutstandingCascadeTouch).                                      *)
+(* FixParts selects the guards. The shipped code is                        *)
+(* {"settle","reconcile","reconcileTaskCapture","admission","stray"};      *)
+(* {} is the code before #3499. The model has no clock: it cannot see a    *)
+(* touch that waits for a later window, nor the 15-minute expiry           *)
+(* (OUTSTANDING_TOUCH_MAX_AGE_MS).                                         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -46,7 +54,15 @@ CONSTANTS
     ToolDrift,     \* the duplicate sees a drifted active-tool set (re-admitted)
     Strays,        \* a still-running session-1 compute records a tier-3 touch
                    \* after the reset (#3512)
-    FixParts       \* the #3499 guards, a subset of
+    Overflow,      \* the session-1 compute was admitted past the 32-compute
+                   \* cap, and session 2 admits one past the cap too (#3512)
+    LateAdmit,     \* the session-1 handler admits its compute in any phase,
+                   \* including after the reset: index.ts abandons the handler
+                   \* at its bound without cancelling it (#3512 r1 B2)
+    EarlyAbandon,  \* the session-1 handler is abandoned BEFORE its dispatch
+                   \* (its clients bound, its claim join, bash recovery) and
+                   \* dispatches in any phase, including after the reset (#3568)
+    FixParts       \* the guards, a subset of
                    \*   "settle"                settleCascadeRuns drops on a stale generation
                    \*   "reconcile"             the reconcile's append drops on a stale
                    \*                           generation
@@ -55,6 +71,35 @@ CONSTANTS
                    \*                           window starts (rounds 0-1)
                    \*   "reconcileStart"        the reconcile stands down before its
                    \*                           drain on a stale generation (round 1)
+                   \*   "admission"             the admission (parked or overflow) and
+                   \*                           the overflow append drop on a stale
+                   \*                           generation captured at DISPATCH (#3512)
+                   \*   "admissionAtAdmit"      mutant: the admission captures when it
+                   \*                           admits, after the pipeline await (r0)
+                   \*   "admissionHoist"        mutant: one admission handle reused
+                   \*                           across admissions (session 1's)
+                   \*   "stray"                 the tier-3 touch record drops on a stale
+                   \*                           generation captured at dispatch (#3512)
+                   \*   "strayRecordCapture"    mutant: the touch is stamped with the
+                   \*                           generation current when it is recorded
+                   \*   "dispatchHoist"         mutant: one dispatch handle reused
+                   \*                           across dispatches (session 1's)
+                   \*   "entryCapture"          the session-1 handler's dispatch uses
+                   \*                           the generation it captured at handler
+                   \*                           ENTRY, before its first await (#3568);
+                   \*                           without it, the one current when it
+                   \*                           dispatches
+                   \*   "retireAtShutdown"      #3611 (F1 of #3803): session_shutdown retires
+                   \*                           the scope (retireOwnScope), so every handle
+                   \*                           a session-1 writer holds is stale from
+                   \*                           Shutdown1 on, not only from the reset's
+                   \*                           ticket; without it, a handle is current
+                   \*                           until StartReset (the pre-#3611 counter)
+                   \*   "retireSticky"          mutant: the retirement is never lifted, so
+                   \*                           session 2's own handles are stale too
+                   \*   "watchWindow"           instrument, not a mechanism: record the
+                   \*                           origins whose write landed between
+                   \*                           Shutdown1 and StartReset (NoWriteBetween)
 
 VARIABLES
     phase,      \* "s1" | "s1down" | "s2starting" | "s2"
@@ -70,15 +115,54 @@ VARIABLES
     recon,      \* quiet-window reconcile pc
     reconGen,   \* generation captured for the reconcile
     drained,    \* the touches the reconcile drained
-    dropped,    \* touch origins a reconcile guard dropped
-    rec2,       \* session 2 has recorded its own touch
+    dropped,    \* touch origins a guard dropped (reconcile or record)
+    rec2,       \* session 2's own touch: "idle" | "dispatched" | "done"
+    d2Gen,      \* generation session 2's dispatch captured
     strayed,    \* the session-1 compute has recorded its stray touch
     dup,        \* the duplicate start has arrived
-    delivered   \* [origin, at] pairs delivered by a turn_end
+    delivered,  \* [origin, at] pairs delivered by a turn_end
+    ovf,        \* origins of computes admitted past the cap, not yet appended
+    ovfGen,     \* generation each overflow admission captured
+    adm1,       \* the session-1 handler has admitted its compute
+    adm2,       \* session 2 has admitted its own compute past the cap
+    admDropped, \* origins the admission guard dropped
+    disp1,      \* the session-1 handler has dispatched its pipeline (#3568)
+    d1Gen,      \* the generation that dispatch holds (#3568)
+    late        \* origins whose write landed between shutdown and reset
+                \* ("watchWindow", F1 of #3803)
 
 vars == <<phase, gen, resets, pending, resolved, runs, touches, settle, snap,
-          settleGen, recon, reconGen, drained, dropped, rec2, strayed, dup,
-          delivered>>
+          settleGen, recon, reconGen, drained, dropped, rec2, d2Gen, strayed,
+          dup, delivered, ovf, ovfGen, adm1, adm2, admDropped, disp1, d1Gen,
+          late>>
+
+\* The shared UNCHANGED tail of the #3512 variables, for the #3499 actions.
+Rest3512 == <<d2Gen, ovf, ovfGen, adm1, adm2, admDropped, disp1, d1Gen>>
+
+\* The #3568 variables, for the #3512 actions that list theirs explicitly.
+Rest3568 == <<disp1, d1Gen>>
+
+\* F1 of #3803: whether a captured handle g is stale. The reset's ticket
+\* retires it (g # gen); with "retireAtShutdown" so does the shutdown that
+\* precedes the reset (`retireScope`, index.ts `retireOwnScope`), so a handle
+\* of session 1 is stale in the window between them too. The window is
+\* s1down and s2starting; session 2's handles are taken in s2.
+Down == phase \in {"s1down", "s2starting"}
+Stale(g) == \/ g # gen
+            \/ ("retireAtShutdown" \in FixParts /\ Down)
+            \/ ("retireSticky" \in FixParts /\ phase # "s1")
+
+\* A write landed (origins os): with "watchWindow", the window's are recorded.
+\* The window is written out, not read from Down, so a guard that misreads it
+\* is seen by the instrument.
+Landed(os) ==
+    late' = IF "watchWindow" \in FixParts /\ phase \in {"s1down", "s2starting"}
+            THEN late \cup os ELSE late
+
+\* The generation the session-1 handler captured when it dispatched its
+\* pipeline (writeSession, before the pipeline await), in session 1. Both the
+\* compute's tier-3 touch and the handler's admission of it use this capture.
+Dispatch1Gen == 1
 
 Sess == 1..2
 
@@ -87,30 +171,128 @@ TypeOK ==
     /\ gen \in 0..4
     /\ pending \subseteq Sess /\ runs \subseteq Sess /\ snap \subseteq Sess
     /\ touches \subseteq Sess /\ drained \subseteq Sess /\ dropped \subseteq Sess
-    /\ resolved \in BOOLEAN /\ rec2 \in BOOLEAN /\ strayed \in BOOLEAN
+    /\ resolved \in BOOLEAN /\ strayed \in BOOLEAN
+    /\ rec2 \in {"idle", "dispatched", "done"} /\ d2Gen \in 0..4
     /\ settle \in {"idle", "waiting", "done"}
     /\ recon \in {"idle", "queued", "waiting", "done"}
+    /\ ovf \subseteq Sess /\ admDropped \subseteq Sess
+    /\ adm1 \in BOOLEAN /\ adm2 \in BOOLEAN
+    /\ ovfGen \in [Sess -> 0..4]
+    /\ disp1 \in BOOLEAN /\ d1Gen \in 0..4
+    /\ late \subseteq Sess
 
 Init ==
     /\ phase = "s1"
     /\ gen = 1
     /\ resets = [s \in Sess |-> IF s = 1 THEN 1 ELSE 0]
-    /\ pending = {1}            \* a session-1 cascade compute is parked
+    \* a session-1 cascade compute is parked, or admitted past the cap, or
+    \* (LateAdmit) not yet admitted by its handler
+    /\ pending = IF Overflow \/ LateAdmit THEN {} ELSE {1}
+    /\ ovf = IF Overflow /\ ~LateAdmit THEN {1} ELSE {}
+    /\ ovfGen = [s \in Sess |-> IF s = 1 THEN Dispatch1Gen ELSE 0]
+    /\ adm1 = ~LateAdmit /\ adm2 = FALSE /\ admDropped = {}
+    \* #3568: a handler abandoned before its dispatch has not dispatched yet
+    /\ disp1 = ~EarlyAbandon /\ d1Gen = Dispatch1Gen
+    /\ late = {}
     /\ resolved = FALSE
     /\ runs = {}
     /\ touches = {1}            \* and a session-1 tier-3 touch is outstanding
     /\ settle = "idle" /\ snap = {} /\ settleGen = 0
     /\ recon = "idle" /\ reconGen = 0 /\ drained = {}
-    /\ dropped = {} /\ rec2 = FALSE /\ strayed = FALSE
+    /\ dropped = {} /\ rec2 = "idle" /\ d2Gen = 0 /\ strayed = FALSE
     /\ dup = FALSE
     /\ delivered = {}
 
+\* #3512: the overflow `.then` appends a settled compute. The reset cleared
+\* _cascadeRuns but cannot reach this callback; the guard compares the
+\* generation captured at admission.
+OvfAppend(o) ==
+    /\ ovf' = ovf \ {o}
+    /\ IF "admission" \in FixParts /\ Stale(ovfGen[o])
+         THEN /\ admDropped' = admDropped \cup {o}
+              /\ UNCHANGED <<runs, late>>
+         ELSE /\ runs' = runs \cup {o}
+              /\ Landed({o})
+              /\ UNCHANGED admDropped
+
+\* The session-1 compute resolves. Parked, the settle picks it up; admitted
+\* past the cap, its `.then` appends it in the same microtask run.
 Resolve ==
-    /\ ~resolved
+    /\ disp1 /\ ~resolved
     /\ resolved' = TRUE
-    /\ UNCHANGED <<phase, gen, resets, pending, runs, touches, settle, snap,
-                   settleGen, recon, reconGen, drained, dropped, rec2, strayed,
-                   dup, delivered>>
+    /\ IF 1 \in ovf THEN OvfAppend(1) ELSE UNCHANGED <<ovf, runs, admDropped, late>>
+    /\ UNCHANGED <<phase, gen, resets, pending, touches, settle, snap,
+                   settleGen, recon, reconGen, drained, dropped, rec2, d2Gen,
+                   strayed, dup, delivered, ovfGen, adm1, adm2>>
+    /\ UNCHANGED Rest3568
+
+\* #3568: the session-1 handler, abandoned before its dispatch, resumes and
+\* dispatches in any phase. Its dispatch holds the generation captured at
+\* handler entry (session 1's), unless it captures when it dispatches.
+Dispatch1 ==
+    /\ EarlyAbandon /\ ~disp1
+    /\ disp1' = TRUE
+    /\ d1Gen' = IF "entryCapture" \in FixParts THEN Dispatch1Gen ELSE gen
+    /\ UNCHANGED <<phase, gen, resets, pending, resolved, runs, touches, settle,
+                   snap, settleGen, recon, reconGen, drained, dropped, rec2,
+                   d2Gen, strayed, dup, delivered, ovf, ovfGen, adm1, adm2,
+                   admDropped>>
+    /\ UNCHANGED late
+
+\* appendCascadePromise(p, g): under "admission" a stale g drops the
+\* admission on either branch; otherwise the compute is parked or, past the
+\* cap, handed to the detached `.then` with g.
+Admit(o, g) ==
+    IF "admission" \in FixParts /\ Stale(g)
+      THEN /\ admDropped' = admDropped \cup {o}
+           /\ UNCHANGED <<pending, ovf, ovfGen, late>>
+      ELSE /\ Landed({o})
+           /\ IF Overflow
+                THEN /\ ovf' = ovf \cup {o}
+                     /\ ovfGen' = [ovfGen EXCEPT ![o] = g]
+                     /\ UNCHANGED pending
+                ELSE /\ pending' = pending \cup {o}
+                     /\ UNCHANGED <<ovf, ovfGen>>
+           /\ UNCHANGED admDropped
+
+\* #3512 r1 B2: the session-1 handler resumes after its pipeline await and
+\* admits (runtime-tool-result.ts -> appendCascadePromise), in any phase.
+Admit1 ==
+    /\ LateAdmit /\ disp1 /\ ~adm1
+    /\ adm1' = TRUE
+    /\ Admit(1, IF "admissionAtAdmit" \in FixParts THEN gen ELSE d1Gen)
+    /\ UNCHANGED <<phase, gen, resets, resolved, runs, touches, settle, snap,
+                   settleGen, recon, reconGen, drained, dropped, rec2, d2Gen,
+                   strayed, dup, delivered, adm2>>
+    /\ UNCHANGED Rest3568
+
+\* A compute admitted past the cap after it resolved: its `.then` fires.
+Fire1 ==
+    /\ 1 \in ovf /\ resolved
+    /\ OvfAppend(1)
+    /\ UNCHANGED <<phase, gen, resets, pending, resolved, touches, settle, snap,
+                   settleGen, recon, reconGen, drained, dropped, rec2, d2Gen,
+                   strayed, dup, delivered, ovfGen, adm1, adm2>>
+    /\ UNCHANGED Rest3568
+
+\* Session 2's tool_result admits its own compute past the cap, with the
+\* generation its own dispatch captured.
+Admit2 ==
+    /\ Overflow /\ phase = "s2" /\ ~adm2
+    /\ adm2' = TRUE
+    /\ Admit(2, IF "admissionHoist" \in FixParts THEN ovfGen[1] ELSE gen)
+    /\ UNCHANGED <<phase, gen, resets, resolved, runs, touches, settle, snap,
+                   settleGen, recon, reconGen, drained, dropped, rec2, d2Gen,
+                   strayed, dup, delivered, adm1>>
+    /\ UNCHANGED Rest3568
+
+Resolve2 ==
+    /\ 2 \in ovf
+    /\ OvfAppend(2)
+    /\ UNCHANGED <<phase, gen, resets, pending, resolved, touches, settle, snap,
+                   settleGen, recon, reconGen, drained, dropped, rec2, d2Gen,
+                   strayed, dup, delivered, ovfGen, adm1, adm2>>
+    /\ UNCHANGED Rest3568
 
 \* agent_settled: `void runQuietWindow(...)`, which captures the generation.
 Settled ==
@@ -119,18 +301,22 @@ Settled ==
     /\ recon' = "queued" /\ reconGen' = gen
     /\ UNCHANGED <<phase, gen, resets, resolved, runs, touches, drained,
                    dropped, rec2, strayed, dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* After the Promise.race: append the settled run, re-park the rest.
 SettleFinish ==
     /\ settle = "waiting"
     /\ settle' = "done"
-    /\ IF "settle" \in FixParts /\ settleGen # gen
-         THEN UNCHANGED <<runs, pending>>
+    /\ IF "settle" \in FixParts /\ Stale(settleGen)
+         THEN UNCHANGED <<runs, pending, late>>
          ELSE /\ runs' = runs \cup (IF resolved THEN snap ELSE {})
               /\ pending' = pending \cup (IF resolved THEN {} ELSE snap)
+              /\ Landed(snap)
     /\ UNCHANGED <<phase, gen, resets, resolved, touches, snap, settleGen,
                    recon, reconGen, drained, dropped, rec2, strayed, dup,
                    delivered>>
+    /\ UNCHANGED Rest3512
 
 \* The quiet window runs its tasks in sequence: the reconcile task starts
 \* only after the settle task returns. It drains the registry synchronously
@@ -139,7 +325,7 @@ ReconStart ==
     /\ settle = "done" /\ recon = "queued"
     /\ LET g == IF "reconcileTaskCapture" \in FixParts THEN gen ELSE reconGen
        IN /\ reconGen' = g
-          /\ IF "reconcileStart" \in FixParts /\ g # gen
+          /\ IF "reconcileStart" \in FixParts /\ Stale(g)
                THEN /\ recon' = "done"
                     /\ UNCHANGED <<touches, drained>>
                ELSE /\ recon' = "waiting"
@@ -147,19 +333,23 @@ ReconStart ==
                     /\ touches' = {}
     /\ UNCHANGED <<phase, gen, resets, pending, resolved, runs, settle, snap,
                    settleGen, dropped, rec2, strayed, dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* After the per-entry awaits: onResolvedFound -> runtime.appendCascadeRun.
 ReconFinish ==
     /\ recon = "waiting"
     /\ recon' = "done"
-    /\ IF "reconcile" \in FixParts /\ reconGen # gen
+    /\ IF "reconcile" \in FixParts /\ Stale(reconGen)
          THEN /\ dropped' = dropped \cup drained
-              /\ UNCHANGED runs
+              /\ UNCHANGED <<runs, late>>
          ELSE /\ runs' = runs \cup drained
+              /\ Landed(drained)
               /\ UNCHANGED dropped
     /\ drained' = {}
     /\ UNCHANGED <<phase, gen, resets, pending, resolved, touches, settle, snap,
                    settleGen, reconGen, rec2, strayed, dup, delivered>>
+    /\ UNCHANGED Rest3512
 
 Shutdown1 ==
     /\ phase = "s1"
@@ -167,6 +357,8 @@ Shutdown1 ==
     /\ UNCHANGED <<gen, resets, pending, resolved, runs, touches, settle, snap,
                    settleGen, recon, reconGen, drained, dropped, rec2, strayed,
                    dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* Admission, pre-handler resets, then the awaits (configureWarmAttach,
 \* ensureLSPConfigInitialized) before handleSessionStart.
@@ -176,9 +368,11 @@ StartBegin ==
     /\ UNCHANGED <<gen, resets, pending, resolved, runs, touches, settle, snap,
                    settleGen, recon, reconGen, drained, dropped, rec2, strayed,
                    dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* resetCascadeTierSessionState() and runtime.resetForSession(), in one tick
-\* (runtime-session.ts:2407-2408).
+\* (runtime-session.ts handleSessionStart).
 ResetForSession ==
     /\ gen' = gen + 1
     /\ resets' = [resets EXCEPT ![2] = @ + 1]
@@ -192,6 +386,8 @@ StartReset ==
     /\ ResetForSession
     /\ UNCHANGED <<resolved, settle, snap, settleGen, recon, reconGen, drained,
                    dropped, rec2, strayed, dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* pi RPC's second session_start for the same (reason, session id), after
 \* the first has returned (rpc-mode.js awaits rebindSession twice).
@@ -203,25 +399,52 @@ DupStart ==
          ELSE UNCHANGED <<gen, resets, runs, pending, touches>>
     /\ UNCHANGED <<phase, resolved, settle, snap, settleGen, recon, reconGen,
                    drained, dropped, rec2, strayed, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
-\* Session 2's cascade lane records its own tier-3 touch.
+\* The tier-3 record site (clients/dispatch/integration.ts recordOutstandingCascadeTouch). Under "stray" it drops a
+\* touch whose dispatch-captured generation g is no longer current.
+RecordTouch(o, g) ==
+    IF "stray" \in FixParts /\ g # gen
+      THEN /\ dropped' = dropped \cup {o}
+           /\ UNCHANGED touches
+      ELSE /\ touches' = touches \cup {o}
+           /\ UNCHANGED dropped
+
+\* Session 2's tool_result dispatches the pipeline and captures the session
+\* generation (runtime-tool-result.ts handleToolResult); its compute then runs detached.
+Dispatch2 ==
+    /\ phase = "s2" /\ rec2 = "idle"
+    /\ rec2' = "dispatched"
+    /\ d2Gen' = IF "dispatchHoist" \in FixParts THEN Dispatch1Gen ELSE gen
+    /\ UNCHANGED <<phase, gen, resets, pending, resolved, runs, touches, settle,
+                   snap, settleGen, recon, reconGen, drained, dropped, strayed,
+                   dup, delivered, ovf, ovfGen, adm1, adm2, admDropped>>
+    /\ UNCHANGED Rest3568
+    /\ UNCHANGED late
+
+\* Session 2's compute records its own tier-3 touch.
 Record2 ==
-    /\ phase = "s2" /\ ~rec2
-    /\ rec2' = TRUE
-    /\ touches' = touches \cup {2}
+    /\ rec2 = "dispatched"
+    /\ rec2' = "done"
+    /\ RecordTouch(2, d2Gen)
     /\ UNCHANGED <<phase, gen, resets, pending, resolved, runs, settle, snap,
-                   settleGen, recon, reconGen, drained, dropped, strayed, dup,
-                   delivered>>
+                   settleGen, recon, reconGen, drained, strayed, dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* #3512: the still-running session-1 compute records its touch after the
-\* reset (clients/dispatch/integration.ts recordOutstandingCascadeTouch).
+\* reset. Its generation is the one its dispatch captured, unless the
+\* "strayRecordCapture" mutant stamps it at record time.
 Stray ==
-    /\ Strays /\ phase = "s2" /\ ~resolved /\ ~strayed
+    /\ Strays /\ phase = "s2" /\ disp1 /\ ~resolved /\ ~strayed
     /\ strayed' = TRUE
-    /\ touches' = touches \cup {1}
+    /\ RecordTouch(1, IF "strayRecordCapture" \in FixParts
+                        THEN gen ELSE d1Gen)
     /\ UNCHANGED <<phase, gen, resets, pending, resolved, runs, settle, snap,
-                   settleGen, recon, reconGen, drained, dropped, rec2, dup,
-                   delivered>>
+                   settleGen, recon, reconGen, drained, rec2, dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* Session 2's own quiet window reconciles, current generation. It cannot
 \* start while session 1's window is still in progress (`_inProgress`).
@@ -232,6 +455,8 @@ Window2 ==
     /\ UNCHANGED <<phase, gen, resets, pending, resolved, settle, snap,
                    settleGen, recon, reconGen, drained, dropped, rec2, strayed,
                    dup, delivered>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 \* Session 2's turn_end: consumeCascadeRuns() and deliver. A run's origin
 \* projectSeq is session 1's, so getFilesChangedSince(originSeq) in session 2
@@ -243,18 +468,21 @@ TurnEnd2 ==
     /\ UNCHANGED <<phase, gen, resets, pending, resolved, touches, settle, snap,
                    settleGen, recon, reconGen, drained, dropped, rec2, strayed,
                    dup>>
+    /\ UNCHANGED Rest3512
+    /\ UNCHANGED late
 
 Next ==
     \/ Resolve \/ Settled \/ SettleFinish \/ ReconStart \/ ReconFinish
-    \/ Shutdown1 \/ StartBegin \/ StartReset \/ DupStart \/ Record2 \/ Stray
-    \/ Window2 \/ TurnEnd2
+    \/ Shutdown1 \/ StartBegin \/ StartReset \/ DupStart \/ Dispatch2
+    \/ Record2 \/ Stray \/ Admit1 \/ Fire1 \/ Admit2 \/ Resolve2 \/ Window2
+    \/ TurnEnd2 \/ Dispatch1
 
 Spec == Init /\ [][Next]_vars
 
 (* A run computed for session 1 is never delivered in session 2. *)
 NoCrossSessionDelivery == \A d \in delivered : d[1] = d[2]
 
-(* "Session reset still clears it" (runtime-coordinator.ts:615-616): once
+(* "Session reset still clears it" (runtime-coordinator.ts resetForSession): once
    session 2's reset has run, no session-1 run or parked compute is in the
    runtime. *)
 NoCrossSessionState ==
@@ -263,6 +491,18 @@ NoCrossSessionState ==
 (* Catalog shape 54, the no-drop direction: a guard never drops session 2's
    own tier-3 touch. *)
 NoDropFreshTouch == 2 \notin dropped
+
+(* Shape 54 for the admission guard: a compute session 2 admits is never
+   dropped. *)
+NoDropFreshAdmission == 2 \notin admDropped
+
+(* F1 of #3803, #3611: a session-1 write never lands between its session's
+   shutdown and the replacement's reset. session_shutdown retires the scope
+   (index.ts retireOwnScope), so the guard drops it there; counting only the
+   reset's ticket left it to the reset's clear, which a replacement that is
+   late or never starts (#3668's gap) does not run. Checked with the
+   "watchWindow" instrument. *)
+NoWriteBetween == late = {}
 
 (* One session_start mutation pass per session (#2890). *)
 OneResetPerSession == \A s \in Sess : resets[s] <= 1

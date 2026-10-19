@@ -121,6 +121,8 @@ async function main() {
 			`${result.classification.kind}${result.rerunTriggeredThisPass ? " (rerun triggered)" : ""}`,
 	);
 	console.log(result.commentBody);
+	// #4382: one annotation line when the sticky comment could not be written.
+	if (result.commentWarning) console.log(`::warning::${result.commentWarning}`);
 }
 
 main().catch((error) => {

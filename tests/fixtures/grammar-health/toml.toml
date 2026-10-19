@@ -1,0 +1,21 @@
+# Corpus entry: tables, arrays, inline tables, and typed values.
+title = "corpus"
+enabled = true
+ratio = 0.5
+count = 42
+released = 2026-10-07T12:00:00Z
+
+[server]
+host = "localhost"
+ports = [8000, 8001, 8002]
+
+[server.limits]
+timeout = { seconds = 30, retries = 3 }
+
+[[services]]
+name = "web"
+tags = ["a", "b"]
+
+[[services]]
+name = "db"
+path = 'C:\data'

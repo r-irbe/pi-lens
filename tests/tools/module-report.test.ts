@@ -12,6 +12,7 @@ import { createTempFile, setupTestEnvironment } from "../clients/test-utils.js";
 type Recorded = {
 	filePath: string;
 	symbol: { name: string; kind: string; startLine: number; endLine: number };
+	toolCallId?: string;
 };
 
 describe("module_report tool", () => {
@@ -137,7 +138,8 @@ describe("read_enclosing tool", () => {
 			const recorded: Recorded[] = [];
 			const tool = createReadEnclosingTool(
 				() => env.tmpDir,
-				(filePath, symbol) => recorded.push({ filePath, symbol }),
+				(filePath, symbol, toolCallId) =>
+					recorded.push({ filePath, symbol, toolCallId }),
 			);
 
 			const result = await tool.execute(
@@ -158,6 +160,8 @@ describe("read_enclosing tool", () => {
 				endLine: 5,
 			});
 			expect(result.details).toMatchObject({ readRecorded: true });
+			// #3521: the host call id is the record's branch provenance.
+			expect(recorded[0].toolCallId).toBe("read-enclosing");
 		} finally {
 			env.cleanup();
 		}
@@ -263,7 +267,8 @@ describe("read_symbol tool", () => {
 			const recorded: Recorded[] = [];
 			const tool = createReadSymbolTool(
 				() => env.tmpDir,
-				(filePath, symbol) => recorded.push({ filePath, symbol }),
+				(filePath, symbol, toolCallId) =>
+					recorded.push({ filePath, symbol, toolCallId }),
 			);
 			const result = await tool.execute(
 				"1",
@@ -281,6 +286,8 @@ describe("read_symbol tool", () => {
 			expect(recorded[0].symbol.name).toBe("target");
 			expect(recorded[0].symbol.startLine).toBe(2);
 			expect(recorded[0].symbol.endLine).toBe(4);
+			// #3521: the host call id is the record's branch provenance.
+			expect(recorded[0].toolCallId).toBe("1");
 			expect(result.details).toMatchObject({ readRecorded: true });
 		} finally {
 			env.cleanup();

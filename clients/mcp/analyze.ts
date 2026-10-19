@@ -12,19 +12,19 @@
  * + perf impact first-hand rather than inferring it from pasted logs.
  */
 
+import { resolveAnalysisRoot } from "../analysis-root.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CacheManager, MCP_TURN_STATE_OWNER_ID } from "../cache-manager.js";
 import {
 	CASCADE_GRAPH_KINDS,
 	dispatchLintWithResult,
-	getLatencyReports,
 } from "../dispatch/integration.js";
 import { FactStore } from "../dispatch/fact-store.js";
-import type { Diagnostic } from "../dispatch/types.js";
+import type { Diagnostic, DispatchResult } from "../dispatch/types.js";
 import { detectFileKind } from "../file-kinds.js";
 import { getDiagnosticTracker } from "../diagnostic-tracker.js";
-import { getLSPService } from "../lsp/index.js";
+import { getLSPService } from "../lsp/capabilities.js";
 import { PathKeyedMap } from "../path-keyed-map.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadProjectSnapshot } from "../project-snapshot.js";
@@ -269,6 +269,12 @@ interface McpRunnerLatency {
 	durationMs: number;
 	status: string;
 	diagnosticCount: number;
+	/**
+	 * Present when the runner set one (#3781). With `status: "failed"`,
+	 * `"blocking_diagnostics"` means the check ran and its findings failed it;
+	 * any other kind, or none, means the runner produced no usable result.
+	 */
+	failureKind?: string;
 }
 
 export interface McpAnalyzeResult {
@@ -307,6 +313,8 @@ export interface McpAnalyzeResult {
 	lsp?: {
 		ran: boolean;
 		status: string;
+		/** As on the `latency.runners[]` row: why a `failed` LSP run failed (#3781). */
+		failureKind?: string;
 		diagnosticCount: number;
 		durationMs: number;
 	};
@@ -367,6 +375,30 @@ export interface AnalyzeFileOptions {
 	updateGraph?: boolean;
 	/** Explicit MCP writer identity; null must never erase a pi owner. */
 	ownerId?: string;
+}
+
+/**
+ * #3752: the serialized `diagnostics` list must contain one entry for every
+ * count in `counts`. `DispatchResult.diagnostics` is the dispatch's full
+ * visible set, but `DispatchResult.warnings` is NOT a strict subset of it: the
+ * dispatcher appends its synthetic coverage notice (`coverage-unavailable:*` /
+ * `coverage-partial:*`) to `warnings` — and to the rendered `output` — AFTER
+ * `visibleDiagnostics` is finalized, so that entry is counted by
+ * `counts.warnings`/`counts.advisories` while `result.diagnostics` never
+ * carries it. A Go/PHP file with no toolchain on the host therefore reported
+ * `counts.warnings: 1` beside `diagnostics: []`, with no way to see what the
+ * warning was. Merge the warnings bucket in, deduping by the dispatch `id`,
+ * so `counts.diagnostics` and the
+ * listed entries agree in both directions. Every warnings entry except the
+ * coverage notice is the same object as one in `result.diagnostics`, so an
+ * id-based merge only adds the notice.
+ */
+function listDiagnosticsForCounts(result: DispatchResult): Diagnostic[] {
+	const listedIds = new Set(result.diagnostics.map((d) => d.id));
+	return [
+		...result.diagnostics,
+		...result.warnings.filter((w) => !listedIds.has(w.id)),
+	];
 }
 
 function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
@@ -441,11 +473,14 @@ export async function analyzeFile(
 	// caller flags win over the default.
 	const host = createMcpHost({ "no-delta": true, ...options.flags }, cwd);
 
+	// #3573: the recorded row's freshness reference, taken before the
+	// analysis's first read (the warm-up's, whose diagnostics the dispatch can
+	// serve), so a write that lands while the analysis runs is newer than it.
+	const observedAt = Date.now();
 	if (options.warmLsp !== false) {
 		await warmLspForFile(absPath, host);
 	}
 
-	const reportsBefore = getLatencyReports().length;
 	const start = Date.now();
 	// No telemetryModel/telemetryProvider here (#1448): this MCP facade has no
 	// RuntimeCoordinator to hold a host-reported identity (see the module doc
@@ -459,6 +494,13 @@ export async function analyzeFile(
 		undefined,
 		{
 			blockingOnly: options.blockingOnly ?? false,
+			analysisRootMode: resolveAnalysisRoot(absPath, cwd),
+			// #3791: this is a pull surface. Each call is an independent question,
+			// so the synthetic coverage notice must come back on every call rather
+			// than being latched once per session by the dispatcher — otherwise a
+			// second pull of an unanalysable file reads as a false clean. The pi
+			// push surface keeps its once-per-session latch (the default).
+			dedupeCoverageNotice: false,
 		},
 	);
 	const durationMs = Date.now() - start;
@@ -473,7 +515,12 @@ export async function analyzeFile(
 		// under the SAME widget-state key a canonical per-edit write already
 		// uses, instead of an orphaned key no reader (raw or normalized) can
 		// reach.
-		recordDiagnostics(normalizeMapKey(absPath), result.diagnostics);
+		recordDiagnostics(
+			normalizeMapKey(absPath),
+			result.diagnostics,
+			undefined,
+			observedAt,
+		);
 		if (result.diagnostics.length > 0) {
 			getDiagnosticTracker().trackShown(result.diagnostics);
 		}
@@ -563,13 +610,10 @@ export async function analyzeFile(
 		}
 	}
 
-	// dispatchForFile appended a latency report during the call above. Match the
-	// newly-added report for this exact path; fall back to the most recent new
-	// report if the path normalization differs.
-	const newReports = getLatencyReports().slice(reportsBefore);
-	const latencyReport =
-		newReports.find((report) => path.resolve(report.filePath) === absPath) ??
-		newReports[newReports.length - 1];
+	const latencyReport = result.latencyReport;
+	// #3752: the listed set, not just `result.diagnostics`, so every count above
+	// has a matching entry (see {@link listDiagnosticsForCounts}).
+	const listedDiagnostics = listDiagnosticsForCounts(result);
 
 	const lspRunner = latencyReport?.runners.find(
 		(runner) => runner.runnerId === "lsp",
@@ -584,6 +628,9 @@ export async function analyzeFile(
 					lspRunner.status !== "when_skipped" &&
 					lspRunner.status !== "test_file_skipped",
 				status: lspRunner.status,
+				...(lspRunner.failureKind !== undefined && {
+					failureKind: lspRunner.failureKind,
+				}),
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,
 			}
@@ -596,7 +643,7 @@ export async function analyzeFile(
 		durationMs,
 		hasBlockers: result.hasBlockers,
 		counts: {
-			diagnostics: result.diagnostics.length,
+			diagnostics: listedDiagnostics.length,
 			blockers: result.blockers.length,
 			// #2420: `result.warnings` is the dispatch warnings bucket
 			// (`semantic:"warning"|"none"`), which still carries `hint`/`info`-tier
@@ -607,7 +654,7 @@ export async function analyzeFile(
 			fixed: result.fixed.length,
 		},
 		lsp,
-		diagnostics: result.diagnostics.map(toMcpDiagnostic),
+		diagnostics: listedDiagnostics.map(toMcpDiagnostic),
 		latency: latencyReport
 			? {
 					totalDurationMs: latencyReport.totalDurationMs,
@@ -617,6 +664,7 @@ export async function analyzeFile(
 						durationMs: runner.durationMs,
 						status: runner.status,
 						diagnosticCount: runner.diagnosticCount,
+						failureKind: runner.failureKind,
 					})),
 				}
 			: undefined,

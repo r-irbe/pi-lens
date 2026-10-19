@@ -13,9 +13,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	boundUnixSocketPath,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 } from "../../clients/mcp/ipc.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
+import { killProcessTree } from "../support/process-tree.js";
 
 export const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -26,7 +29,7 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 
 // Spawn-heavy MCP smokes keep a tight local deadline, while CI can compensate
 // for a loaded runner without changing the production server's budgets.
-const testTimeoutScale = (() => {
+export const testTimeoutScale = (() => {
 	const parsed = Number(process.env.PI_LENS_TEST_TIMEOUT_SCALE ?? "1");
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 })();
@@ -45,6 +48,15 @@ export class McpHarness {
 	private buffer = "";
 	private readonly workspaceDir: string;
 	private readonly isolationDir: string;
+	/**
+	 * #4133: every scanner's report directory lives under the process tmpdir and
+	 * is removed in a `finally`; a child SIGKILLed mid-scan leaves it behind.
+	 * This scanner-only root is inside {@link isolationDir}, so the child's
+	 * orphaned report directory is swept by {@link dispose} while the child's
+	 * whole TMPDIR stays shared with the parent (the IPC socket and the turn-end
+	 * status file depend on that).
+	 */
+	private readonly scannerTempDir: string;
 	private pending = new Map<number, (msg: Record<string, unknown>) => void>();
 	private defaultTimeoutMs: number;
 
@@ -65,6 +77,8 @@ export class McpHarness {
 		this.isolationDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-mcp-isolation-"),
 		);
+		this.scannerTempDir = path.join(this.isolationDir, "scanner-tmp");
+		fs.mkdirSync(this.scannerTempDir, { recursive: true });
 		const env = {
 			...process.env,
 			PILENS_DATA_DIR:
@@ -72,6 +86,8 @@ export class McpHarness {
 			PI_LENS_HOME:
 				options.env?.PI_LENS_HOME ?? path.join(this.isolationDir, "home"),
 			...options.env,
+			PI_LENS_TEST_SCANNER_TMPDIR: this.scannerTempDir,
+			PI_LENS_TEST_SCANNER_HARNESS: "1",
 		};
 		if (
 			path.resolve(env.PILENS_DATA_DIR) ===
@@ -105,6 +121,11 @@ export class McpHarness {
 				nl = this.buffer.indexOf("\n");
 			}
 		});
+	}
+
+	/** The harness-owned root the child's scanner report directories land in. */
+	scannerReportRoot(): string {
+		return this.scannerTempDir;
 	}
 
 	request(
@@ -141,11 +162,22 @@ export class McpHarness {
 		});
 	}
 
+	/** SIGKILL the server and wait for it to exit, with no endpoint cleanup: the
+	 *  non-graceful end that leaves the server's socket file behind (#4353). */
+	kill(): Promise<void> {
+		return new Promise((resolve) => {
+			if (this.child.exitCode !== null || this.child.signalCode !== null)
+				return resolve();
+			this.child.once("exit", () => resolve());
+			this.child.kill("SIGKILL");
+		});
+	}
+
 	dispose(): void {
 		const endpoints = [
 			ipcPathForCwd(this.workspaceDir),
 			diagnosticsIpcPathForCwd(this.workspaceDir, this.child.pid ?? 0),
-		];
+		].flatMap((endpoint) => [endpoint, boundUnixSocketPath(endpoint)]);
 		const cleanup = (): void => {
 			for (const endpoint of endpoints) {
 				try {
@@ -157,16 +189,18 @@ export class McpHarness {
 		};
 		this.child.stdin.end();
 		// The harness is teardown-only. Force the child down so its exit cleanup
-		// runs before Vitest can terminate this worker.
-		this.child.kill("SIGKILL");
+		// runs before Vitest can terminate this worker. The whole tree: the server's
+		// own children outlive a plain SIGKILL and keep writing under PI_LENS_HOME
+		// while the removal below runs (#4081).
+		killProcessTree(this.child);
 		// The server binds a stable per-workspace socket (clients/mcp/ipc.ts).
 		// Unlink before and after child exit: kill() is asynchronous, and the
 		// child can finish binding after the first cleanup (#2912).
 		cleanup();
 		this.child.once("exit", cleanup);
 		if (!this.workspaceDir || this.workspaceDir !== process.cwd()) {
-			fs.rmSync(this.workspaceDir, { recursive: true, force: true });
+			removeTempDirSync(this.workspaceDir);
 		}
-		fs.rmSync(this.isolationDir, { recursive: true, force: true });
+		removeTempDirSync(this.isolationDir);
 	}
 }

@@ -368,6 +368,7 @@ export const functionFactProvider: FactProvider = {
 		await extractFactsFromTree(
 			ctx,
 			store,
+			functionFactProvider.id,
 			{ "file.functionSummaries": [] },
 			(root) => {
 				const summaries: FunctionSummary[] = [];

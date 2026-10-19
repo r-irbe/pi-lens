@@ -1,6 +1,10 @@
 import { logLatency } from "./latency-logger.js";
-import { BoundedFifoMap } from "./bounded-cache.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import {
+	defineSessionStore,
+	type SessionScope,
+	scopeCell,
+} from "./session-scope.js";
 
 type ToolSetMutationReason =
 	| "fresh_session_lazy_deactivation"
@@ -14,64 +18,66 @@ export interface ToolSetMutation {
 	deferralApplies: boolean;
 }
 
-// pi re-runs the extension factory for session rebuilds, but imports this
-// module once per process. Keep conversation activation memory here, keyed by
-// pi's session file rather than by a factory closure or process-wide session.
-export const REMEMBERED_LAZY_TOOLS_MAX_SESSIONS = 128;
-const rememberedLazyToolsBySessionFile = new BoundedFifoMap<
-	string,
-	Set<string>
->(REMEMBERED_LAZY_TOOLS_MAX_SESSIONS);
+const LAZY_TOOL_MEMORY = "lazy-tool-memory";
+
+/** The lazy tools the model activated in `scope`'s conversation, in activation order. */
+function memory(scope: SessionScope): Set<string> {
+	return scopeCell(
+		scope,
+		LAZY_TOOL_MEMORY,
+		() => new Set<string>(),
+	) as Set<string>;
+}
+
+/**
+ * The conversation's lazy-tool activations (#3604, re-scoped by #3609 N8):
+ * one cell per session scope, so a concurrent secondary keeps its own
+ * (#3653). pi re-runs the factory on every rebuild, so the cell crosses to
+ * the next activation through the hand-off and the sidecar. `/tree` keeps it
+ * (D7): an extra tool costs prompt bytes, never correctness, and dropping one
+ * would change the prompt-cache prefix.
+ */
+export const lazyToolMemoryStore = defineSessionStore<string[]>({
+	name: LAZY_TOOL_MEMORY,
+	policy: {
+		startup: "adopt",
+		new: "reset",
+		resume: "adopt",
+		fork: "adopt",
+		reload: "adopt",
+	},
+	snapshot: (scope) => [...memory(scope)],
+	restore: (scope, payload) => {
+		if (!Array.isArray(payload)) return { itemsIn: 0, itemsKept: 0 };
+		const before = memory(scope).size;
+		for (const name of payload)
+			if (typeof name === "string") memory(scope).add(name);
+		return { itemsIn: payload.length, itemsKept: memory(scope).size - before };
+	},
+	reason:
+		"the lazy tools a conversation activated, restored on every rebuild so the advertised tool list keeps its prompt-cache prefix",
+});
 
 export function rememberLazyTools(
-	sessionFile: string | undefined,
+	scope: SessionScope | undefined,
 	names: readonly string[],
 ): void {
-	if (!sessionFile) {
+	if (!scope) {
 		recordDegradationOnce({
-			kind: "tool-set-session-file-unavailable",
+			kind: "tool-set-scope-unavailable",
 			subject: "activation",
-			reason: "session-file identity unavailable; activation memory is inert",
+			reason:
+				"a lazy-tool activation arrived before its session scope began; activation memory is inert",
 		});
 		return;
 	}
-	const remembered =
-		rememberedLazyToolsBySessionFile.get(sessionFile) ?? new Set<string>();
-	for (const name of names) remembered.add(name);
-	rememberedLazyToolsBySessionFile.set(sessionFile, remembered);
+	for (const name of names) memory(scope).add(name);
 }
 
 export function getRememberedLazyTools(
-	sessionFile: string | undefined,
+	scope: SessionScope | undefined,
 ): ReadonlySet<string> {
-	return sessionFile
-		? (rememberedLazyToolsBySessionFile.get(sessionFile) ?? new Set<string>())
-		: new Set<string>();
-}
-
-export function clearRememberedLazyTools(
-	sessionFile: string | undefined,
-): void {
-	if (sessionFile) rememberedLazyToolsBySessionFile.delete(sessionFile);
-}
-
-export function inheritRememberedLazyTools(
-	parentSessionFile: string | undefined,
-	childSessionFile: string | undefined,
-): void {
-	if (
-		!parentSessionFile ||
-		!childSessionFile ||
-		parentSessionFile === childSessionFile
-	)
-		return;
-	const remembered = rememberedLazyToolsBySessionFile.get(parentSessionFile);
-	if (remembered)
-		rememberedLazyToolsBySessionFile.set(childSessionFile, new Set(remembered));
-}
-
-export function resetRememberedLazyToolsForTests(): void {
-	rememberedLazyToolsBySessionFile.clear();
+	return scope ? memory(scope) : new Set<string>();
 }
 
 /** The only part of the host model object this module reads. */
@@ -99,15 +105,15 @@ export function supportsDeferredTools(
 }
 
 /**
- * A fresh logical conversation — the only reasons that start with an empty
- * activation memory. `undefined` is included because older hosts fire
- * `session_start` with no `reason` at all.
+ * A fresh logical conversation, for the `tool_set_mutation` reason label.
+ * `undefined` is included because older hosts fire `session_start` with no
+ * `reason` at all.
  *
  * Every OTHER reason (fork/reload/resume) is a session REBUILD: the host
  * constructs a brand-new AgentSession with `includeAllExtensionTools: true`
  * (pi `core/agent-session.js`), so every registered pi-lens tool is active
- * again by the time our handler runs, while pi-lens's own extension closure
- * state survives. Those reasons must RESTORE the previous posture, not skip.
+ * again by the time our handler runs. Those reasons must RESTORE the previous
+ * posture, not skip.
  */
 export function isFreshSessionStart(reason: unknown): boolean {
 	return reason === undefined || reason === "startup" || reason === "new";

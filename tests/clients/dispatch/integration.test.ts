@@ -53,6 +53,7 @@ import {
 } from "../../../clients/dispatch/dispatcher.js";
 import { runProviders } from "../../../clients/dispatch/fact-runner.js";
 import { getFactStoreEvictionReporter } from "../../../clients/dispatch/fact-store.js";
+import { analyzeFile } from "../../../clients/mcp/analyze.js";
 
 const emptyDispatchResult = {
 	diagnostics: [],
@@ -191,6 +192,70 @@ describe("Dispatch Integration", () => {
 			expect(result.diagnostics).toHaveLength(1);
 		});
 
+		// #3791: the coverage notice's push/pull axis is threaded from the MCP
+		// pull facade through this seam to `dispatchForFile`. These assert the
+		// pass-through the same way this file already observes the
+		// telemetryModel/telemetryProvider positional hop: `dispatchForFile` is a
+		// true process boundary here (real runners would spawn), so the argument
+		// it receives IS the observable contract.
+		it("forwards the pull coverage-dedupe opt-out to dispatchForFile (#3791)", async () => {
+			vi.mocked(dispatchForFile).mockClear();
+
+			await dispatchLintWithResult(
+				"app.ts",
+				"/project",
+				{ getFlag: () => false },
+				undefined,
+				undefined,
+				{ dedupeCoverageNotice: false },
+			);
+
+			expect(dispatchForFile).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.anything(),
+				expect.anything(),
+				undefined,
+				{ dedupeCoverageNotice: false },
+			);
+		});
+
+		it("omits the coverage-dedupe key on the push path (#3791)", async () => {
+			vi.mocked(dispatchForFile).mockClear();
+
+			await dispatchLintWithResult("app.ts", "/project", {
+				getFlag: () => false,
+			});
+
+			const options = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[4];
+			// An explicit `{ dedupeCoverageNotice: undefined }` is not the same
+			// contract as an absent key: the dispatcher's `?? true` would still
+			// default it, but the object identity a consumer sees must not carry
+			// the key on the push path.
+			expect(Object.keys(options ?? {})).toEqual([]);
+		});
+
+		it("routes the MCP analyze facade through the pull opt-out (#3791)", async () => {
+			const dir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-analyze-pull-opt-out-"),
+			);
+			try {
+				const file = path.join(dir, "main.go");
+				fs.writeFileSync(file, "package main\n\nfunc main() {}\n");
+				vi.mocked(dispatchForFile).mockClear();
+
+				await analyzeFile(file, dir, {
+					flags: { "no-lsp": true },
+					warmLsp: false,
+					record: false,
+				});
+
+				const options = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[4];
+				expect(options).toEqual({ dedupeCoverageNotice: false });
+			} finally {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it("returns result with warnings but no blockers", async () => {
 			vi.mocked(dispatchForFile).mockResolvedValue({
 				diagnostics: [
@@ -296,6 +361,28 @@ describe("Dispatch Integration", () => {
 			const ctx = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[0];
 			expect(ctx?.telemetryModel).toBe("claude-sonnet-4-5");
 			expect(ctx?.telemetryProvider).toBe("anthropic");
+		});
+
+		it("passes the tool_result's session through to the dispatch context (#3568)", async () => {
+			// A collect-later runner defers its result through this handle
+			// (runner-collect-later.test.ts pins the drop); a severed hop here
+			// leaves that guard inert in production.
+			const sessionGeneration = {
+				generation: 3,
+				isCurrent: () => true,
+				guardedWrite: <T>(_subject: string, write: () => T) => write(),
+			};
+			await dispatchLintWithResult(
+				"app.ts",
+				"/project",
+				{ getFlag: () => false },
+				undefined,
+				undefined,
+				{ sessionGeneration },
+			);
+
+			const ctx = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[0];
+			expect(ctx?.sessionGeneration).toBe(sessionGeneration);
 		});
 	});
 

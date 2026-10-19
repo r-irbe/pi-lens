@@ -12,6 +12,9 @@ permissions:
 
 jobs:
   stale:
+    # #4053: closes and labels issues and PRs, so a branch dispatch must
+    # not run it.
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     # refs #3123: bounds a hang against GitHub's 360-min default.
     # Measured max over last 10 successful master runs: 8s; timeout = floor of

@@ -107,6 +107,10 @@ criticals = "criticals"
 # Substring of the identifier `boundaryCalle`
 # (clients/dispatch/rules/unsafe-boundary.ts).
 calle = "calle"
+# Real npm command aliases (`npm isntall`, `npm udpate`), spelled in the
+# #4044 verb list in scripts/hooks/guard-bash.mjs so the hook denies them.
+isntall = "isntall"
+udpate = "udpate"
 # "PnP" (Yarn Plug'n'Play) splits into "Pn" + "P" (clients/sg-runner.ts).
 pn = "pn"
 # `caf2ee8` is a git commit-hash fragment in a code comment

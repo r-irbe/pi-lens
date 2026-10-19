@@ -88,6 +88,7 @@ import type { BootstrapClients } from "../bootstrap.js";
 import type { CacheManager } from "../cache-manager.js";
 import type { RuntimeCoordinator } from "../runtime-coordinator.js";
 import { applyDispositionsMultiFile } from "../diagnostic-dispositions.js";
+import { parseScannedAtMs } from "../advisory-provenance.js";
 import { getKnipIgnorePatterns } from "../file-utils.js";
 import { isAtOrAboveHomeDir, realpathOrResolve } from "../path-utils.js";
 import { isSameOrWithin } from "../lsp/server.js";
@@ -244,6 +245,23 @@ export const ANALYZER_IDS = [
 
 function pushUnique(list: string[], id: string): void {
 	if (!list.includes(id)) list.push(id);
+}
+
+/**
+ * #3600: the time a heavyweight lane observed the bytes its rows were computed
+ * from. Prefer the result's own `scannedAt`, stamped at the top of each
+ * client's run body BEFORE it reads anything: when this lane JOINS another
+ * caller's in-flight run, the initiator's stamp is the real read time, not
+ * this lane's later start. The lane start is only the fallback for a result
+ * that carries no stamp at all (a hand-rolled double, or an early shape that
+ * returned before its run body) — for a JOINED run that fallback would be
+ * LATER than the read, which is why every real client run body stamps.
+ */
+function laneObservedAtMs(
+	scannedAt: string | number | undefined,
+	startedAtMs: number,
+): number {
+	return parseScannedAtMs(scannedAt) ?? startedAtMs;
 }
 
 /**
@@ -420,6 +438,7 @@ export async function fetchFreshProjectDiagnostics(
 		elapsedMs: number,
 		analysedRoot: boolean,
 		analysis?: { analyzedFiles?: string[] },
+		observedAt?: number,
 	): void {
 		if (analysedRoot) {
 			pushUnique(analyzed, id);
@@ -456,8 +475,15 @@ export async function fetchFreshProjectDiagnostics(
 			}
 		}
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
+		// #3600: the row carries the lane's own observation time through the
+		// #1888 fold, which otherwise stamps it with the project scan's time or
+		// the fold's `now`.
+		const stamped =
+			observedAt === undefined
+				? adapted
+				: adapted.map((diagnostic) => ({ ...diagnostic, observedAt }));
 		const kept = applyDispositionsMultiFile(
-			adapted,
+			stamped,
 			analysisRoot,
 			(d) => d.filePath,
 		);
@@ -524,6 +550,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -571,6 +598,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -597,6 +625,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -641,6 +670,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -686,6 +716,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -736,6 +767,7 @@ export async function fetchFreshProjectDiagnostics(
 					Date.now() - startMs,
 					false,
 					result,
+					laneObservedAtMs(result.scannedAt, startMs),
 				);
 				return;
 			}
@@ -752,6 +784,7 @@ export async function fetchFreshProjectDiagnostics(
 					Date.now() - startMs,
 					true,
 					result,
+					laneObservedAtMs(result.scannedAt, startMs),
 				);
 				return;
 			}
@@ -764,6 +797,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -801,6 +835,7 @@ export async function fetchFreshProjectDiagnostics(
 				Date.now() - startMs,
 				result.analyzed === true,
 				result,
+				laneObservedAtMs(result.scannedAt, startMs),
 			);
 		}),
 
@@ -842,6 +877,7 @@ export async function fetchFreshProjectDiagnostics(
 						Date.now() - startMs,
 						result.analyzed === true,
 						result,
+						laneObservedAtMs(result.scannedAt, startMs),
 					);
 				}),
 			);
@@ -906,6 +942,19 @@ export async function fetchFreshProjectDiagnostics(
 				// Never authoritative: this lane reads the cache turn_end wrote,
 				// it never runs a suite over the root this call (#2154).
 				false,
+				undefined,
+				// #3600: the batch's own launch stamp (`launchedFrom`), taken at
+				// turn_end BEFORE the suite ran — the safe (at-or-before the read)
+				// direction. `meta.timestamp` is the cache WRITE time, i.e. AFTER
+				// the suite read its files, so an edit during the run would look
+				// older than the row and escape the widget gate. A legacy entry
+				// with no `launchedFrom` falls back to its write time, then to the
+				// lane start, rather than dropping the row.
+				laneObservedAtMs(
+					cached.data.launchedFrom?.revision.capturedAt ??
+						cached.meta.timestamp,
+					startMs,
+				),
 			);
 		}),
 	];

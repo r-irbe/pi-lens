@@ -8,6 +8,7 @@ import {
 	CACHE_VERSION,
 	RuleCache,
 } from "../../../clients/cache/rule-cache.js";
+import { getProjectDataDir } from "../../../clients/file-utils.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -138,7 +139,11 @@ describe("RuleCache", () => {
 	// version bumped. `set()` now prunes stale-version siblings after writing.
 	it("prunes an orphaned prior-version cache file on set()", () => {
 		const { cwd, ruleFile } = setupProject();
-		const staleFile = path.join(cwd, ".pi-lens", "cache", "go-rules-v3.json");
+		const staleFile = path.join(
+			getProjectDataDir(cwd),
+			"cache",
+			"go-rules-v3.json",
+		);
 		fs.mkdirSync(path.dirname(staleFile), { recursive: true });
 		fs.writeFileSync(staleFile, JSON.stringify({ version: "v3" }), "utf-8");
 
@@ -161,8 +166,7 @@ describe("RuleCache", () => {
 		);
 
 		const currentFile = path.join(
-			cwd,
-			".pi-lens",
+			getProjectDataDir(cwd),
 			"cache",
 			`go-rules-${CACHE_VERSION}.json`,
 		);
@@ -236,6 +240,36 @@ describe("RuleCache", () => {
 		expect(cache.get(ruleFilesForLanguage("tsx", cwd))).not.toBeNull();
 	});
 
+	it("invalidates a cache when a user-level rule changes", () => {
+		const { cwd } = setupProject();
+		const userHome = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-user-rules-"),
+		);
+		cleanup.push(userHome);
+		const previous = process.env.PI_LENS_HOME;
+		process.env.PI_LENS_HOME = userHome;
+		try {
+			const userRule = path.join(
+				userHome,
+				"rules",
+				"tree-sitter-queries",
+				"typescript",
+				"user.yml",
+			);
+			fs.mkdirSync(path.dirname(userRule), { recursive: true });
+			fs.writeFileSync(userRule, "id: user\nquery: (identifier) @X\n");
+			const cache = new RuleCache("typescript", cwd);
+			const files = ruleFilesForLanguage("typescript", cwd);
+			cache.set(files, []);
+			expect(cache.get(files)).not.toBeNull();
+			fs.writeFileSync(userRule, "id: user\nquery: (string) @X\n");
+			expect(cache.get(ruleFilesForLanguage("typescript", cwd))).toBeNull();
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previous;
+		}
+	});
+
 	it("invalidates the cache when the schema version changes", () => {
 		const { cwd, ruleFile } = setupProject();
 		const cache = new RuleCache("typescript", cwd);
@@ -258,8 +292,7 @@ describe("RuleCache", () => {
 		);
 
 		const cacheFile = path.join(
-			cwd,
-			".pi-lens",
+			getProjectDataDir(cwd),
 			"cache",
 			`typescript-rules-${CACHE_VERSION}.json`,
 		);
@@ -406,8 +439,7 @@ describe("RuleCache", () => {
 		const stat = fs.statSync(ruleFile);
 
 		const cacheFile = path.join(
-			cwd,
-			".pi-lens",
+			getProjectDataDir(cwd),
 			"cache",
 			`typescript-rules-${CACHE_VERSION}.json`,
 		);

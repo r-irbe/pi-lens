@@ -64,6 +64,7 @@ import type {
 	CascadeSkipReason,
 } from "../cascade-types.js";
 import { getDiagnosticTracker } from "../diagnostic-tracker.js";
+import type { GenerationHandle } from "../generation-guard.js";
 import {
 	classifyCascadeWaitTier,
 	isTierAwareCascadeEnabled,
@@ -76,20 +77,24 @@ import {
 	touchCoverageGap,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
-import { getLSPService } from "../lsp/index.js";
+import { getLSPService } from "../lsp/capabilities.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
 import {
 	resetAstGrepNapiLoadState,
 	resetAstGrepUnsupportedLanguageLog,
 } from "./runners/ast-grep-napi.js";
-import { resetTreeSitterClientLoadState } from "../tree-sitter-shared.js";
+import {
+	isTreeSitterWasmAborted,
+	resetTreeSitterClientLoadState,
+} from "../tree-sitter-shared.js";
 import { isTestRoleCollateral } from "../collateral-test-role.js";
 import {
 	clearReviewGraphWorkspaceCache,
 	getGraphBuildInfoForGraph,
 	getGraphImportChanges,
 	graphBuildInfoIsTrustworthy,
+	graphWasmTrapDetail,
 } from "../review-graph/builder.js";
 import {
 	buildReverseDependencyIndexFromGraph,
@@ -118,6 +123,7 @@ import {
 	type WordIndex,
 } from "../word-index.js";
 import { reconcileCascadeNeighborLspErrors } from "../widget-state.js";
+import { writeOrderToken } from "../write-ordering-guard.js";
 import { findAuxiliaryProfileForSource } from "./auxiliary-lsp.js";
 // Register fact providers. All register eagerly here (the dispatch entry) — the
 // tree-sitter-backed providers included, since the parsing stack loads
@@ -996,6 +1002,8 @@ export async function computeCascadeForFile(
 		dbg?: (msg: string) => void;
 		/** Turn/write sequence from RuntimeCoordinator — scopes cascade caches (A5/B10) */
 		turnSeq?: number;
+		/** #3540 r2: the primary edit's order turn, for its widget writes. */
+		orderTurn?: number;
 		writeSeq?: number;
 		/**
 		 * Authoritative workspace root (`PipelineContext.projectRoot`). `cwd` above
@@ -1042,6 +1050,13 @@ export async function computeCascadeForFile(
 		wordIndex?: WordIndex | null;
 		/** Debounced-persist hook for the updated word index (#348 phase 2). */
 		onWordIndexUpdated?: (index: WordIndex) => void;
+		/**
+		 * #3512: the session current when this compute was dispatched. It runs
+		 * detached and can outlive a same-cwd replacement, whose reset has
+		 * already cleared the tier-3 registry; a touch it records afterwards is
+		 * dropped through this handle rather than reconciled for the new session.
+		 */
+		sessionGeneration?: GenerationHandle;
 	} = {},
 ): Promise<CascadeRun> {
 	const reverseDepsTimersToRelease = new Set<string>();
@@ -1055,6 +1070,7 @@ export async function computeCascadeForFile(
 			hasBlockers = false,
 			dbg,
 			turnSeq = 0,
+			orderTurn,
 			writeSeq,
 			projectRoot,
 			seqState,
@@ -1062,7 +1078,10 @@ export async function computeCascadeForFile(
 			fileContent,
 			wordIndex,
 			onWordIndexUpdated,
+			sessionGeneration,
 		} = options;
+		// #3540: the primary edit's widget order, turn first.
+		const widgetOrder = writeOrderToken(orderTurn, writeSeq);
 
 		ensureCascadeTurnScope(turnSeq);
 
@@ -1344,6 +1363,11 @@ export async function computeCascadeForFile(
 			if (
 				(graphBuildInfo.mode === "skipped" ||
 					graph.persistCoverage?.partial === true ||
+					// #3605: a wasm trap cost some file its symbols and imports.
+					(graphBuildInfo.wasmTrappedFiles ?? 0) > 0 ||
+					// #3678 F-B: once the process-wide runtime aborts, later builds
+					// contain no tree-sitter symbols and may have no trapped-file count.
+					isTreeSitterWasmAborted() ||
 					!graphBuildInfoTrustworthy) &&
 				!impact.indeterminate
 			) {
@@ -1364,9 +1388,13 @@ export async function computeCascadeForFile(
 								: graphBuildInfo.skipReason === "unsafe_root"
 									? "review graph skipped — workspace root is at/above home dir"
 									: `review graph unavailable (${graphBuildInfo.skipReason ?? "skipped"})`
-							: coverage?.sourceFilesTruncated
-								? "review graph partial — source walk stopped at its visited-entry budget"
-								: "review graph partial — persisted graph coverage is incomplete",
+							: isTreeSitterWasmAborted()
+								? "review graph degraded — tree-sitter is disabled for this process until restart"
+								: graphBuildInfo.wasmTrappedFiles
+									? graphWasmTrapDetail(graphBuildInfo.wasmTrappedFiles)
+									: coverage?.sourceFilesTruncated
+										? "review graph partial — source walk stopped at its visited-entry budget"
+										: "review graph partial — persisted graph coverage is incomplete",
 					sourceFileCount: graphBuildInfo.sourceFileCount,
 					maxFileCount: graphBuildInfo.maxFileCount,
 				};
@@ -1890,7 +1918,7 @@ export async function computeCascadeForFile(
 				reconcileCascadeNeighborLspErrors(
 					neighborPath,
 					cascadeReconcilableLspErrors(entry.diags, neighborPath),
-					writeSeq,
+					widgetOrder,
 					entry.ts,
 				);
 
@@ -1972,6 +2000,10 @@ export async function computeCascadeForFile(
 					// #3481: stamped before the read; the touches below run after awaits,
 					// and the stamp keeps them from landing over a newer write's touch.
 					const readStamp = performance.now();
+					// #3573: the wall-clock twin, the confirmed touch's widget row's
+					// `observedAt`: a dependency written while the touch waits on the
+					// server is then newer than the row.
+					const readAtMs = Date.now();
 					const content = await nodeFs.promises.readFile(neighborPath, "utf8");
 
 					// #458/#1444: tier-aware cascade-lane wait. A Tier-3 silent server
@@ -2032,11 +2064,15 @@ export async function computeCascadeForFile(
 										});
 										return undefined;
 									}
-									recordOutstandingCascadeTouch({
-										filePath: neighborPath,
-										serverId: spawnedForTouch.client.serverId,
-										touchedAt,
-									});
+									const recordTouch = () =>
+										recordOutstandingCascadeTouch({
+											filePath: neighborPath,
+											serverId: spawnedForTouch.client.serverId,
+											touchedAt,
+										});
+									if (sessionGeneration)
+										sessionGeneration.guardedWrite(neighborPath, recordTouch);
+									else recordTouch();
 									const durationMs = Date.now() - neighborStart;
 									if (tier === "collect-later") collectLaterSkipped++;
 									// F1: both tier3-silent and collect-later skip the in-lane
@@ -2226,7 +2262,7 @@ export async function computeCascadeForFile(
 					// see `cascadeReconcilableLspErrors`) so a live biome/ruff/aux finding or
 					// LSP warning survives this errors-only re-check. Keyed by the primary
 					// edit's `writeSeq` so a genuinely newer per-edit write still wins the
-					// WriteOrderingGuard. `observedAt` stays now (a fresh touch). The
+					// WriteOrderingGuard. `observedAt` is the neighbor's read (#3573). The
 					// inconclusive touch, the BOUND-FALSE touch (#1095 — computed against a
 					// diverged disk state), the tier-3-silent skip, the recently-clean
 					// short-circuit, the within-turn cache hit, and the rejected-touch
@@ -2236,7 +2272,8 @@ export async function computeCascadeForFile(
 						reconcileCascadeNeighborLspErrors(
 							neighborPath,
 							cascadeReconcilableLspErrors(rawDiags.diags, neighborPath),
-							writeSeq,
+							widgetOrder,
+							readAtMs,
 						);
 					}
 
@@ -2831,10 +2868,21 @@ export async function dispatchLintWithResult(
 		projectRoot?: string;
 		/** Ordered per-file pipeline token, when called from tool_result. */
 		writeIndex?: number;
+		/** #3568: the tool_result handler's session. */
+		sessionGeneration?: GenerationHandle;
+		/** Stable session identity for deferred runner delivery. */
+		sessionId?: string;
 		/** Runtime telemetry identity, when known (#1448) — see
 		 * DispatchContext.telemetryModel's doc. */
 		telemetryModel?: string;
 		telemetryProvider?: string;
+		analysisRootMode?: import("../analysis-root.js").AnalysisRootMode;
+		/**
+		 * Pull surface (`pilens_analyze`): emit the coverage notice on every call
+		 * instead of latching it once per session (refs #3791). Leave unset for
+		 * the pi push surface, which keeps the once-per-session latch.
+		 */
+		dedupeCoverageNotice?: boolean;
 	},
 ): Promise<DispatchResult> {
 	// Default true preserves the per-edit fast path (errors only). Callers that
@@ -2851,6 +2899,9 @@ export async function dispatchLintWithResult(
 		options?.writeIndex,
 		options?.telemetryModel,
 		options?.telemetryProvider,
+		options?.sessionGeneration,
+		options?.sessionId,
+		options?.analysisRootMode,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 	// #2243 item 2: release the pin when the dispatch settles.
@@ -2890,7 +2941,19 @@ export async function dispatchLintWithResult(
 		}
 
 		await runProviders(ctx);
-		const result = await dispatchForFile(ctx, groups, sessionRunnerRegistry);
+		const result = await dispatchForFile(
+			ctx,
+			groups,
+			sessionRunnerRegistry,
+			undefined,
+			// exactOptionalPropertyTypes: omit the key rather than pass
+			// `undefined`, which the target option type rejects (#3791).
+			{
+				...(options?.dedupeCoverageNotice !== undefined && {
+					dedupeCoverageNotice: options.dedupeCoverageNotice,
+				}),
+			},
+		);
 		trackSessionSlopStats(ctx, result.diagnostics);
 
 		// Schedule debounced ast-grep warning scan for jsts files.

@@ -36,8 +36,8 @@
  * - {@link wrapSessionEventHandlerWithResult} — `context` (#1929), which must
  *   hand the host back a message list on the live path.
  *
- * Five registrations stay unwrapped on purpose: `resources_discover`,
- * `session_before_fork`, `tool_call`, `session_shutdown`, and `message_end`.
+ * Four registrations stay unwrapped on purpose: `resources_discover`,
+ * `tool_call`, `session_shutdown`, and `message_end`.
  * `tests/clients/session-event-guard-sweep.test.ts` is the source of truth for
  * that split. It scans every registration in `index.ts` and reds unless the
  * handler is wrapped or carries a written reason, so this paragraph can go

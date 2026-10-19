@@ -140,9 +140,22 @@ let recentPhases: Array<{ phase: string; ts: string }> = [];
  * from opengrep's `semgrep/rulesRefreshed` notification handler, not work of
  * its own.
  *
+ * #3519/#3523/#3555: `read_guard_conversation_read` and `read_widening_note`
+ * are zero-duration records of a read the guard took from the conversation's
+ * text and of a widened read being labelled; the tool_result owns the work.
+ *
  * #2044: `test_runner_failed_target_state` is a zero-duration decision after a
  * bounded filesystem probe. The surrounding turn-end test-selection phase owns
  * any real work, so this row must not replace it in stall attribution.
+ *
+ * #3873: `session_handoff_slot`, `session_handoff_adopt`,
+ * `session_store_action` and `session_end_fence_rollup` are zero-duration
+ * decision and rollup rows written inside the session transition that owns any
+ * real stall. `format_late_resync_chained` marks a formatter give-up and its
+ * `durationMs` is the formatter's age at the give-up, not work of its own.
+ *
+ * #4368 r1 F3: `lsp_created_import_scan_rollup` is a zero-duration session-end
+ * rollup of the created-module producer.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -154,6 +167,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"session_end_bus_rollup",
 	"cache_usage_summary",
 	"test_runner_failed_target_state",
+	"turn_end_test_selection",
 	"lsp_aux_wait_outcome",
 	"tool_set_mutation",
 	"availability_decision",
@@ -171,6 +185,14 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"lsp_empty_first_publish_held",
 	"lsp_diagnostics_fence",
 	"lsp_rules_refreshed",
+	"read_guard_conversation_read",
+	"read_widening_note",
+	"session_handoff_slot",
+	"session_handoff_adopt",
+	"session_store_action",
+	"session_end_fence_rollup",
+	"format_late_resync_chained",
+	"lsp_created_import_scan_rollup",
 ]);
 
 /**

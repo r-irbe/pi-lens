@@ -19,6 +19,7 @@
  * corrupt the message stream.
  */
 
+import { setProjectTrustState } from "../clients/project-trust.js";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
@@ -33,6 +34,7 @@ import { AstGrepClient } from "../clients/ast-grep-client.js";
 import { CacheManager } from "../clients/cache-manager.js";
 import {
 	getDegradationSummary,
+	incrementDegradationCount,
 	recordDegradationOnce,
 	renderDegradationLines,
 } from "../clients/degradation-ledger.js";
@@ -75,6 +77,7 @@ import {
 	summarizeScan,
 	symbolSearch,
 	treeSitterRuntimeStatus,
+	unlinkStaleUnixSocket,
 	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmAnalyzeRequest,
 	type WarmTurnEndRequest,
@@ -98,9 +101,15 @@ import {
 	observeSituationalToolCall,
 	startSituationalToolTelemetrySession,
 } from "../clients/situational-tool-telemetry.js";
-import { flushExtensionLog } from "../clients/extension-log.js";
+import { logExtension, flushExtensionLog } from "../clients/extension-log.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
 import { shouldInitializeSessionRoot } from "../clients/lsp/session-roots.js";
+import {
+	findIgnoredArguments,
+	ignoredArgumentsStructured,
+	refusalResult,
+	withIgnoredArguments,
+} from "./tool-arguments.js";
 import {
 	computeBuildStamp,
 	STALE_SERVED_BY_FRESH,
@@ -336,14 +345,9 @@ function isWithinServerWorkspace(cwd: string): boolean {
 
 function startIpcServer(): void {
 	// POSIX: a stale socket file blocks listen; remove it first. (Named pipes on
-	// Windows don't need this.)
-	if (process.platform !== "win32") {
-		try {
-			fs.unlinkSync(IPC_PATH);
-		} catch {
-			// no stale socket — fine
-		}
-	}
+	// Windows don't need this; the helper is a no-op there.) It names the bound
+	// file and removes only a socket, never an unrelated file the cut lands on.
+	unlinkStaleUnixSocket(IPC_PATH);
 
 	const requestQueue = createWarmIpcRequestQueue();
 	const ipc = net.createServer((socket) => {
@@ -485,13 +489,9 @@ function startIpcServer(): void {
 		} catch {
 			// ignore
 		}
-		if (process.platform !== "win32") {
-			try {
-				fs.unlinkSync(IPC_PATH);
-			} catch {
-				// ignore
-			}
-		}
+		// No unlink here: `ipc.close()` removes the file it bound. An explicit
+		// unlink of the shared name would also delete a LIVE sibling's socket when
+		// this server never bound (its `listen` failed EADDRINUSE).
 	};
 	process.on("exit", cleanup);
 }
@@ -560,6 +560,15 @@ function graphStalenessNote(
 
 // --- Tools -------------------------------------------------------------------
 
+// #4300: this process runs outside pi; its caller owns workspace trust.
+setProjectTrustState("trusted");
+logExtension({
+	subsystem: "project-trust",
+	level: "debug",
+	message:
+		"mcp: workspace trust belongs to the MCP client; pi trust not consulted",
+});
+
 const cacheManager = new CacheManager();
 // #536: investigated wiring the same `flushPending` 4th arg pi's index.ts passes
 // (() => flushDebouncedToolResults()) before reading pilens_diagnostics. Verdict:
@@ -594,6 +603,10 @@ const lensDiagnosticsTool = createLensDiagnosticsTool(
 	// Matches index.ts:1656 and the two sibling readers
 	// (clients/runtime-tool-call.ts, clients/runtime-tool-result.ts).
 	() => isLensGuardEnabled(),
+	// #4323: `opengrep.enabled=false` keeps the explicit `source=lsp` probe from
+	// starting Opengrep, as it does for `pilens_analyze`. Resolved per call
+	// against the call's own project, like `lspNavigationTool` below (#792).
+	(name, cwd) => createMcpHost(undefined, cwd).getFlag(name),
 );
 const astGrepClient = new AstGrepClient();
 const astGrepSearchTool = createAstGrepSearchTool(astGrepClient);
@@ -997,7 +1010,7 @@ function formatAnalyze(
 	// read as "clean" — a known limit on large projects (warm mode / re-run once
 	// the persistent server has indexed gives complete LSP coverage).
 	const lspNote = result.lsp
-		? ` · lsp ${result.lsp.diagnosticCount} (${result.lsp.status}, ${result.lsp.durationMs}ms)`
+		? ` · lsp ${result.lsp.diagnosticCount} (${result.lsp.status}${result.lsp.failureKind ? `: ${result.lsp.failureKind}` : ""}, ${result.lsp.durationMs}ms)`
 		: "";
 	const summary =
 		`${path.relative(cwd, result.filePath) || result.filePath} [${mode}] — ` +
@@ -1638,6 +1651,9 @@ async function callTool(
 					`${turnEnd.lastRunAt ? ` (last ran ${turnEnd.lastRunAt})` : ""}` +
 					`${turnEnd.lastSkipReason ? ` — last skip: ${turnEnd.lastSkipReason}${turnEnd.lastSkipAt ? ` at ${turnEnd.lastSkipAt}` : ""}` : ""}`
 				: "Stop-hook turn-end: no activity recorded (hook not installed, or no Stop yet)",
+			turnEnd?.failed
+				? `Analyzer invocations: ${turnEnd.failed} failed; last ${turnEnd.lastFailureOperation} failure at ${turnEnd.lastFailureAt}: ${turnEnd.lastFailureReason}`
+				: "Analyzer invocations: no failures recorded",
 			healthConfigLine(configProvenance),
 			footprint
 				? `Resource footprint: ${footprint.instanceCount} pi-lens instance(s) · ` +
@@ -1922,12 +1938,33 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 			return;
 		case "tools/call": {
 			const name = params?.name;
-			const args =
-				params?.arguments && typeof params.arguments === "object"
-					? (params.arguments as Record<string, unknown>)
-					: {};
+			// #3749: `arguments` is an object. Absent, null and an empty array (what
+			// some clients send for "no arguments") mean none; any other non-object
+			// used to be read as `{}` (or, for a non-empty array, as keys "0", "1"),
+			// dropping what the caller sent.
+			const rawArguments: unknown = params?.arguments;
+			const argumentsAreObject =
+				typeof rawArguments === "object" &&
+				rawArguments !== null &&
+				!Array.isArray(rawArguments);
+			const args = argumentsAreObject
+				? (rawArguments as Record<string, unknown>)
+				: {};
 			if (typeof name !== "string") {
 				sendError(id ?? null, -32602, "tools/call requires a string 'name'");
+				return;
+			}
+			if (
+				!argumentsAreObject &&
+				rawArguments !== undefined &&
+				rawArguments !== null &&
+				!(Array.isArray(rawArguments) && rawArguments.length === 0)
+			) {
+				sendError(
+					id ?? null,
+					-32602,
+					"tools/call 'arguments' must be an object",
+				);
 				return;
 			}
 			const enabledName =
@@ -1949,6 +1986,29 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 					),
 				);
 				return;
+			}
+			// #3749: one check for every tool, against the schema `tools/list`
+			// advertises. The retired alias resolves to the canonical tool's schema.
+			const inputSchema = ALL_TOOLS.find(
+				(tool) => tool.name === enabledName,
+			)?.inputSchema;
+			const argumentReport = inputSchema
+				? findIgnoredArguments(inputSchema, args)
+				: undefined;
+			if (argumentReport) {
+				incrementDegradationCount({
+					kind: "mcp-ignored-arguments",
+					subject: name,
+					reason: `ignored argument(s): ${ignoredArgumentsStructured(argumentReport).ignoredArguments.join(", ")}`,
+				});
+				const refused = refusalResult(name, argumentReport);
+				if (refused) {
+					sendResult(
+						id ?? null,
+						stripResultDetails(finalizeToolResult(refused)),
+					);
+					return;
+				}
 			}
 			const entry = toolRegistryEntryForMcp(name);
 			if (entry && "situational" in entry && entry.situational) {
@@ -1981,6 +2041,8 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 				// #2800 item 7: the payload bound runs first with the footer's own
 				// size reserved, then the footer is stamped with the delivered
 				// payload's byte count and the bound's truncated flag.
+				if (argumentReport)
+					result = withIgnoredArguments(result, name, argumentReport);
 				const delivery = finalizeToolResultWithDelivery(result);
 				// The gate consumed `details` for the footer's diag lines above;
 				// strip it so the wire carries only the bounded text (#2852 N1).

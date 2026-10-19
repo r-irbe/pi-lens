@@ -14,7 +14,13 @@ import {
 	setProjectTrustState,
 } from "../../../clients/project-trust.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
+import {
+	clearWidgetState,
+	reconcileCorrelatedScanDiagnostics,
+	reconcileStaleWidgetFiles,
+} from "../../../clients/widget-state.js";
 import { OpengrepClient } from "../../../clients/opengrep-client.js";
+import { KnipClient } from "../../../clients/knip-client.js";
 import { realpathOrResolve } from "../../../clients/path-utils.js";
 import * as safeSpawn from "../../../clients/safe-spawn.js";
 // #2962: the retirement consumer is imported so the coverage this fetch
@@ -69,6 +75,7 @@ function makeClients(
 		jscpdResult: unknown;
 		madgeAvailable: boolean;
 		madgeResult: unknown;
+		opengrepResult: unknown;
 	}> = {},
 ): BootstrapClients {
 	return {
@@ -146,16 +153,242 @@ function makeClients(
 		// defaults to available + a clean scan; individual tests override `scan`.
 		opengrepClient: {
 			ensureAvailable: vi.fn().mockResolvedValue(true),
-			scan: vi.fn().mockResolvedValue({
-				success: true,
-				analyzed: true,
-				findings: [],
-				scannedAt: "now",
-			}),
+			scan: vi.fn().mockResolvedValue(
+				overrides.opengrepResult ?? {
+					success: true,
+					analyzed: true,
+					findings: [],
+					scannedAt: "now",
+				},
+			),
 		},
 		deadCodeClients: [],
 		// The remaining BootstrapClients fields are unused by fetchFreshProjectDiagnostics.
 	} as unknown as BootstrapClients;
+}
+
+/**
+ * #3600 F2/F3: one parameter set per heavyweight lane. Date is frozen to
+ * `RECORD_NOW`, but every lane's result carries a DISTINCT source stamp taken
+ * 5 s earlier, so a lane that stamps `Date.now()` at the record site instead of
+ * reading its result's own stamp reds. A per-lane copy with `now == source`
+ * (the round-1 shape) cannot tell those apart.
+ */
+const LANE_SOURCE_AT = 1_700_000_000_000;
+const LANE_RECORD_NOW = LANE_SOURCE_AT + 5_000;
+const LANE_SOURCE_ISO = new Date(LANE_SOURCE_AT).toISOString();
+
+function arrangeHeavyweightLane(lane: string): {
+	clients: BootstrapClients;
+	cacheManager: ReturnType<typeof makeCacheManager>;
+	match: (diagnostic: { runner?: string; tool?: string }) => boolean;
+} {
+	const cacheManager = makeCacheManager();
+	switch (lane) {
+		case "knip": {
+			const clients = makeClients({
+				knipResult: {
+					success: true,
+					analyzed: true,
+					scannedAt: LANE_SOURCE_ISO,
+					issues: [{ type: "file", name: "dead.ts", file: "dead.ts" }],
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: "ok",
+				},
+			});
+			return { clients, cacheManager, match: (d) => d.runner === "knip" };
+		}
+		case "jscpd": {
+			const clients = makeClients({
+				jscpdAvailable: true,
+				jscpdResult: {
+					success: true,
+					analyzed: true,
+					scannedAt: LANE_SOURCE_ISO,
+					clones: [
+						{
+							fileA: "a.ts",
+							startA: 1,
+							fileB: "b.ts",
+							startB: 2,
+							lines: 10,
+							tokens: 40,
+						},
+					],
+					duplicatedLines: 10,
+					totalLines: 100,
+					percentage: 10,
+				},
+			});
+			return { clients, cacheManager, match: (d) => d.runner === "jscpd" };
+		}
+		case "madge": {
+			const clients = makeClients({
+				madgeAvailable: true,
+				madgeResult: {
+					circular: [{ path: ["a.ts", "b.ts"], file: "a.ts" }],
+					count: 1,
+					analyzed: true,
+					scannedAt: LANE_SOURCE_ISO,
+				},
+			});
+			return { clients, cacheManager, match: (d) => d.runner === "madge" };
+		}
+		case "gitleaks": {
+			fs.mkdirSync(path.join(tmp, ".git"), { recursive: true });
+			const clients = makeClients();
+			(
+				clients.gitleaksClient.scan as ReturnType<typeof vi.fn>
+			).mockResolvedValue({
+				success: true,
+				analyzed: true,
+				scannedAt: LANE_SOURCE_ISO,
+				findings: [{ ruleId: "aws-key", file: "a.ts", startLine: 1 }],
+			});
+			return { clients, cacheManager, match: (d) => d.runner === "gitleaks" };
+		}
+		case "govulncheck": {
+			fs.writeFileSync(path.join(tmp, "go.mod"), "module demo\n\ngo 1.21\n");
+			const clients = makeClients();
+			(
+				clients.govulncheckClient.analyze as ReturnType<typeof vi.fn>
+			).mockResolvedValue({
+				success: true,
+				analyzed: true,
+				scannedAt: LANE_SOURCE_ISO,
+				findings: [
+					{
+						osv: "GO-2024-0001",
+						module: "example.com/vuln",
+						trace: [{ filename: "main.go", line: 1 }],
+					},
+				],
+			});
+			return {
+				clients,
+				cacheManager,
+				match: (d) => d.runner === "govulncheck",
+			};
+		}
+		case "opengrep": {
+			const clients = makeClients({
+				opengrepResult: {
+					success: true,
+					analyzed: true,
+					scannedAt: LANE_SOURCE_ISO,
+					findings: [
+						{
+							checkId: "rule",
+							path: path.join(tmp, "a.py"),
+							startLine: 1,
+							startCol: 1,
+							endLine: 1,
+							endCol: 2,
+							message: "OPENGREP ROW",
+							severity: "ERROR",
+						},
+					],
+				},
+			});
+			return { clients, cacheManager, match: (d) => d.runner === "opengrep" };
+		}
+		case "trivy": {
+			fs.writeFileSync(
+				path.join(tmp, ".pi-lens.json"),
+				JSON.stringify({ trivy: { enabled: true } }),
+			);
+			fs.writeFileSync(path.join(tmp, "package.json"), "{}");
+			const clients = makeClients();
+			(clients.trivyClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+				success: true,
+				analyzed: true,
+				scannedAt: LANE_SOURCE_ISO,
+				findings: [],
+				licenses: [],
+				secrets: [{ ruleId: "generic-api-key", file: "a.ts", line: 1 }],
+			});
+			return { clients, cacheManager, match: (d) => d.runner === "trivy" };
+		}
+		case "dead-code": {
+			const clients = makeClients();
+			(clients as unknown as { deadCodeClients: unknown[] }).deadCodeClients = [
+				{
+					id: "python",
+					language: "Python",
+					detect: vi.fn().mockReturnValue(true),
+					analyze: vi.fn().mockResolvedValue({
+						success: true,
+						analyzed: true,
+						language: "Python",
+						scannedAt: LANE_SOURCE_ISO,
+						summary: "",
+						unusedExports: [
+							{
+								category: "export",
+								kind: "func",
+								name: "x",
+								file: "z.py",
+								line: 9,
+							},
+						],
+						unusedFiles: [],
+						unusedDeps: [],
+						unlistedDeps: [],
+					}),
+				},
+			];
+			return {
+				clients,
+				cacheManager,
+				match: (d) => d.tool === "dead-code",
+			};
+		}
+		case "test-runner": {
+			const testResult = {
+				file: path.join(path.resolve(tmp), "src/foo.test.ts"),
+				runner: "vitest",
+				passed: 1,
+				failed: 1,
+				duration: 42,
+				failures: [
+					{ name: "foo", message: "boom", location: "src/foo.test.ts:3" },
+				],
+			};
+			const launchedFrom = snapshotAdvisoryProvenance({
+				cwd: tmp,
+				runtime: { telemetrySessionId: "s", projectSeq: 0, turnIndex: 0 },
+				generation: 1,
+				files: [{ path: testResult.file, role: "test" }],
+				capturedAt: LANE_SOURCE_AT,
+			});
+			(cacheManager.readCache as ReturnType<typeof vi.fn>).mockImplementation(
+				(scanner: string) =>
+					scanner === "test-runner-findings"
+						? {
+								data: {
+									content: "FAIL",
+									stale: false,
+									results: [testResult],
+									launchedFrom,
+								},
+								// The cache WRITE time is the record clock, 5 s after the batch's
+								// launch stamp; the row must carry the launch, not the write.
+								meta: { timestamp: new Date(LANE_RECORD_NOW).toISOString() },
+							}
+						: null,
+			);
+			return {
+				clients: makeClients(),
+				cacheManager,
+				match: (d) => d.tool === "test-runner",
+			};
+		}
+		default:
+			throw new Error(`unknown heavyweight lane ${lane}`);
+	}
 }
 
 describe("fetchFreshProjectDiagnostics (#585)", () => {
@@ -181,6 +414,194 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		expect(result.runners).toContain("knip");
 		expect(result.diagnostics.length).toBeGreaterThan(0);
 		expect(result.timings.knip).toBeGreaterThanOrEqual(0);
+	});
+
+	// #3600: the widget's stale gate judges a folded row against the time the
+	// analyzer READ its bytes. A lane whose result carries no `scannedAt` is
+	// stamped at the moment its run began.
+	it("stamps a heavyweight row with its lane's start when the result has no scannedAt (#3600)", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const fetchStart = 1_900_000_000_000;
+		vi.setSystemTime(fetchStart);
+		try {
+			const result = await fetchFreshProjectDiagnostics(
+				makeCacheManager(),
+				tmp,
+				makeClients({
+					knipIssues: [{ type: "file", name: "dead.ts", file: "dead.ts" }],
+				}),
+			);
+			expect(result.diagnostics.length).toBeGreaterThan(0);
+			expect(result.diagnostics.every((d) => d.observedAt === fetchStart)).toBe(
+				true,
+			);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("prefers the analyzer's own scannedAt over the fetch clock (#3600)", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const fetchStart = 1_900_000_000_000;
+		const scannerRead = fetchStart - 5_000;
+		vi.setSystemTime(fetchStart);
+		try {
+			const result = await fetchFreshProjectDiagnostics(
+				makeCacheManager(),
+				tmp,
+				makeClients({
+					opengrepResult: {
+						success: true,
+						analyzed: true,
+						scannedAt: new Date(scannerRead).toISOString(),
+						findings: [
+							{
+								checkId: "rule",
+								path: path.join(tmp, "a.ts"),
+								startLine: 1,
+								startCol: 1,
+								endLine: 1,
+								endCol: 1,
+								message: "OPENGREP ROW",
+								severity: "ERROR",
+							},
+						],
+					},
+				}),
+			);
+			const row = result.diagnostics.find((d) => d.runner === "opengrep");
+			expect(row?.observedAt).toBe(scannerRead);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// #3600 F2/F3: one parametrised test over all nine heavyweight lanes. Date
+	// is frozen to LANE_RECORD_NOW while every lane's result carries its own
+	// source stamp 5 s EARLIER, so a lane that stamps the record-site clock
+	// instead of its source time reds here — the round-1 knip test froze both to
+	// the same value and let that mutation survive.
+	it.each([
+		"knip",
+		"jscpd",
+		"madge",
+		"gitleaks",
+		"govulncheck",
+		"opengrep",
+		"trivy",
+		"dead-code",
+		"test-runner",
+	])(
+		"the %s lane carries its source observation time, not the record clock (#3600)",
+		async (lane) => {
+			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.setSystemTime(LANE_RECORD_NOW);
+			try {
+				const { clients, cacheManager, match } = arrangeHeavyweightLane(lane);
+				const result = await fetchFreshProjectDiagnostics(
+					cacheManager,
+					tmp,
+					clients,
+				);
+				const rows = result.diagnostics.filter(match);
+				expect(rows.length).toBeGreaterThan(0);
+				expect(rows.map((row) => row.observedAt)).toEqual(
+					rows.map(() => LANE_SOURCE_AT),
+				);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	// #3600 F1: the reviewer's joined-run probe as a real test. A real KnipClient
+	// run is started first; the fetch lane later JOINS that in-flight run, so its
+	// own start is AFTER the analyzer's read. An edit landing in that gap must
+	// demote the row, which is only possible if the row carries the initiator's
+	// read stamp rather than the joiner's lane start. Only the subprocess body is
+	// replaced (`safeSpawnAsync`); the join, the read stamp, the fold, and the
+	// widget gate are all production code.
+	it("a joined in-flight analyzer run carries the run's read time, so a mid-run edit drops the row (#3600)", async () => {
+		fs.writeFileSync(path.join(tmp, "package.json"), '{"name":"demo"}');
+		const dead = path.join(tmp, "dead.ts");
+		fs.writeFileSync(dead, "export const dead = 1;\n");
+
+		let releaseAnalysis!: () => void;
+		const analysisHeld = new Promise<void>((resolve) => {
+			releaseAnalysis = resolve;
+		});
+		let analysisSpawned!: () => void;
+		const analysisStarted = new Promise<void>((resolve) => {
+			analysisSpawned = resolve;
+		});
+		vi.spyOn(safeSpawn, "safeSpawnAsync").mockImplementation(
+			async (_command, args) => {
+				if (args.includes("--reporter=json")) {
+					analysisSpawned();
+					await analysisHeld;
+					return {
+						status: 0,
+						stdout: JSON.stringify({
+							issues: [{ file: "dead.ts", files: [{ name: "dead.ts" }] }],
+						}),
+						stderr: "",
+					};
+				}
+				// The `--version` availability probe.
+				return { status: 0, stdout: "6.0.0", stderr: "" };
+			},
+		);
+
+		const knipClient = new KnipClient();
+		const clients = {
+			...makeClients(),
+			knipClient,
+		} as unknown as BootstrapClients;
+
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const readAt = 1_700_000_000_000;
+		const editAt = readAt + 101;
+		const laneStartAt = readAt + 704;
+		try {
+			clearWidgetState();
+			vi.setSystemTime(readAt);
+			// The initiator's run starts at `readAt` and reaches the held spawn.
+			const initiator = knipClient.analyze(tmp);
+			await analysisStarted;
+			// The edit lands after the read, before the lane even starts.
+			vi.setSystemTime(editAt);
+			fs.writeFileSync(dead, "export const dead = 2;\n");
+			fs.utimesSync(dead, editAt / 1000, editAt / 1000);
+
+			vi.setSystemTime(laneStartAt);
+			const fetch = fetchFreshProjectDiagnostics(
+				makeCacheManager(),
+				tmp,
+				clients,
+			);
+			// Release the held analysis so the initiator and the joined lane settle.
+			releaseAnalysis();
+			const result = await fetch;
+			await initiator;
+
+			const row = result.diagnostics.find((d) => d.runner === "knip");
+			expect(row?.observedAt).toBe(readAt);
+
+			// Edit after the read (> 50 ms tolerance) → the widget demotes the row.
+			reconcileCorrelatedScanDiagnostics(dead, [
+				{
+					tool: "knip",
+					severity: "warning",
+					message: "ANALYZER ROW",
+					uri: "",
+					observedAt: row?.observedAt,
+				},
+			]);
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+		} finally {
+			clearWidgetState();
+			vi.useRealTimers();
+		}
 	});
 
 	it("reports a failed knip run and does not cache it (#925)", async () => {

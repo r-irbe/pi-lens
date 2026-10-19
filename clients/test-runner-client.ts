@@ -16,28 +16,41 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { BoundedFifoMap } from "./bounded-cache.js";
 import { emitBounded } from "./bounded-telemetry.js";
-import { LEDGER_FIELD_MAX } from "./degradation-ledger.js";
+import {
+	LEDGER_FIELD_MAX,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { minimatch } from "./deps/minimatch.js";
 import { createSubsystemLogger } from "./extension-log.js";
 import { detectFileKind, type FileKind } from "./file-kinds.js";
 import { detectFileRole } from "./file-role.js";
 import { resolveLanguageRootForFile } from "./language-profile.js";
-import { findGlobalBinary } from "./package-manager.js";
+import {
+	findGlobalBinary,
+	findLocalBinAt,
+	localBinPath,
+} from "./package-manager.js";
+import { getIsolatedNpxSpawnOptions } from "./tool-probe.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import {
 	augmentPythonEnvironment,
 	detectPythonEnvironment,
 } from "./python-environment.js";
 import {
+	findNearestMarkerRootDetailed,
+	type MarkerRootResult,
+	isRealGitMarker,
 	isUnderDir,
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
+	pathsEqual,
 	toPosix,
 } from "./path-utils.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
 import { isMeasuredDuration, toMeasuredDurationMs } from "./run-duration.js";
 import { safeSpawn, safeSpawnAsync } from "./safe-spawn.js";
 import { stripAnsi } from "./sanitize.js";
+import { resolveGitCheckout } from "./review-graph/git-identity.js";
 import { resolveToolCwd } from "./tool-cwd.js";
 
 // --- Types ---
@@ -71,6 +84,13 @@ export interface TestResult {
 	 */
 	duration?: number; // ms; absent = not measured
 	error?: string; // if runner itself failed
+	/**
+	 * Set when the run was deliberately not started (#3871 r2): the target's
+	 * checkout root has no install of its own for this runner, so running it
+	 * would fetch an unpinned tool or use the wrong environment. Not a pass and
+	 * not a failure; the turn-end consumer counts it and publishes nothing.
+	 */
+	notRun?: "no-runner-install";
 }
 
 /**
@@ -269,18 +289,139 @@ export const TURN_END_EXCLUDED_TEST_GLOBS: readonly string[] = [
 	"**/*.e2e.*",
 ];
 
+/** One hash-before-clipping record for both filesystem and ownership-walk gaps. */
+function recordCheckoutIdentityGap(
+	metadata: {
+		cwd: string;
+		candidate: string;
+		lookup: "filesystem" | "target-root" | "dispatch-root";
+		markerPath?: string;
+	} & (
+		| { detail: "realpath" | "marker-error"; errorCode: string | undefined }
+		| { detail: Extract<MarkerRootResult, { kind: "not-found" }>["reason"] }
+	),
+): void {
+	recordDegradationOnce({
+		kind: "test-checkout-identity-unavailable",
+		subject: createHash("sha256")
+			.update(JSON.stringify(metadata))
+			.digest("hex"),
+		reason: "cannot establish automatic test checkout identity",
+		metadata,
+	});
+}
+
+/** A positively identified foreign checkout, including targets reached via aliases. */
+function foreignGitRoot(testFilePath: string, cwd: string): string | null {
+	let realCwd: string;
+	let realTarget: string;
+	try {
+		// Both sides need filesystem identity. Walking the alias's lexical parents
+		// skips a Git boundary when a file or a directory below that root is linked.
+		realCwd = fs.realpathSync.native(path.resolve(cwd));
+		realTarget = fs.realpathSync.native(
+			path.resolve(cwd, toPosix(testFilePath)),
+		);
+	} catch (error_) {
+		// Missing/unreadable paths do not prove foreign ownership. The existing
+		// missing-target classifier and spawn checks retain their own decisions.
+		const errorCode = filesystemErrorCode(error_);
+		// A deleted or renamed target is ordinary and already reaches
+		// `retired-missing`; recording it would fill the ledger's per-kind cap
+		// and hide a real EACCES identity failure (#3691 F1).
+		if (errorCode === "ENOENT" || errorCode === "ENOTDIR") return null;
+		recordCheckoutIdentityGap({
+			cwd,
+			candidate: testFilePath,
+			lookup: "filesystem",
+			detail: "realpath",
+			errorCode,
+		});
+		return null;
+	}
+	const targetWalk = findNearestMarkerRootDetailed(
+		path.dirname(realTarget),
+		[".git"],
+		{
+			markerPredicate: (marker) => isRealGitMarker(marker, true),
+		},
+	);
+	if (targetWalk.kind !== "found") {
+		if (targetWalk.kind === "unavailable") {
+			recordCheckoutIdentityGap({
+				cwd,
+				candidate: testFilePath,
+				lookup: "target-root",
+				detail: "marker-error",
+				markerPath: targetWalk.markerPath,
+				errorCode: filesystemErrorCode(targetWalk.cause),
+			});
+		} else if (targetWalk.reason === "depth-limit") {
+			recordCheckoutIdentityGap({
+				cwd,
+				candidate: testFilePath,
+				lookup: "target-root",
+				detail: targetWalk.reason,
+			});
+		}
+		// Ordinary Gitless absence is not an incident. Error/cap uncertainty is
+		// disclosed, but neither may delete an otherwise usable own-checkout test.
+		return null;
+	}
+	const root = targetWalk.root;
+	// A root below or disjoint from cwd cannot own cwd, even if cwd is Gitless.
+	if (!isUnderDir(realCwd, root)) return root;
+	// A marker error on EITHER walk must not turn an enclosing root into proof
+	// of foreign ownership. In particular, do not retire cached failures on it.
+	const dispatchWalk = findNearestMarkerRootDetailed(realCwd, [".git"], {
+		markerPredicate: (marker) => isRealGitMarker(marker, true),
+	});
+	if (dispatchWalk.kind !== "found") {
+		recordCheckoutIdentityGap({
+			cwd,
+			candidate: testFilePath,
+			lookup: "dispatch-root",
+			...(dispatchWalk.kind === "unavailable"
+				? {
+						detail: "marker-error",
+						markerPath: dispatchWalk.markerPath,
+						errorCode: filesystemErrorCode(dispatchWalk.cause),
+					}
+				: { detail: dispatchWalk.reason }),
+		});
+		return null;
+	}
+	return !pathsEqual(root, dispatchWalk.root) ? root : null;
+}
+
 /**
- * Whether a resolved test target falls under the built-in turn-end
- * exclusion list (#2522). `testFilePath` may be absolute or relative, and
- * may use either path-separator form — folded through `toPosix` after being
- * made cwd-relative so `\`- and `/`-separated inputs match identically
- * (AGENTS.md cross-form-path screen).
+ * Whether the excluded checkout is another working tree of the dispatch root's
+ * own repository (a sibling linked worktree, #3871) rather than an unrelated
+ * repository: the one fact that tells a maintainer reading the record whether
+ * the exclusion is the #3649 crossover guard or a selection gap. Unresolvable
+ * on either side is `false`, never a guess.
+ */
+function sharesCommonDir(cwd: string, checkoutRoot: string): boolean {
+	const dispatch = resolveGitCheckout(cwd);
+	const excluded = resolveGitCheckout(checkoutRoot);
+	return (
+		dispatch !== null &&
+		excluded !== null &&
+		pathsEqual(dispatch.commonDir, excluded.commonDir)
+	);
+}
+
+/**
+ * Turn-end exclusion policy: out-of-tree files, foreign Git checkouts, and the
+ * built-in integration/e2e globs (#2522). Absolute and cwd-relative inputs
+ * share the same policy; explicit test execution does not use this gate.
  */
 export function isExcludedTestTarget(
 	testFilePath: string,
 	cwd: string,
 ): boolean {
-	const rel = toPosix(path.relative(cwd, path.resolve(cwd, testFilePath)));
+	const absolute = path.resolve(cwd, toPosix(testFilePath));
+	let rel = toPosix(path.relative(cwd, absolute));
 	// #2522 review round 2, F6: a target that resolves OUTSIDE the project root
 	// yields a `..`-leading relative path (or, across Windows drives, a still
 	// absolute one), which matches none of the globs — so the bare `some()`
@@ -292,8 +433,38 @@ export function isExcludedTestTarget(
 		rel === ".." ||
 		rel.startsWith("../") ||
 		path.isAbsolute(rel)
-	)
+	) {
+		// Different aliases can spell an in-tree target as lexically outside cwd.
+		const realTarget = canonicalFailedPath(absolute);
+		const realCwd = canonicalFailedPath(cwd);
+		if (pathsEqual(realTarget, realCwd) || !isUnderDir(realTarget, realCwd))
+			return true;
+		// R4: ../other-spelling/... cannot match the existing globs. Only this
+		// alias exception needs physical policy coordinates; display/cache keys
+		// and ordinary in-tree spelling semantics remain unchanged.
+		rel = toPosix(path.relative(realCwd, realTarget));
+	}
+	// A separate Git checkout remains foreign through an in-tree alias. Explicit
+	// execution does not use this policy, and keeps its original display spelling.
+	const checkoutRoot = foreignGitRoot(testFilePath, cwd);
+	if (checkoutRoot) {
+		// R6: self/deferred targets can reach this gate without discovery or
+		// failed-cache records, and the MCP caller's dbg is deliberately a no-op.
+		recordDegradationOnce({
+			kind: "test-target-foreign-checkout",
+			subject: createHash("sha256")
+				.update(JSON.stringify([cwd, testFilePath, checkoutRoot]))
+				.digest("hex"),
+			reason: "automatic test target belongs to another Git checkout",
+			metadata: {
+				cwd,
+				candidate: testFilePath,
+				checkoutRoot,
+				sameCommonDir: sharesCommonDir(cwd, checkoutRoot),
+			},
+		});
 		return true;
+	}
 	// #2522 review round 2, F5: case-INSENSITIVE. `tests/Integration/`,
 	// `tests/E2E/` and `foo.E2E.test.ts` are the same hazard as their lowercase
 	// spellings, and on the case-insensitive filesystems Windows and macOS ship
@@ -398,7 +569,11 @@ export const RUNNERS: Record<string, RunnerConfig> = {
 			"settings.gradle",
 			"settings.gradle.kts",
 		],
-		command: process.platform === "win32" ? "gradlew.bat" : "./gradlew",
+		// #3956: a cwd-relative launcher must carry a separator, or the Windows
+		// resolver treats it as a PATH-only name and never looks in the child cwd
+		// where the wrapper actually lives. Forward slash is the platform-neutral
+		// spelling the resolver accepts on win32 (same #2870 lesson as ./gradlew).
+		command: process.platform === "win32" ? "./gradlew.bat" : "./gradlew",
 		// The child's cwd must be a directory the wrapper actually lives in.
 		spawnCwdMarkers: ["gradlew", "gradlew.bat"],
 		args: (_testFile, _cwd) => ["test", "--no-daemon"],
@@ -500,14 +675,34 @@ interface TestRunRequest {
 	 * ambient turn signal exactly as before.
 	 */
 	signal?: AbortSignal;
+	/**
+	 * #3871 r2: the directory failure locations are rendered relative to. The
+	 * dispatch root is the checkout that owns the test, but the reader is in the
+	 * session checkout, which may hold a file at the same relative path; a
+	 * worktree failure must read `.worktrees/x/tests/a.test.ts:12`. Absent
+	 * renders against the dispatch root, as before.
+	 */
+	displayRoot?: string;
+	/**
+	 * #3871 r2: refuse to start the run when this root has no install of its own
+	 * for the runner (resolution would reach `npx` or a bare interpreter). Set
+	 * for linked-worktree roots only; the session checkout keeps its fallbacks.
+	 */
+	requireOwnInstall?: boolean;
 }
 
 interface FailedTargetStateRecord {
-	outcome: "retired-missing" | "retained-indeterminate" | "capacity-evicted";
+	outcome:
+		| "retired-missing"
+		| "retained-indeterminate"
+		| "capacity-evicted"
+		| "rejected-nested-checkout"
+		| "retired-nested-checkout";
 	runner: string;
 	candidate: string;
 	errorCode?: string;
-	turnIndex?: number;
+	/** Every writer supplies this; explicit runs may have no turn context. */
+	turnIndex: number | undefined;
 }
 
 interface FailedTargetEntry {
@@ -1018,6 +1213,7 @@ export class TestRunnerClient {
 		pattern: string,
 		basename: string,
 		maxDepth: number,
+		acceptCandidate: (testFile: string) => boolean,
 	): string | null {
 		const queue: Array<{ dir: string; depth: number }> = [
 			{ dir: rootDir, depth: 0 },
@@ -1039,10 +1235,11 @@ export class TestRunnerClient {
 				const fullPath = path.join(dir, entry.name);
 				if (entry.isFile()) {
 					if (
-						entry.name === pattern ||
-						(entry.name.startsWith("test_") &&
-							entry.name.endsWith(".py") &&
-							entry.name.includes(basename))
+						(entry.name === pattern ||
+							(entry.name.startsWith("test_") &&
+								entry.name.endsWith(".py") &&
+								entry.name.includes(basename))) &&
+						acceptCandidate(fullPath)
 					) {
 						return fullPath;
 					}
@@ -1288,12 +1485,15 @@ export class TestRunnerClient {
 
 	/**
 	 * Find test file for a given source file
-	 * Returns the test file path if it exists, null otherwise
+	 * Returns the test file path if it exists, null otherwise.
+	 * Automatic selection supplies eligibility before each first-match return;
+	 * ordinary discovery, existence checks, and suggestions remain unfiltered.
 	 */
 	findTestFile(
 		sourceFilePath: string,
 		cwd: string,
 		runnerOverride?: string,
+		acceptCandidate: (testFile: string) => boolean = () => true,
 	): { testFile: string; runner: string } | null {
 		const ext = path.extname(sourceFilePath);
 		const basename = path.basename(sourceFilePath, ext);
@@ -1339,10 +1539,11 @@ export class TestRunnerClient {
 
 					const match = files.find(
 						(f) =>
-							f === pattern ||
-							(f.startsWith("test_") &&
-								f.endsWith(".py") &&
-								f.includes(basename)),
+							(f === pattern ||
+								(f.startsWith("test_") &&
+									f.endsWith(".py") &&
+									f.includes(basename))) &&
+							acceptCandidate(path.join(searchDir, f)),
 					);
 					if (match) {
 						const testPath = path.join(searchDir, match);
@@ -1364,6 +1565,7 @@ export class TestRunnerClient {
 						pattern,
 						basename,
 						MAX_PYTEST_RECURSE_DEPTH,
+						acceptCandidate,
 					);
 					if (recursiveMatch) {
 						this.log(`Found test file (recursive): ${recursiveMatch}`);
@@ -1394,7 +1596,7 @@ export class TestRunnerClient {
 				];
 
 				for (const testPath of searchPaths) {
-					if (fs.existsSync(testPath)) {
+					if (fs.existsSync(testPath) && acceptCandidate(testPath)) {
 						this.log(`Found test file: ${testPath}`);
 						return { testFile: testPath, runner: detected.runner };
 					}
@@ -1403,7 +1605,11 @@ export class TestRunnerClient {
 		}
 
 		// Basename lookup found nothing — try import scanning as a fallback.
-		const importMatch = this.findTestFileByImport(sourceFilePath, cwd);
+		const importMatch = this.findTestFileByImport(
+			sourceFilePath,
+			cwd,
+			acceptCandidate,
+		);
 		if (importMatch) {
 			return { testFile: importMatch, runner: detected.runner };
 		}
@@ -1440,10 +1646,22 @@ export class TestRunnerClient {
 		const selfIsTest = this.isTestFile(sourceFilePath, cwd, detected.runner);
 		const related = selfIsTest
 			? null
-			: this.findTestFile(sourceFilePath, cwd, detected.runner);
+			: this.findTestFile(sourceFilePath, cwd, detected.runner, (candidate) => {
+					const checkoutRoot = foreignGitRoot(candidate, cwd);
+					if (!checkoutRoot) return true;
+					recordDegradationOnce({
+						kind: "test-discovery-foreign-checkout",
+						subject: createHash("sha256")
+							.update(JSON.stringify([cwd, candidate, checkoutRoot]))
+							.digest("hex"),
+						reason: "automatic test candidate belongs to another Git checkout",
+						metadata: { cwd, candidate, checkoutRoot, runner: detected.runner },
+					});
+					return false;
+				});
 
 		if (failedSet && failedSet.size > 0) {
-			const failedFirst = this.retireMissingFailedTargets({
+			const failedFirst = this.retireIneligibleFailedTargets({
 				cwd,
 				runner: detected.runner,
 				failedTargets: failedSet,
@@ -1548,7 +1766,14 @@ export class TestRunnerClient {
 		} else {
 			request = runnerOrRequest;
 		}
-		const { runner, config, turnIndex, signal } = request;
+		const {
+			runner,
+			config,
+			turnIndex,
+			signal,
+			displayRoot,
+			requireOwnInstall,
+		} = request;
 		if (!fs.existsSync(absoluteTestFile)) {
 			return this.emptyResult(
 				absoluteTestFile,
@@ -1563,13 +1788,20 @@ export class TestRunnerClient {
 				cwd: path.resolve(cwd),
 				rootMarkers: config.spawnCwdMarkers ?? config.configFiles,
 			}).cwd;
-			const { command, args, env } = await this.resolveExec(
+			const { command, args, env, ownInstall } = await this.resolveExec(
 				runner,
 				config,
 				absoluteTestFile,
 				cwd,
 				spawnCwd,
+				requireOwnInstall,
 			);
+			if (requireOwnInstall && !ownInstall) {
+				return {
+					...this.emptyResult(absoluteTestFile, "", runner),
+					notRun: "no-runner-install",
+				};
+			}
 			this.log(
 				`Running (async): ${command} ${args.join(" ")} (cwd ${spawnCwd})`,
 			);
@@ -1578,6 +1810,11 @@ export class TestRunnerClient {
 				cwd: spawnCwd,
 				timeout: 60000,
 				env,
+				// ONE neutral-cwd seam for npx/bunx fallbacks (#4193, #4268
+				// acceptance 3); a resolved runner binary keeps the project cwd.
+				...(command === "npx" || command === "bunx"
+					? getIsolatedNpxSpawnOptions()
+					: {}),
 				// #2522 R2 F1. `safeSpawnAsync` resolves `options.signal ?? ambient`,
 				// so an absent batch signal keeps the pre-#2522 ambient behaviour.
 				signal,
@@ -1603,7 +1840,7 @@ export class TestRunnerClient {
 						stdout,
 						stderr,
 						absoluteTestFile,
-						cwd,
+						displayRoot ?? cwd,
 						runner,
 					);
 					break;
@@ -1612,7 +1849,7 @@ export class TestRunnerClient {
 						stdout,
 						stderr,
 						absoluteTestFile,
-						cwd,
+						displayRoot ?? cwd,
 						runner,
 					);
 					break;
@@ -1624,6 +1861,8 @@ export class TestRunnerClient {
 						absoluteTestFile,
 						cwd,
 						runner,
+						displayRoot ?? cwd,
+						spawnCwd,
 					);
 					break;
 				case "phpunit":
@@ -1633,6 +1872,9 @@ export class TestRunnerClient {
 						result.status ?? 0,
 						absoluteTestFile,
 						runner,
+						displayRoot ?? cwd,
+						cwd,
+						spawnCwd,
 					);
 					break;
 				case "mix":
@@ -1642,6 +1884,9 @@ export class TestRunnerClient {
 						result.status ?? 0,
 						absoluteTestFile,
 						runner,
+						displayRoot ?? cwd,
+						cwd,
+						spawnCwd,
 					);
 					break;
 				default:
@@ -1651,6 +1896,9 @@ export class TestRunnerClient {
 						result.status ?? 0,
 						absoluteTestFile,
 						runner,
+						displayRoot ?? cwd,
+						cwd,
+						spawnCwd,
 					);
 					break;
 			}
@@ -1792,12 +2040,12 @@ export class TestRunnerClient {
 	}
 
 	/**
-	 * Retire only confirmed-missing failed-first paths, then return one usable
-	 * target. A bounded prefix is checked per selection; remaining candidates
+	 * Retire confirmed-missing or foreign-checkout failed-first entries, then
+	 * return one usable target. A bounded prefix is checked; remaining candidates
 	 * carry over to the next selection instead of adding unbounded synchronous
 	 * filesystem work to turn_end. Related/self targets keep priority.
 	 */
-	private retireMissingFailedTargets(
+	private retireIneligibleFailedTargets(
 		selection: FailedTargetSelection,
 	): string | undefined {
 		const { cwd, runner, failedTargets, relatedAbs, selfAbs, turnIndex } =
@@ -1812,6 +2060,18 @@ export class TestRunnerClient {
 			checked += 1;
 			inspected.add(identity);
 			const candidate = entry.displayPath;
+			// A Git boundary can appear after admission. Retire here, before
+			// selection, so the turn-end spawn gate cannot starve parent failures.
+			if (foreignGitRoot(candidate, cwd)) {
+				failedTargets.delete(identity);
+				this.recordFailedTargetState({
+					outcome: "retired-nested-checkout",
+					runner,
+					candidate,
+					turnIndex,
+				});
+				return undefined;
+			}
 			const verdict = this.classifyFailedTarget(candidate);
 			if (verdict.status === "missing") {
 				failedTargets.delete(identity);
@@ -2084,13 +2344,37 @@ export class TestRunnerClient {
 
 	// --- Pytest Parser (text-based, no JSON dependency) ---
 
+	/**
+	 * #3871: a text runner prints a path relative to the directory it ran in
+	 * (`spawnCwd`, first in `bases`) or to the dispatch root. The first base
+	 * that holds the file wins; a path that resolves nowhere stays as printed,
+	 * and an absent capture is no location.
+	 */
+	private renderTextLocation(
+		displayRoot: string,
+		bases: readonly string[],
+		file: string | undefined,
+		line: string | undefined,
+	): string | undefined {
+		if (file === undefined || line === undefined) return undefined;
+		for (const base of bases) {
+			const resolved = path.resolve(base, file);
+			if (fs.existsSync(resolved)) {
+				return `${toPosix(path.relative(displayRoot, resolved))}:${line}`;
+			}
+		}
+		return `${file}:${line}`;
+	}
+
 	private parsePytestOutput(
 		stdout: string,
 		stderr: string,
 		exitCode: number,
 		testFile: string,
-		_cwd: string,
+		cwd: string,
 		runner: string,
+		displayRoot: string = cwd,
+		spawnCwd: string = cwd,
 	): TestResult {
 		const failures: TestFailure[] = [];
 		const output = `${stdout}\n${stderr}`;
@@ -2103,15 +2387,25 @@ export class TestRunnerClient {
 		const failureRegex = /FAILED\s+(\S+::\S+)\s*-\s*(.+?)(?:\n|$)/g;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
+			const [file, ...testParts] = match[1].split("::");
+			const location = this.renderTextLocation(
+				displayRoot,
+				[spawnCwd, cwd],
+				file,
+				testParts.join("::"),
+			);
 			failures.push({
 				name: match[1],
 				message: match[2].trim().slice(0, 500),
-				location: match[1].replace("::", ":"),
+				...(location === undefined ? {} : { location }),
 			});
 		}
 
 		// Also look for assertion errors with traceback
-		const tracebackRegex = /_{10,}\s*\n\s*(\w+Error:\s*.+?)(?:\n|$)/gs;
+		// #4148: `\s*\n\s*` was ambiguous over a blank run and `_{10,}` rescanned
+		// its run from every offset; same matches, linear time.
+		const tracebackRegex =
+			/(?<!_)_{10,}[^\S\n]*\n\s*(\w+Error:\s*.+?)(?:\n|$)/gs;
 		while ((match = tracebackRegex.exec(output)) !== null) {
 			// Add to last failure if exists, or create generic
 			if (failures.length > 0 && !failures[failures.length - 1].stack) {
@@ -2145,6 +2439,9 @@ export class TestRunnerClient {
 		exitCode: number,
 		testFile: string,
 		runner: string,
+		displayRoot: string = path.dirname(testFile),
+		cwd: string = path.dirname(testFile),
+		spawnCwd: string = cwd,
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		let passed = 0;
@@ -2179,7 +2476,26 @@ export class TestRunnerClient {
 		const failureRegex = /^\d+\)\s+(\S+)/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
-			failures.push({ name: match[1], message: match[1] });
+			// #3871 r3: `[^\S\n]*`, not `\s*`, after a line anchor. `\s*` crossed
+			// newlines, so every line of a blank run rescanned the whole run.
+			const afterFailure = output.slice(match.index + match[0].length);
+			const nextFailure = afterFailure.search(/(?:^|\n)[^\S\n]*\d+\)\s/);
+			const failureBlock =
+				nextFailure === -1 ? afterFailure : afterFailure.slice(0, nextFailure);
+			const locationMatch = /(?:^|\n)[^\S\n]*([^\s:]+\.php):(\d+)/.exec(
+				failureBlock,
+			);
+			const location = this.renderTextLocation(
+				displayRoot,
+				[spawnCwd, cwd],
+				locationMatch?.[1],
+				locationMatch?.[2],
+			);
+			failures.push({
+				name: match[1],
+				message: match[1],
+				...(location === undefined ? {} : { location }),
+			});
 		}
 
 		// #1452: PHPUnit prints its own elapsed time and this parser dropped it,
@@ -2251,6 +2567,9 @@ export class TestRunnerClient {
 		exitCode: number,
 		testFile: string,
 		runner: string,
+		displayRoot: string = path.dirname(testFile),
+		cwd: string = path.dirname(testFile),
+		spawnCwd: string = cwd,
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		let passed = 0;
@@ -2286,13 +2605,28 @@ export class TestRunnerClient {
 
 		// Individual failures: "  1) test some behavior (MyModuleTest)"
 		const failures: TestFailure[] = [];
-		const failureRegex = /^\s*\d+\)\s+(.+?)\s*\(([^)]+)\)\s*$/gm;
+		// #3871 r3: `^[^\S\n]*`, not `^\s*`: the multiline anchor restarted at
+		// every line of a blank run and `\s*` rescanned the rest of it.
+		const failureRegex = /^[^\S\n]*\d+\)\s+(.+?)\s*\(([^)]+)\)\s*$/gm;
 		let match;
 		while ((match = failureRegex.exec(output)) !== null) {
+			const afterFailure = output.slice(match.index + match[0].length);
+			const nextFailure = afterFailure.search(/(?:^|\n)[^\S\n]*\d+\)\s/);
+			const failureBlock =
+				nextFailure === -1 ? afterFailure : afterFailure.slice(0, nextFailure);
+			const locationMatch = /(?:^|\n)[^\S\n]*([^\s:]+\.exs):(\d+)/.exec(
+				failureBlock,
+			);
 			failures.push({
 				name: match[1].trim(),
 				message: match[1].trim(),
-				location: match[2].trim(),
+				location:
+					this.renderTextLocation(
+						displayRoot,
+						[spawnCwd, cwd],
+						locationMatch?.[1],
+						locationMatch?.[2],
+					) ?? match[2].trim(),
 			});
 		}
 
@@ -2554,6 +2888,9 @@ export class TestRunnerClient {
 		exitCode: number,
 		testFile: string,
 		runner: string,
+		displayRoot: string = path.dirname(testFile),
+		cwd: string = path.dirname(testFile),
+		spawnCwd: string = cwd,
 	): TestResult {
 		const output = `${stdout}\n${stderr}`;
 		const lower = output.toLowerCase();
@@ -2779,7 +3116,25 @@ export class TestRunnerClient {
 		];
 		for (const m of otherNames) {
 			if (failures.length >= 5) break;
-			failures.push({ name: m[1].trim(), message: m[1].trim() });
+			const name = m[1].trim();
+			// #3871 r3: `(?<!\S)` starts a location only at a token start. The
+			// unanchored match restarted at every offset of a long token, and
+			// took `//host/a.py:80` out of a prose URL.
+			const locationMatch =
+				/(?<!\S)([^\s:]+\.(?:go|rs|rb|java|kt|cs|fs|py|php|exs)):(\d+)/.exec(
+					name,
+				);
+			const location = this.renderTextLocation(
+				displayRoot,
+				[spawnCwd, cwd],
+				locationMatch?.[1],
+				locationMatch?.[2],
+			);
+			failures.push({
+				name,
+				message: name,
+				...(location === undefined ? {} : { location }),
+			});
 		}
 
 		// #1487: gated on `!matched`, not on `failed === 0`. A non-zero exit
@@ -2994,6 +3349,7 @@ export class TestRunnerClient {
 	private findTestFileByImport(
 		sourceFilePath: string,
 		cwd: string,
+		acceptCandidate: (testFile: string) => boolean,
 	): string | null {
 		const ext = path.extname(sourceFilePath);
 		const basename = path.basename(sourceFilePath, ext);
@@ -3013,8 +3369,8 @@ export class TestRunnerClient {
 				continue;
 			}
 			for (const entry of entries) {
-				if (!testPattern.test(entry)) continue;
 				const testPath = path.join(dir, entry);
+				if (!testPattern.test(entry) || !acceptCandidate(testPath)) continue;
 				let content: string;
 				try {
 					content = fs.readFileSync(testPath, "utf-8");
@@ -3063,17 +3419,34 @@ export class TestRunnerClient {
 		 * Defaults to `cwd`, which is every call where the two are the same.
 		 */
 		spawnCwd: string = cwd,
-	): Promise<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> {
+		requireOwnInstall = false,
+	): Promise<{
+		command: string;
+		args: string[];
+		env?: NodeJS.ProcessEnv;
+		/**
+		 * #3871 r2: false when resolution reached a fallback that needs no
+		 * install under `cwd` because it fetches (`npx`) or borrows (a bare
+		 * interpreter or `phpunit` on PATH) the tool. Toolchain runners
+		 * (`go`, `cargo`, ...) have no per-project install and are always own.
+		 */
+		ownInstall: boolean;
+	}> {
+		const needsInstall =
+			config.command === "npx" || runner === "pytest" || runner === "phpunit";
 		// Run pytest through the project interpreter itself, not a generic `python`
 		// resolved from the host PATH. The child-only environment also keeps tools
 		// spawned by tests inside the same project environment.
 		if (runner === "pytest") {
-			const pythonEnvironment = await detectPythonEnvironment(cwd);
+			const pythonEnvironment = await detectPythonEnvironment(cwd, undefined, {
+				allowAmbient: !requireOwnInstall,
+			});
 			if (pythonEnvironment) {
 				return {
 					command: pythonEnvironment.pythonPath,
 					args: config.args(testFile, spawnCwd),
 					env: augmentPythonEnvironment(process.env, pythonEnvironment),
+					ownInstall: true,
 				};
 			}
 		}
@@ -3083,24 +3456,43 @@ export class TestRunnerClient {
 		// explicitly before falling back to a global `phpunit` on PATH.
 		if (runner === "phpunit") {
 			const suffix = process.platform === "win32" ? ".bat" : "";
-			const vendorBin = path.join(cwd, "vendor", "bin", `phpunit${suffix}`);
-			if (fs.existsSync(vendorBin)) {
-				return { command: vendorBin, args: config.args(testFile, spawnCwd) };
+			const vendorBin = localBinPath(
+				findLocalBinAt("phpunit", cwd, {
+					windowsExt: suffix,
+					binDirs: [path.join("vendor", "bin")],
+				}),
+			);
+			if (vendorBin) {
+				return {
+					command: vendorBin,
+					args: config.args(testFile, spawnCwd),
+					ownInstall: true,
+				};
 			}
-			return { command: "phpunit", args: config.args(testFile, spawnCwd) };
+			return {
+				command: "phpunit",
+				args: config.args(testFile, spawnCwd),
+				ownInstall: false,
+			};
 		}
 
 		const binName = config.binName ?? runner;
 		const suffix = process.platform === "win32" ? ".cmd" : "";
-		const localBin = path.join(cwd, "node_modules", ".bin", binName + suffix);
+		const localBin = localBinPath(
+			findLocalBinAt(binName, cwd, {
+				windowsExt: suffix,
+				binDirs: [path.join("node_modules", ".bin")],
+			}),
+		);
 
 		// A resolved binary (local, or any manager's global bin) becomes the command
 		// itself, so the leading wrapper-name arg(s) that named it (e.g. "vitest",
 		// or "-m pytest") are stripped from args() — see stripWrapperArgs.
-		if (fs.existsSync(localBin)) {
+		if (localBin) {
 			return {
 				command: localBin,
 				args: stripWrapperArgs(binName, config.args(testFile, spawnCwd)),
+				ownInstall: true,
 			};
 		}
 
@@ -3110,10 +3502,15 @@ export class TestRunnerClient {
 			return {
 				command: globalBin,
 				args: stripWrapperArgs(binName, config.args(testFile, spawnCwd)),
+				ownInstall: !needsInstall,
 			};
 		}
 
-		return { command: config.command, args: config.args(testFile, spawnCwd) };
+		return {
+			command: config.command,
+			args: config.args(testFile, spawnCwd),
+			ownInstall: !needsInstall,
+		};
 	}
 
 	private emptyResult(
@@ -3146,6 +3543,17 @@ export class TestRunnerClient {
 	private recordResult(record: TestResultRecord): void {
 		const { cwd, runner, testFile, result, turnIndex } = record;
 		const targetPath = path.resolve(testFile);
+		// Explicit execution still returns the failure, but a separate checkout
+		// must not seed the parent's automatic retry state or evict its failures.
+		if (result.failed > 0 && foreignGitRoot(targetPath, cwd)) {
+			this.recordFailedTargetState({
+				outcome: "rejected-nested-checkout",
+				runner,
+				candidate: targetPath,
+				turnIndex,
+			});
+			return;
+		}
 		const target = canonicalFailedPath(targetPath);
 		let failedTargets = this.getFailedTargets(cwd, runner, result.failed > 0);
 		if (!failedTargets) return;

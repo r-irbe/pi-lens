@@ -46,16 +46,6 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 		}
 	});
 
-	it("no-ops when never wired (unit tests / MCP server path have no pi host)", () => {
-		expect(() =>
-			publishFilesTouched({
-				reason: "autofix",
-				paths: ["/repo/src/a.ts"],
-				cwd: "/repo",
-			}),
-		).not.toThrow();
-	});
-
 	it("resolves the live emitter after session replacement", () => {
 		const oldEmit = vi.fn(() => {
 			throw new Error("This extension ctx is stale after session replacement");

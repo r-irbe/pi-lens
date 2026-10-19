@@ -42,6 +42,11 @@ import {
 import { normalizeFilePath } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
+// #3721: the log sinks bind their path from PI_LENS_HOME at module load, so the
+// per-case homes below cannot isolate them. The harness gives this worker its
+// own PI_LENS_HOME before any import, so the sinks stay off every other
+// worker's file.
+
 const DENIED_SERVER = "typos";
 const dirs: string[] = [];
 let previousHome: string | undefined;
@@ -234,6 +239,22 @@ describe("#2518 a live session root's denial survives foreign cwd traffic", () =
 		expect(evictions[0]?.latestReasons).toHaveLength(1);
 		expect(evictions[0]?.latestReasons[0]?.reason).toContain("(count: 2)");
 	}, 120_000);
+
+	it("keeps the reload remedy when the evicted root path is long (#3712)", async () => {
+		const longRoot = path.join(foreignRoot(0), "root-" + "x".repeat(150));
+		fs.mkdirSync(longRoot, { recursive: true });
+		await initLSPConfig(longRoot);
+		for (let index = 1; index <= 128; index++) {
+			await initLSPConfig(foreignRoot(index));
+		}
+		const reason =
+			getDegradationSummary().find(
+				(group) => group.kind === "lsp-session-root-evicted",
+			)?.latestReasons[0]?.reason ?? "";
+		// #3712: put the unbounded root after the operator-facing remedy.
+		expect(reason).toContain("will load the dropped root again");
+		expect(reason).toContain("next session start");
+	});
 
 	// `initLSPConfig`'s cwd is NOT canonical in production: `analysisRoot` comes
 	// out of `.pi-lens.json` verbatim and `clients/runtime-session.ts` hands the

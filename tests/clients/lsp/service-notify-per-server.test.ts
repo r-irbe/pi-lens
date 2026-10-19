@@ -32,11 +32,18 @@ vi.mock("../../../clients/lsp/client.js", () => ({
 const FILE = "C:/repo/main.ts";
 const NOTIFY_BUDGET_MS = 100;
 
-function makeServer(id: string, ext = ".ts") {
+type TestServer = Omit<
+	import("../../../clients/lsp/server.js").LSPServerInfo,
+	"spawn"
+> & { spawn: ReturnType<typeof vi.fn> };
+
+function makeServer(id: string, ext = ".ts"): TestServer {
 	return {
 		id,
 		name: id,
 		extensions: [ext],
+		idleEviction: "transparent",
+		role: "language",
 		root: async () => "C:/repo",
 		spawn: vi.fn(async () => ({
 			process: {
@@ -87,6 +94,7 @@ function makeClient(
 		diagnosticsVersion: 0,
 		getDiagnostics: vi.fn(() => diags),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(() =>
 				stallWrite ? new Promise<void>(() => {}) : Promise.resolve(),
 			),
@@ -238,6 +246,7 @@ describe("#743 — per-server notify-write deadlines", () => {
 			diagnosticsVersion: 0,
 			getDiagnostics: vi.fn(() => []),
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn(() =>
 					stall ? new Promise<void>(() => {}) : Promise.resolve(),
 				),
@@ -337,5 +346,166 @@ describe("#743 — per-server notify-write deadlines", () => {
 		// The healthy server already has it — its debounce must survive its
 		// sibling's failure (#743). A file-level key would re-push it here.
 		expect(healthyClient.notify.open).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * #3537: the consecutive-timeout streak belongs to one client generation.
+ *
+ * Recurrence this block prevents: the streak was keyed by server key and
+ * cleared only on a demotion or a landed write, so a client retired by a
+ * crash-respawn or an eviction handed its strikes to the replacement, which
+ * was then demoted on its FIRST timeout (still cold, say) and lost its
+ * diagnostics for a cooldown. `forgetReadiness`, which every retirement path
+ * and every registration already calls (#3502), now forgets the streak too.
+ * The last case is the ordering that reset cannot reach: a predecessor's
+ * write timeout that settles after the replacement registered.
+ */
+describe("#3537 — the notify-write streak does not outlive its client", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = String(NOTIFY_BUDGET_MS);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		delete process.env.PI_LENS_LSP_CLIENT_CEILING;
+		delete process.env.PI_LENS_TS_IDLE_EVICT_MS;
+	});
+
+	/** A stalling client that can die the way a crashed server does. */
+	function makeMortalClient(stallWrite = true) {
+		let alive = true;
+		let exitedAt: number | undefined;
+		return Object.assign(makeClient(stallWrite), {
+			isAlive: () => alive,
+			wasShutdownIntentional: () => false,
+			getExitedAt: () => exitedAt,
+			kill: () => {
+				alive = false;
+				exitedAt ??= Date.now();
+			},
+		});
+	}
+
+	async function start(servers: ReturnType<typeof makeServer>[]) {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			servers.filter((server) =>
+				server.extensions.some((ext) => fp.endsWith(ext)),
+			),
+		);
+		const touch = (filePath: string, content: string) =>
+			service.touchFile(filePath, content, {
+				clientScope: "all",
+				diagnostics: "document",
+				collectDiagnostics: true,
+				source: "test",
+			});
+		const timedOut = async (filePath: string, content: string) => {
+			const p = touch(filePath, content);
+			await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS + 20);
+			await p;
+		};
+		const demoted = (id: string) =>
+			[
+				...(
+					service as unknown as { state: { broken: Map<string, number> } }
+				).state.broken.keys(),
+			].some((key) => key.startsWith(`${id}:`));
+		return { service, touch, timedOut, demoted };
+	}
+
+	it("a crash-respawned replacement is not demoted on its first write timeout", async () => {
+		const { timedOut, demoted } = await start([makeServer("wedged")]);
+		const A = makeMortalClient();
+		const B = makeMortalClient();
+		createLSPClient.mockResolvedValueOnce(A).mockResolvedValueOnce(B);
+
+		await timedOut(FILE, "c0");
+		await timedOut(FILE, "c1");
+		// A served for over a minute, so its death respawns at once, no breaker.
+		vi.setSystemTime(Date.now() + 61_000);
+		A.kill();
+		await timedOut(FILE, "c2");
+
+		expect(createLSPClient).toHaveBeenCalledTimes(2);
+		expect(B.notify.open).toHaveBeenCalledTimes(1);
+		expect(demoted("wedged")).toBe(false);
+		expect(B.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("a replacement after a capacity eviction is not demoted on its first write timeout", async () => {
+		process.env.PI_LENS_LSP_CLIENT_CEILING = "1";
+		const { timedOut, demoted } = await start([
+			makeServer("wedged"),
+			makeServer("lua", ".lua"),
+		]);
+		const A = makeMortalClient();
+		const L = makeMortalClient(false);
+		const B = makeMortalClient();
+		createLSPClient
+			.mockResolvedValueOnce(A)
+			.mockResolvedValueOnce(L)
+			.mockResolvedValueOnce(B);
+
+		await timedOut(FILE, "c0");
+		await timedOut(FILE, "c1");
+		await timedOut("C:/repo/x.lua", "local x = 1");
+		expect(A.shutdown).toHaveBeenCalledTimes(1);
+		await timedOut(FILE, "c2");
+
+		expect(createLSPClient).toHaveBeenCalledTimes(3);
+		expect(B.notify.open).toHaveBeenCalledTimes(1);
+		expect(demoted("wedged")).toBe(false);
+		expect(B.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("a replacement after a TypeScript idle eviction is not demoted on its first write timeout", async () => {
+		process.env.PI_LENS_TS_IDLE_EVICT_MS = "1000";
+		const { timedOut, demoted } = await start([makeServer("typescript")]);
+		const A = makeMortalClient();
+		const B = makeMortalClient();
+		createLSPClient.mockResolvedValueOnce(A).mockResolvedValueOnce(B);
+
+		await timedOut(FILE, "c0");
+		await timedOut(FILE, "c1");
+		await vi.advanceTimersByTimeAsync(1_100);
+		expect(A.shutdown).toHaveBeenCalledTimes(1);
+		await timedOut(FILE, "c2");
+
+		expect(createLSPClient).toHaveBeenCalledTimes(2);
+		expect(B.notify.open).toHaveBeenCalledTimes(1);
+		expect(demoted("typescript")).toBe(false);
+		expect(B.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("a predecessor's write timeout that settles after the replacement registered does not strike it", async () => {
+		const { touch, timedOut, demoted } = await start([makeServer("wedged")]);
+		const A = makeMortalClient();
+		const B = makeMortalClient();
+		createLSPClient.mockResolvedValueOnce(A).mockResolvedValueOnce(B);
+
+		// A's write is outstanding when A dies and B is spawned for another file.
+		const late = touch(FILE, "c0");
+		await vi.advanceTimersByTimeAsync(10);
+		vi.setSystemTime(Date.now() + 61_000);
+		A.kill();
+		const first = touch("C:/repo/other.ts", "d0");
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS + 20);
+		await Promise.all([late, first]);
+		expect(createLSPClient).toHaveBeenCalledTimes(2);
+		await timedOut(FILE, "c1");
+
+		// B has timed out twice, not the three times demotion needs.
+		expect(B.notify.open).toHaveBeenCalledTimes(2);
+		expect(demoted("wedged")).toBe(false);
+		expect(B.shutdown).not.toHaveBeenCalled();
 	});
 });

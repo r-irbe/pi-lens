@@ -16,3 +16,11 @@ export function resolveWebTreeSitterPackageDir(deps: {
 	/** The working directory. */
 	cwd: () => string;
 }): string | undefined;
+
+/** The dir an installed pi-lens loads its core grammars from (#1185). */
+export function findCoreGrammarDir(deps: {
+	/** pi-lens's installed package root (the tarball ships `grammars/` there). */
+	packageRoot: string;
+	/** web-tree-sitter's package dir, when resolvable. */
+	webTreeSitterDir: string | undefined;
+}): string | undefined;

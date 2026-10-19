@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyFailureLog } from "../../scripts/lib/ci-failure-classifier.mjs";
 import { classifyNpmFailure } from "../../scripts/npm-retry.mjs";
 
@@ -19,10 +19,26 @@ const REPO_ROOT = path.resolve(
 const CLI = path.join(REPO_ROOT, "scripts/npm-retry.mjs");
 const tempDirs: string[] = [];
 
+// Recurrence: #4088. `execFileSync` copies the child's stderr to THIS process's
+// stderr unless `stdio` is given, so the stubbed exhaustion tests printed a real
+// `::error::infra: registry unreachable` line that GitHub rendered as a
+// `##[error]` annotation on a passing job. The CLI still emits the annotation
+// (the exhaustion tests assert it on the captured `e.stderr`); no test may re-echo
+// it into the host log.
+beforeEach(() => {
+	vi.spyOn(process.stderr, "write");
+});
+
 afterEach(() => {
+	const echoed = vi
+		.mocked(process.stderr.write)
+		.mock.calls.map(([chunk]) => String(chunk))
+		.join("");
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+	expect(echoed).not.toMatch(/^::(?:error|warning|notice)/m);
 });
 
 // A stub `npm` on PATH ahead of the real one, so this is hermetic (no live
@@ -66,6 +82,7 @@ function runCli(binDir: string, args: string[]) {
 			NPM_RETRY_BACKOFF_MS: "0,0,0",
 		},
 		encoding: "utf-8",
+		stdio: "pipe",
 	});
 }
 

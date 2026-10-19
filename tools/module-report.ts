@@ -182,7 +182,12 @@ type ReadRecord = {
 	endLine: number;
 };
 
-type ReadRecorder = (filePath: string, symbol: ReadRecord) => void;
+/** `toolCallId`: the host call that delivered the body (#3521 provenance). */
+type ReadRecorder = (
+	filePath: string,
+	symbol: ReadRecord,
+	toolCallId: string,
+) => void;
 
 function recordReadCoverage(
 	recordSymbolRead: ReadRecorder,
@@ -194,6 +199,7 @@ function recordReadCoverage(
 		endLine?: number;
 	},
 	phase: string,
+	toolCallId: string,
 ): boolean {
 	if (
 		!result.name ||
@@ -204,12 +210,16 @@ function recordReadCoverage(
 		return false;
 	}
 	try {
-		recordSymbolRead(result.path, {
-			name: result.name,
-			kind: result.kind,
-			startLine: result.startLine,
-			endLine: result.endLine,
-		});
+		recordSymbolRead(
+			result.path,
+			{
+				name: result.name,
+				kind: result.kind,
+				startLine: result.startLine,
+				endLine: result.endLine,
+			},
+			toolCallId,
+		);
 		return true;
 	} catch (err) {
 		logLatency({
@@ -270,7 +280,7 @@ export function createReadSymbolTool(
 			),
 		}),
 		async execute(
-			_toolCallId: string,
+			toolCallId: string,
 			params: { path: string; symbol: string; kind?: string },
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
@@ -324,6 +334,7 @@ export function createReadSymbolTool(
 				recordSymbolRead,
 				result,
 				"read_symbol_guard_error",
+				toolCallId,
 			);
 			const ambiguityNote = result.ambiguous
 				? ` (${result.ambiguous.count} matches — returned the ${result.kind}; pass \`kind\` to disambiguate: ${result.ambiguous.kinds.join(", ")})`
@@ -419,7 +430,7 @@ export function createReadEnclosingTool(
 			),
 		}),
 		async execute(
-			_toolCallId: string,
+			toolCallId: string,
 			params: {
 				path: string;
 				line: number;
@@ -491,6 +502,7 @@ export function createReadEnclosingTool(
 				recordSymbolRead,
 				result,
 				"read_enclosing_guard_error",
+				toolCallId,
 			);
 			const range = result.partial
 				? `${result.startLine}-${result.endLine} (partial of ${result.enclosingStartLine}-${result.enclosingEndLine})`

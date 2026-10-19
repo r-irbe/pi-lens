@@ -37,6 +37,15 @@
 //                                 PR lane stayed broken on a second infra
 //                                 kill after the workflow gate was widened
 //                                 (#2042). Unset keeps the push shape.
+//   CLASSIFY_CLI_TEST_RUN_EVENT     optional: the run's own `event` (#4382).
+//   CLASSIFY_CLI_TEST_LISTED_PRS    optional: JSON array served verbatim as
+//                                 the run's `pull_requests` (#4382), the
+//                                 payload shape that crashed run 38514228860.
+//                                 Unset keeps the pre-existing shape.
+//   CLASSIFY_CLI_TEST_COMMENT_DENY  optional (#4382): `read` answers every
+//                                 comments GET with 403, `write` answers
+//                                 every comment POST/PATCH with 403 -- the
+//                                 token-without-scope response.
 //
 // Fixed to run id 999 / job id 111 / job name "Unit tests", matching the
 // exact production argv this test exercises
@@ -65,7 +74,14 @@ const callLogPath = process.env.CLASSIFY_CLI_TEST_CALL_LOG;
 const rerunStatus = Number(process.env.CLASSIFY_CLI_TEST_RERUN_STATUS ?? "201");
 const runAttempt = Number(process.env.CLASSIFY_CLI_TEST_RUN_ATTEMPT ?? "1");
 const priorComment = process.env.CLASSIFY_CLI_TEST_PR_COMMENT;
+const runEvent = process.env.CLASSIFY_CLI_TEST_RUN_EVENT;
+const listedPrs = process.env.CLASSIFY_CLI_TEST_LISTED_PRS;
+const commentDeny = process.env.CLASSIFY_CLI_TEST_COMMENT_DENY;
 const PR_NUMBER = 42;
+const FORBIDDEN = () =>
+	new Response('{"message":"Resource not accessible by integration"}', {
+		status: 403,
+	});
 const comments = priorComment ? [{ id: 555, body: priorComment }] : [];
 
 function record(method, url) {
@@ -86,7 +102,13 @@ globalThis.fetch = async (url, init = {}) => {
 			JSON.stringify({
 				head_sha: "deadbeef",
 				run_attempt: runAttempt,
-				pull_requests: priorComment ? [{ number: PR_NUMBER }] : [],
+				...(runEvent === undefined ? {} : { event: runEvent }),
+				pull_requests:
+					listedPrs !== undefined
+						? JSON.parse(listedPrs)
+						: priorComment
+							? [{ number: PR_NUMBER }]
+							: [],
 			}),
 			{ status: 200 },
 		);
@@ -109,10 +131,22 @@ globalThis.fetch = async (url, init = {}) => {
 	// the CLI finds the one existing classifier comment and PATCHes it, so
 	// the POST branch is deliberately absent -- a POST here would mean the
 	// CLI failed to find a comment this stub definitely served.
-	if (method === "GET" && urlStr.includes(`/issues/${PR_NUMBER}/comments`)) {
+	// #4382: every comment URL of any issue number answers 403 under deny, as
+	// GitHub did for issue 23 of this repository.
+	if (commentDeny === "read" && method === "GET" && /\/comments/.test(urlStr)) {
+		return FORBIDDEN();
+	}
+	if (
+		commentDeny === "write" &&
+		method !== "GET" &&
+		/\/comments/.test(urlStr)
+	) {
+		return FORBIDDEN();
+	}
+	if (method === "GET" && /\/issues\/\d+\/comments/.test(urlStr)) {
 		return new Response(JSON.stringify(comments), { status: 200 });
 	}
-	if (method === "POST" && urlStr.includes(`/issues/${PR_NUMBER}/comments`)) {
+	if (method === "POST" && /\/issues\/\d+\/comments/.test(urlStr)) {
 		// Present so a stub GAP can never masquerade as a red: GitHub accepts
 		// this call, so a CLI that appends instead of upserting must fail on
 		// the test's own POST assertion, not on an "unmocked URL" throw.

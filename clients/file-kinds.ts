@@ -33,7 +33,7 @@ export type FileKind =
 	| "json" // JSON
 	| "jsts" // JavaScript/TypeScript/frameworks
 	| "kotlin" // Kotlin
-	| "lean4" // Lean 4
+	| "lean" // Lean 4
 	| "lua" // Lua
 	| "markdown" // Markdown
 	| "nix" // Nix
@@ -124,7 +124,7 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".vue",
 	],
 	kotlin: [".kt", ".kts"],
-	lean4: [".lean"],
+	lean: [".lean"],
 	lua: [".lua"],
 	markdown: [".md", ".mdx"],
 	nix: [".nix"],
@@ -189,6 +189,13 @@ export function isReadableSourceFile(filePath: string): boolean {
 }
 
 // --- Shared Project Root Markers ---
+
+/** Lake project markers shared by language-root and LSP-root discovery. */
+export const LEAN_ROOT_MARKERS: readonly string[] = [
+	"lakefile.lean",
+	"lakefile.toml",
+	"lean-toolchain",
+];
 
 /**
  * .NET project/solution root-marker globs (refs #895). Single source of truth
@@ -365,7 +372,7 @@ export const CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
 	"java",
 	"jsts",
 	"kotlin",
-	"lean4",
+	"lean",
 	"lua",
 	"nix",
 	"ocaml",
@@ -432,9 +439,9 @@ export function getFileKindLabel(kind: FileKind): string {
 		fsharp: "F#",
 		java: "Java",
 		kotlin: "Kotlin",
+		lean: "Lean 4",
 		swift: "Swift",
 		dart: "Dart",
-		lean4: "Lean 4",
 		lua: "Lua",
 		zig: "Zig",
 		haskell: "Haskell",
@@ -480,9 +487,9 @@ export function getLanguageId(kind: FileKind): string {
 		fsharp: "fsharp",
 		java: "java",
 		kotlin: "kotlin",
+		lean: "lean",
 		swift: "swift",
 		dart: "dart",
-		lean4: "lean4",
 		lua: "lua",
 		zig: "zig",
 		haskell: "haskell",

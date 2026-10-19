@@ -12,15 +12,43 @@
  * a ratchet both ways: a model edit that hides the bug reds, and a fix that
  * makes the invariant hold reds until its config says `pass`.
  *
- * Usage: node scripts/check-tla-models.mjs [--jar <tla2tools.jar>]
+ * Configs run through a bounded-concurrency pool (#3572) sized to the host's
+ * CPU count, so the job's wall time falls well below the sum of every
+ * config's own time. Every config always runs with a single TLC worker
+ * (#3517): TLC's `-workers auto` explores the state graph across several
+ * threads, so when a model can violate more than one invariant, whichever
+ * thread gets there first decides which one TLC reports — a race the pool
+ * would otherwise make worse, not better, by adding CPU contention. One
+ * worker gives deterministic BFS order and so a deterministic first
+ * violation, at no verdict cost either way: TLC still explores every
+ * reachable state before it can report `pass`, so pinning one worker only
+ * changes how long that takes, never whether a violation is found. Pinning
+ * every config, not only `violated` ones, also keeps the pool itself simple:
+ * it is the only source of concurrency, and TLC's own threading never
+ * competes with it for the same cores.
+ *
+ * `--shard i/N` (#3918) runs only the configs at sorted positions p with
+ * p % N === i - 1, so N CI jobs together run every config exactly once
+ * (ci.yml `tla-shards`; `tests/config/tla-models-shard-workflow.test.ts`
+ * pins the partition). Round-robin over the sorted list, not contiguous
+ * blocks: the slow models cluster in a few `formal/` directories, and
+ * stepping through the list spreads each directory across the shards.
+ *
+ * Usage: node scripts/check-tla-models.mjs [--jar <tla2tools.jar>] [--concurrency <n>] [--shard <i/N>]
+ * Every flag's value may use the space or the equals form (`--shard 1/4` and
+ * `--shard=1/4` are the same). An unknown flag, a missing value, or a
+ * positional argument is rejected before any download or JVM spawn, so a typo
+ * can never silently run the full, unsharded population (#3920).
  * Without --jar, the pinned release is downloaded to .cache/ and verified.
+ * Without --concurrency, the pool is sized to the host's CPU count.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs as parseNodeArgs } from "node:util";
 
 export const TLA_TOOLS = Object.freeze({
 	release: "v1.7.4",
@@ -56,6 +84,10 @@ export function parseModelHeader(text) {
 export function classifyTlcOutput(output) {
 	const violated = /Error: Invariant (\w+) is violated/.exec(output);
 	if (violated) return { status: "violated", invariant: violated[1] };
+	// A config with `CHECK_DEADLOCK TRUE` (a lock-order model, #3830) reports a
+	// cycle as `Error: Deadlock reached.`; a config expects it as `violated Deadlock`.
+	if (/^Error: Deadlock reached\./m.test(output))
+		return { status: "violated", invariant: "Deadlock" };
 	if (/Model checking completed\. No error has been found\./.test(output))
 		return { status: "pass" };
 	const errorLine = output
@@ -93,6 +125,71 @@ export function listModelConfigs(root) {
 }
 
 /**
+ * Validates a `--shard i/N` value: integers with 1 <= i <= N. A malformed
+ * value must throw here, never fall back to "all configs": a sharded CI job
+ * that silently ran everything would not fail, it would just stop being a
+ * shard.
+ */
+export function parseShardArg(raw) {
+	const match = /^(\d+)\/(\d+)$/.exec(String(raw));
+	const index = match ? Number(match[1]) : 0;
+	const total = match ? Number(match[2]) : 0;
+	if (index < 1 || index > total)
+		throw new Error(
+			`--shard must be i/N with 1 <= i <= N, got ${JSON.stringify(raw)}`,
+		);
+	return { index, total };
+}
+
+/** Shard `index` (1-based) of `total`: round-robin over the given order. */
+export function selectShard(configs, { index, total }) {
+	return configs.filter((_, position) => position % total === index - 1);
+}
+
+const CLI_OPTIONS = Object.freeze({
+	jar: { type: "string" },
+	concurrency: { type: "string" },
+	shard: { type: "string" },
+});
+
+/**
+ * Parse the checker's flags strictly. Every flag takes a value, so the
+ * `--shard 1/4` and `--shard=1/4` forms are equivalent; `node:util`'s parser
+ * handles both, leaving no second spelling to drift. `strict` rejects an
+ * unknown flag, a missing value, and a positional argument, each by throwing.
+ * `main()` calls this before the network or a JVM starts, so a typo can never
+ * silently fall through to the full, unsharded population (#3920).
+ */
+export function parseCliArgs(argv) {
+	const { values } = parseNodeArgs({
+		args: [...argv],
+		options: CLI_OPTIONS,
+		strict: true,
+		allowPositionals: false,
+	});
+	return { ...values };
+}
+
+/**
+ * The configs one run covers: every `.cfg` under `formal/`, narrowed by `--shard`
+ * when present. Throws on an empty selection so a shard with nothing to run
+ * (more shards than configs) is loud, not a green no-op.
+ */
+export function selectConfigs(argv, root) {
+	const { shard } = parseCliArgs(argv);
+	const all = listModelConfigs(root);
+	const configs =
+		shard === undefined ? all : selectShard(all, parseShardArg(shard));
+	if (configs.length === 0)
+		throw new Error(
+			shard === undefined
+				? "no formal/*/*.cfg found"
+				: `--shard ${shard} selects no formal/*/*.cfg`,
+		);
+	return configs;
+}
+
+/**
  * The jar TLC runs from, as an absolute path: TLC runs with each config's
  * directory as cwd, so a relative `--jar` would not resolve there.
  */
@@ -122,60 +219,212 @@ async function ensureJar(jarArg, root) {
 	return jar;
 }
 
+/**
+ * How many configs run at once. Bounded by the host's CPU count (more lanes
+ * than cores only adds scheduling overhead) and by the config count itself
+ * (never more lanes than there is work).
+ */
+export function computeConcurrency(numConfigs, availableParallelism) {
+	return Math.max(1, Math.min(numConfigs, availableParallelism));
+}
+
+/**
+ * Validates a user-supplied `--concurrency` value. A missing or non-numeric
+ * value (`Number(undefined)` is `NaN`) must fail loudly here rather than
+ * flow into the pool: `runPool`'s own `|| 1` guard would silently downgrade
+ * a typo'd flag to serial execution with no warning at all.
+ */
+export function parseConcurrencyArg(raw) {
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n < 1)
+		throw new Error(
+			`--concurrency must be an integer >= 1, got ${JSON.stringify(raw)}`,
+		);
+	return n;
+}
+
+/**
+ * The pool size for this run: an explicit valid `--concurrency` wins; without
+ * the flag, the host's parallelism and the config count bound the pool. Split
+ * out of `main` (#3927) so both the absent and the explicit branch are
+ * testable without a JVM or a network: `main` cannot reach this point in a
+ * test because `ensureJar` downloads or reads a real jar first.
+ */
+export function resolveConcurrency(
+	concurrencyRaw,
+	numConfigs,
+	availableParallelism,
+) {
+	return concurrencyRaw === undefined
+		? computeConcurrency(numConfigs, availableParallelism)
+		: parseConcurrencyArg(concurrencyRaw);
+}
+
+/**
+ * The run's final summary line. Split out of `main` (#3927) so the whole-run
+ * and sharded renderings are directly testable: it is the run's only
+ * observable account of how many configs ran, at what shard and concurrency,
+ * so a mutation here must red.
+ */
+export function formatSummary(configCount, shard, wallSeconds, concurrency) {
+	const shardSuffix = shard === undefined ? "" : ` (shard ${shard})`;
+	return `${configCount} configs${shardSuffix}, ${wallSeconds.toFixed(1)}s wall (concurrency=${concurrency}, 1 TLC worker/config).`;
+}
+
+/**
+ * The `java` argv TLC runs with, as a pure function so tests need no JVM.
+ * Always runs with a single TLC worker (`-workers 1`, #3517): TLC's
+ * `-workers auto` explores the state graph across several threads, so a
+ * model that can violate more than one invariant can report a different one
+ * depending on which thread gets there first. One worker gives deterministic
+ * BFS order, at no verdict cost, since TLC still explores every reachable
+ * state before it can report `pass` regardless of worker count.
+ *
+ * `-Djava.io.tmpdir` is pinned to the run's own metadir: SANY extracts the
+ * TLA+ standard modules (Naturals.tla, Sequences.tla, ...) to the JVM's temp
+ * dir under a fixed name, not a unique one, so two TLC processes sharing the
+ * OS temp dir can race there and one sees the other's half-written copy
+ * (`tla2sany.semantic.AbortException`) — reproduced running the pool over
+ * all of formal/ during this change's own development (see this PR's Tests
+ * section for the stress-probe numbers). The pool makes this collision
+ * likelier by running several TLC processes at once, so isolating it is
+ * this change's own job, not a pre-existing risk merely inherited from the
+ * CI host.
+ */
+export function buildJavaArgs(jar, metadir, configBasename, module) {
+	return [
+		`-Djava.io.tmpdir=${metadir}`,
+		"-XX:+UseParallelGC",
+		"-cp",
+		jar,
+		"tlc2.TLC",
+		"-workers",
+		"1",
+		"-metadir",
+		metadir,
+		"-config",
+		configBasename,
+		module,
+	];
+}
+
 function runTlc(jar, config, module) {
 	const metadir = fs.mkdtempSync(path.join(os.tmpdir(), "tlc-"));
-	try {
-		const result = spawnSync(
-			"java",
-			[
-				"-XX:+UseParallelGC",
-				"-cp",
-				jar,
-				"tlc2.TLC",
-				"-workers",
-				"auto",
-				"-metadir",
-				metadir,
-				"-config",
-				path.basename(config),
-				module,
-			],
-			{ cwd: path.dirname(config), encoding: "utf8", maxBuffer: 64 << 20 },
-		);
-		if (result.error) return { status: "error", detail: result.error.message };
-		return classifyTlcOutput(`${result.stdout}\n${result.stderr}`);
-	} finally {
-		fs.rmSync(metadir, { recursive: true, force: true });
+	const args = buildJavaArgs(jar, metadir, path.basename(config), module);
+	return new Promise((resolve) => {
+		let child;
+		try {
+			child = spawn("java", args, { cwd: path.dirname(config) });
+		} catch (error) {
+			fs.rmSync(metadir, { recursive: true, force: true });
+			resolve({ status: "error", detail: error.message });
+			return;
+		}
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.on("error", (error) => {
+			fs.rmSync(metadir, { recursive: true, force: true });
+			resolve({ status: "error", detail: error.message });
+		});
+		child.on("close", () => {
+			fs.rmSync(metadir, { recursive: true, force: true });
+			resolve(classifyTlcOutput(`${stdout}\n${stderr}`));
+		});
+	});
+}
+
+/**
+ * Runs `task` over `items` with at most `concurrency` in flight at once,
+ * returning results in input order regardless of completion order. Plain
+ * async, no timers or real processes of its own, so it is unit-testable
+ * with synthetic tasks (`tests/scripts/check-tla-models.test.ts`).
+ */
+export async function runPool(items, concurrency, task) {
+	const results = Array.from({ length: items.length });
+	let next = 0;
+	async function lane() {
+		for (;;) {
+			const i = next;
+			next += 1;
+			if (i >= items.length) return;
+			results[i] = await task(items[i], i);
+		}
 	}
+	const lanes = Array.from(
+		{ length: Math.min(concurrency, items.length) || 1 },
+		lane,
+	);
+	await Promise.all(lanes);
+	return results;
 }
 
 async function main() {
 	const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-	const jarIndex = process.argv.indexOf("--jar");
-	const jar = await ensureJar(
-		jarIndex === -1 ? undefined : process.argv[jarIndex + 1],
-		root,
+	const argv = process.argv.slice(2);
+	// Every flag is parsed and validated before any download or JVM spawn
+	// (#3920): a typo must fail loudly here, never run the full population.
+	const {
+		jar: jarArg,
+		concurrency: concurrencyRaw,
+		shard,
+	} = parseCliArgs(argv);
+	const configs = selectConfigs(argv, root);
+
+	const availableParallelism =
+		typeof os.availableParallelism === "function"
+			? os.availableParallelism()
+			: os.cpus().length;
+	const concurrency = resolveConcurrency(
+		concurrencyRaw,
+		configs.length,
+		availableParallelism,
 	);
-	const configs = listModelConfigs(root);
-	if (configs.length === 0) throw new Error("no formal/*/*.cfg found");
-	let failures = 0;
-	for (const config of configs) {
+	const jar = await ensureJar(jarArg, root);
+
+	const wallStarted = Date.now();
+	const outcomes = await runPool(configs, concurrency, async (config) => {
 		const name = path.relative(root, config);
 		const header = parseModelHeader(fs.readFileSync(config, "utf8"));
 		if (header.error) {
-			failures += 1;
 			console.log(`FAIL ${name}: ${header.error}`);
-			continue;
+			return { name, dir: path.dirname(name), ok: false, seconds: 0 };
 		}
 		const started = Date.now();
-		const actual = runTlc(jar, config, header.module);
-		const seconds = ((Date.now() - started) / 1000).toFixed(1);
+		const actual = await runTlc(jar, config, header.module);
+		const seconds = (Date.now() - started) / 1000;
 		const ok = verdictMatches(header.expect, actual);
-		if (!ok) failures += 1;
 		console.log(
-			`${ok ? "ok  " : "FAIL"} ${name}: expected ${describeVerdict(header.expect)}, got ${describeVerdict(actual)} (${seconds}s)`,
+			`${ok ? "ok  " : "FAIL"} ${name}: expected ${describeVerdict(header.expect)}, got ${describeVerdict(actual)} (${seconds.toFixed(1)}s)`,
 		);
+		return { name, dir: path.dirname(name), ok, seconds };
+	});
+	const wallSeconds = (Date.now() - wallStarted) / 1000;
+
+	const failures = outcomes.filter((outcome) => !outcome.ok).length;
+	const perDir = new Map();
+	for (const outcome of outcomes) {
+		const totals = perDir.get(outcome.dir) ?? { seconds: 0, count: 0 };
+		totals.seconds += outcome.seconds;
+		totals.count += 1;
+		perDir.set(outcome.dir, totals);
 	}
+	const dirLines = [...perDir.entries()]
+		.sort((a, b) => b[1].seconds - a[1].seconds)
+		.map(
+			([dir, totals]) =>
+				`  ${dir}: ${totals.seconds.toFixed(1)}s summed over ${totals.count} configs`,
+		);
+	console.log("");
+	console.log(formatSummary(configs.length, shard, wallSeconds, concurrency));
+	console.log("Per-directory TLC time (summed, not wall time):");
+	for (const line of dirLines) console.log(line);
+
 	if (failures > 0) {
 		console.log(`${failures} of ${configs.length} models did not match.`);
 		process.exitCode = 1;

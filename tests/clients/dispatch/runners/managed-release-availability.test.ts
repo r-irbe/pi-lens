@@ -138,21 +138,38 @@ async function actionlintChecker() {
 	return checkerFor("actionlint", ".exe");
 }
 
+/**
+ * Counts the installer's managed-release lookups. Passes through to the real
+ * lookup, so it observes the seam without replacing it (#2660).
+ */
+async function managedReleaseLookups() {
+	const installer = await import("../../../../clients/installer/index.js");
+	return vi.spyOn(installer, "findManagedToolBinary");
+}
+
 async function spawnMock() {
 	const mod = await import("../../../../clients/safe-spawn.js");
 	return vi.mocked(mod.safeSpawnAsync);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
 	vi.resetModules();
+	// This suite witnesses the managed-release rung against a project venv; it
+	// runs trusted so the project venv outranks the managed rungs. The latch is
+	// set AFTER `vi.resetModules()`, because a reset re-evaluates the module
+	// graph and discards a latch set on the previous instance.
+	(await import("../../../../clients/project-trust.js")).setProjectTrustState(
+		"trusted",
+	);
 	logLatencySpy.mockReset();
 	tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2140-home-"));
 	cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-2140-cwd-"));
 	piLensDirHolder.dir = tmpHome;
 });
 
-afterEach(() => {
+afterEach(async () => {
 	vi.useRealTimers();
+	(await import("../../../../clients/project-trust.js")).resetProjectTrust();
 	removeTempDirSync(tmpHome);
 	removeTempDirSync(cwd);
 });
@@ -163,11 +180,21 @@ describe("availability probe: pi-lens's own managed bin dir (#2140)", () => {
 		(await spawnMock()).mockImplementation(async (command: string) =>
 			command === managed ? (versionOk() as never) : (enoent() as never),
 		);
+		const managedReleaseLookupSpy = await managedReleaseLookups();
+		const helpers =
+			await import("../../../../clients/dispatch/runners/utils/runner-helpers.js");
 
 		const checker = await actionlintChecker();
 
 		expect(await checker.isAvailableAsync(cwd)).toBe(true);
 		expect(checker.getCommand(cwd)).toBe(managed);
+		// The resolver's own result is authoritative; do not re-run its installer
+		// lookup just to reconstruct which rung answered (#2660).
+		expect(managedReleaseLookupSpy).toHaveBeenCalledTimes(1);
+		expect(await helpers.createVenvFinder("actionlint", ".exe")(cwd)).toEqual({
+			path: managed,
+			rung: "managed-release",
+		});
 		// Pre-fix this was two rows: a latched `unavailable` from the PATH-only
 		// probe, then the install fallback's compensating `available`.
 		expect(decisions()).toHaveLength(1);
@@ -216,10 +243,16 @@ describe("availability probe: pi-lens's own managed bin dir (#2140)", () => {
 				: (enoent() as never),
 		);
 
+		const lookups = await managedReleaseLookups();
+
 		const checker = await checkerFor("shellcheck", ".exe");
 
 		expect(await checker.isAvailableAsync(cwd)).toBe(true);
 		expect(checker.getCommand(cwd)).toBe(venv);
+		// The venv answers first, so no managed lookup runs at all. Before #2660
+		// the evidence formatter asked the installer once more to rule a managed
+		// hit out.
+		expect(lookups).not.toHaveBeenCalled();
 		// A venv hit is not a managed hit, and must not be labelled as one.
 		expect(decisions()[0].metadata.evidence.binary).toBeUndefined();
 		expect(decisions()[0].metadata.evidence.source).toBeUndefined();
@@ -278,10 +311,15 @@ describe("availability probe: pi-lens's own managed bin dir (#2140)", () => {
 				: (versionOk() as never),
 		);
 
+		const lookups = await managedReleaseLookups();
+
 		const checker = await actionlintChecker();
 
 		expect(await checker.isAvailableAsync(cwd)).toBe(true);
 		expect(checker.getCommand(cwd)).toBe("actionlint");
 		expect(decisions()[0].metadata.evidence.source).toBeUndefined();
+		// The ladder's own lookup is the only one: a PATH answer must not trigger
+		// a second installer lookup to rule managed evidence out (#2660).
+		expect(lookups).toHaveBeenCalledTimes(1);
 	});
 });

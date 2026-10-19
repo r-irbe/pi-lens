@@ -192,6 +192,10 @@ describe.each(GLOBAL_ONLY_NON_FLAG_KEYS)(
 			expect(warnedFor(`"${configKey}" is a global-only`), configKey).toBe(
 				true,
 			);
+			expect(
+				warnedFor("pass the matching CLI flag"),
+				`${configKey} is not backed by a CLI flag`,
+			).toBe(false);
 			// Every field EXCEPT `.raw`/`.configPath` — `.raw` deliberately mirrors
 			// the whole file for other subsystems (trivy-client.ts,
 			// helm-render.ts) and must still carry the value; that is not this

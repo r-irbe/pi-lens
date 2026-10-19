@@ -33,6 +33,7 @@ import {
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
 import type { LSPDiagnostic } from "../../../clients/lsp/client.js";
 import {
+	noteWorkspaceFileCreated,
 	resetWorkspaceDiagnosticsCacheSession,
 	workspaceDiagnosticsCacheSessionStart,
 } from "../../../clients/lsp/workspace-diagnostics-session.js";
@@ -126,6 +127,41 @@ describe("classifyWorkspaceDiagnosticsCacheExpiry — the policy, in isolation",
 				scannedAt,
 			),
 		).toBe("max-age");
+	});
+
+	// #4320 recurrence: a "cannot find module" finding replayed after the module
+	// was created, because an unresolved import has no edge in the dependency
+	// index and the importer's own bytes never changed.
+	it("expires a finding-bearing entry scanned at or before the latest file creation (#4320)", () => {
+		expect(
+			classifyWorkspaceDiagnosticsCacheExpiry(
+				findingEntry(now),
+				now,
+				now - 10,
+				now,
+			),
+		).toBe("file-created");
+		expect(
+			classifyWorkspaceDiagnosticsCacheExpiry(
+				findingEntry(now + 1),
+				now + 1,
+				now - 10,
+				now,
+			),
+		).toBeUndefined();
+	});
+
+	it("never expires a clean entry on a file creation (#4320)", () => {
+		const clean: WorkspaceDiagnosticsCacheEntry = {
+			diagnostics: [],
+			count: 0,
+			mtimeMs: 1,
+			scannedAt: now - 5,
+			scopeKey: SCOPE,
+		};
+		expect(
+			classifyWorkspaceDiagnosticsCacheExpiry(clean, now, now - 10, now),
+		).toBeUndefined();
 	});
 
 	it("never expires a clean entry — its only claim is 'unchanged', which the mtime/dependency gates verify", () => {
@@ -291,6 +327,146 @@ describe("expiry observability (#1782 AC4)", () => {
 		vi.doUnmock("../../../clients/latency-logger.js");
 		vi.resetModules();
 	});
+
+	// #4320: a finding dropped because a file was created is counted under its
+	// own reason, in the same single record, not folded into preSession.
+	it("counts a creation-dropped finding as fileCreated, not preSession", async () => {
+		vi.resetModules();
+		const logLatency = vi.fn();
+		vi.doMock("../../../clients/latency-logger.js", async (importOriginal) => ({
+			...(await importOriginal<Record<string, unknown>>()),
+			logLatency,
+		}));
+		const cacheModule =
+			await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+		const sessionModule =
+			await import("../../../clients/lsp/workspace-diagnostics-session.js");
+		const start = Date.now();
+		sessionModule.resetWorkspaceDiagnosticsCacheSession(start);
+		const file = path.join(tmp, "importer.ts");
+		fs.writeFileSync(file, "import './new_module';\n");
+		cacheModule.saveWorkspaceDiagnosticsCache(tmp, {
+			version: cacheModule.WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheModule.cacheKeyFor(file)]: {
+					diagnostics: [blockingDiagnostic()],
+					count: 1,
+					mtimeMs: fs.statSync(file).mtimeMs,
+					scannedAt: start + 1,
+					scopeKey: SCOPE,
+				},
+			},
+		});
+		sessionModule.noteWorkspaceFileCreated("typescript", tmp, start + 10);
+
+		const ctx = cacheModule.createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(file, SCOPE)).toBeUndefined();
+		ctx.persist();
+
+		const records = logLatency.mock.calls
+			.map((call) => call[0])
+			.filter(
+				(record) => record?.phase === "lsp_workspace_diagnostics_cache_expiry",
+			);
+		expect(records).toHaveLength(1);
+		expect(records[0].metadata.fileCreated).toBe(1);
+		expect(records[0].metadata.preSession).toBe(0);
+		vi.doUnmock("../../../clients/latency-logger.js");
+		vi.resetModules();
+	});
+});
+
+describe("lookup() after a file creation (#4320)", () => {
+	function seedTwo(): { importer: string; clean: string } {
+		const importer = path.join(tmp, "importer.ts");
+		const clean = path.join(tmp, "clean.ts");
+		fs.writeFileSync(importer, "import './new_module';\n");
+		fs.writeFileSync(clean, "export const a = 1;\n");
+		const entry = (
+			file: string,
+			found: boolean,
+		): WorkspaceDiagnosticsCacheEntry => ({
+			diagnostics: found ? [blockingDiagnostic()] : [],
+			count: found ? 1 : 0,
+			mtimeMs: fs.statSync(file).mtimeMs,
+			scannedAt: sessionStart + 1,
+			scopeKey: SCOPE,
+		});
+		saveWorkspaceDiagnosticsCache(tmp, {
+			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+			entries: {
+				[cacheKeyFor(importer)]: entry(importer, true),
+				[cacheKeyFor(clean)]: entry(clean, false),
+			},
+		});
+		return { importer, clean };
+	}
+
+	it("drops a finding-bearing entry scanned before the creation and keeps a clean one", () => {
+		const { importer, clean } = seedTwo();
+		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		expect(ctx.lookup(importer, SCOPE)).toBeUndefined();
+		expect(ctx.lookup(clean, SCOPE)).toBeDefined();
+	});
+
+	it("serves the same entry when no file was created", () => {
+		const { importer } = seedTwo();
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+		).toBeDefined();
+	});
+
+	// #4320 r2 (F3): round 1 dropped every finding entry in the process on any
+	// Created, from any server, language or root (321 ms instead of 6 ms for a
+	// two-file replay after an unrelated write). Only the server that heard of
+	// the new file can answer differently, and only under the root it serves.
+	it("keeps serving a finding entry when the creation reached another server", () => {
+		const { importer } = seedTwo();
+		noteWorkspaceFileCreated("pyrefly", tmp, sessionStart + 10);
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+		).toBeDefined();
+	});
+
+	it("keeps serving a finding entry when its server heard of a creation under another root", () => {
+		const { importer } = seedTwo();
+		const elsewhere = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-cache-expiry-other-"),
+		);
+		try {
+			noteWorkspaceFileCreated("typescript", elsewhere, sessionStart + 10);
+			expect(
+				createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+			).toBeDefined();
+		} finally {
+			fs.rmSync(elsewhere, { recursive: true, force: true });
+		}
+	});
+
+	// #4320 r2: the creation records are bounded; dropping the oldest must refuse
+	// more entries, never serve one a dropped record covered.
+	it("still refuses the entry after its creation record is evicted", () => {
+		const { importer } = seedTwo();
+		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
+		for (let index = 0; index < 200; index += 1) {
+			noteWorkspaceFileCreated(`other-${index}`, tmp, sessionStart + 2);
+		}
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+		).toBeUndefined();
+	});
+
+	// #4320: a marker that outlived its session would drop every finding entry of
+	// every later session in a long-lived extension host.
+	it("does not outlive the session: re-arming the clock clears it", () => {
+		const { importer } = seedTwo();
+		noteWorkspaceFileCreated("typescript", tmp, sessionStart + 10);
+		resetWorkspaceDiagnosticsCacheSession(sessionStart);
+		expect(
+			createWorkspaceDiagnosticsCacheContext(tmp).lookup(importer, SCOPE),
+		).toBeDefined();
+	});
 });
 
 describe("session clock re-arm (#1782)", () => {
@@ -364,6 +540,7 @@ describe("runWorkspaceDiagnostics honors the expiry bound end to end (#1782 AC3)
 			id: "typescript",
 			name: "typescript",
 			extensions: [".ts"],
+			idleEviction: "resident",
 			root: async () => tmpSweep,
 			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 		};

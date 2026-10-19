@@ -152,6 +152,27 @@ describe("a migration notice names the file the resolver actually reads (#2426 F
 	});
 });
 
+describe("honest project-scope notices for non-flag settings (#3150)", () => {
+	it("emits the global-only maxFixes warning without inventing a CLI flag", async () => {
+		const projectDir = tmpRoot("pi-lens-3150-project-");
+		write(path.join(projectDir, ".pi-lens.json"), {
+			actionableWarnings: { autoFix: { enabled: true, maxFixes: 99 } },
+		});
+
+		const { loadPiLensProjectConfig, resetProjectLensConfigCache } =
+			await import("../../clients/project-lens-config.js");
+		resetProjectLensConfigCache();
+		loadPiLensProjectConfig(projectDir);
+
+		const notice = notices.find((message) =>
+			message.includes('"actionableWarnings.autoFix.maxFixes"'),
+		);
+		expect(notice, JSON.stringify(notices)).toBeDefined();
+		expect(notice).toContain("set it in");
+		expect(notice).not.toContain("pass the matching CLI flag");
+	});
+});
+
 describe("each loader reports only the records it owns (#2426 F2)", () => {
 	it("emits ONE notice for a legacy root LSP key in a canonical project file", async () => {
 		const home = tmpRoot("pi-lens-own-home-");

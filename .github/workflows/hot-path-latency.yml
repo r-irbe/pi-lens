@@ -1,0 +1,120 @@
+name: Hot-path latency
+
+# #4363: times session_start, dispatch and the diagnostics-cache replay on the
+# checked-out commit and on its first parent, and fails only on a regression
+# that is both statistically significant and above a stated threshold. A pull
+# request checks out GitHub's merge of its head into master's tip, so the first
+# parent is that tip and the comparison isolates what the PR changes. A master
+# push compares the pushed commit with the one before it. The rule, the
+# sampler and the fixtures are in scripts/lib/latency-stats.mjs,
+# scripts/check-hot-path-latency.mjs and scripts/hot-path-sample.mjs. Before
+# this lane only a reviewer re-running a probe caught #4344 round 1 (replay
+# 6 ms to 321 ms).
+#
+# ADVISORY. The check name ends in "(advisory)", so ci-verdict and the check
+# list read a red as a note, and the job does not use continue-on-error, so the
+# run conclusion stays truthful. Flip it to a required check only after 10
+# consecutive master push runs conclude success with no false red:
+#
+#   gh run list --workflow hot-path-latency.yml --branch master --event push \
+#     --limit 10 --json conclusion --jq 'all(.[]; .conclusion == "success")'
+#
+# Prints true when the last 10 master runs were all green. Only master pushes
+# that touch the paths below run, so the streak counts those. A red master run
+# is read by hand: a real regression and a false red both reset the count, and
+# a false red is a threshold bug to fix before the flip.
+#
+# COST. About 3 minutes of one ubuntu-latest runner (2m36s on the first run,
+# #4389): install, two tsc builds, 2 x 16 one-process samples of about 4 s on a
+# hosted runner. It runs only when a path the hot paths read changes (the
+# filters below). It uses no Actions cache (setup-node `cache:` is off on
+# purpose): the repository sits at its 10 GB cache cap (#4358) and a cache
+# write here would evict a CI entry.
+#
+# LIMIT. Both trees run on the head's node_modules, so a dependency bump is not
+# compared. The sampler times pi-lens's own code; a language server's time is
+# not in it.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "clients/**"
+      - "tools/**"
+      - "rules/**"
+      - "index.ts"
+      - "vendor/**"
+      - "tsconfig*.json"
+      - "scripts/hot-path-sample.mjs"
+      - "scripts/check-hot-path-latency.mjs"
+      - "scripts/lib/latency-stats.mjs"
+      - ".github/workflows/hot-path-latency.yml"
+  push:
+    branches: [master]
+    paths:
+      - "clients/**"
+      - "tools/**"
+      - "rules/**"
+      - "index.ts"
+      - "vendor/**"
+      - "tsconfig*.json"
+      - "scripts/hot-path-sample.mjs"
+      - "scripts/check-hot-path-latency.mjs"
+      - "scripts/lib/latency-stats.mjs"
+      - ".github/workflows/hot-path-latency.yml"
+  workflow_dispatch: {}
+
+permissions: {}
+
+# A pull request shares one group per ref and cancels superseded runs. A push
+# or a manual run gets its own group per commit: GitHub cancels a PENDING run
+# when a newer one queues in the same group even without cancel-in-progress,
+# and a `cancelled` master run would break the 10-green flip command above.
+concurrency:
+  group: hot-path-latency-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  latency:
+    name: Hot-path latency (advisory)
+    runs-on: ubuntu-latest
+    # The first run took 2m36s. The script stops itself at 10 minutes
+    # (DEFAULT_BUDGET_MS), half of this cap, so a hung sample ends as a harness
+    # failure and not as a cancelled run.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund --ignore-scripts
+
+      - name: Build head
+        run: npm run build
+
+      # HEAD^1 is master's tip for a pull request (the merge ref's first parent)
+      # and the previous commit for a push or a manual run.
+      - name: Build base
+        run: |
+          set -eu
+          base_sha=$(git rev-parse HEAD^1)
+          echo "base $base_sha, head $(git rev-parse HEAD)"
+          git worktree add --detach "$RUNNER_TEMP/base" "$base_sha"
+          ln -s "$PWD/node_modules" "$RUNNER_TEMP/base/node_modules"
+          cd "$RUNNER_TEMP/base"
+          npm run build
+
+      - name: Time the hot paths on base and head
+        run: |
+          node scripts/check-hot-path-latency.mjs \
+            --base "$RUNNER_TEMP/base" --head "$PWD" --runs 15 \
+            --scratch "$RUNNER_TEMP/hot-path-scratch" \
+            --json "$RUNNER_TEMP/hot-path-latency.json"

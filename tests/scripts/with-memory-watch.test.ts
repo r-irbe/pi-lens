@@ -712,7 +712,7 @@ describe.skipIf(process.platform === "win32")(
  * is one: the behaviour they guard only appears in a real CI kill, which no
  * unit test can stage.
  *
- * #3108: the mutation (advisory) lane mutates this file in place and runs
+ * #3108: the nightly Stryker lane mutates this file in place and runs
  * these tests against the INSTRUMENTED copy — same path, same repo root
  * (stryker.config.mjs sets `inPlace: true`, so there is no separate sandbox
  * directory to resolve away from), but every expression Stryker's

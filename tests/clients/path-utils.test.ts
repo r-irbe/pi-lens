@@ -1,7 +1,8 @@
-import * as fs from "node:fs";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Controllable `os.homedir()` override for the mutation-proof HOME-default
 // test below — `vi.spyOn(os, "homedir")` fails under Vitest's ESM
@@ -24,6 +25,8 @@ import {
 	findLocalToolConfig,
 	findNearestContaining,
 	findNearestMarkerRoot,
+	findNearestMarkerRootDetailed,
+	isRealGitMarker,
 	homeRelativePath,
 	matchesWorkspaceMemberPattern,
 	UV_WORKSPACE_EXCLUDE_DIALECT,
@@ -44,7 +47,12 @@ import {
 	uriToPath,
 	walkUpDirs,
 } from "../../clients/path-utils.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { createCaseAliasFixture, setupTestEnvironment } from "./test-utils.js";
+import { withPlatform } from "../support/platform-stub.js";
 
 describe("isWindowsPath (#1213 review pins)", () => {
 	it("matches drive-prefixed and UNC shapes only", async () => {
@@ -158,6 +166,32 @@ describe("normalizeFilePath: Windows-shaped path is OS-coherent (refs #1150, cla
 		expect(normalizeFilePath(nonExistent)).toBe(
 			normalizeFilePath(nonExistentBack),
 		);
+	});
+
+	it("treats rooted slash forms as the same Windows key", () => {
+		// RECURRENCE GUARDED: a rooted slash path is drive-relative on Windows,
+		// not a POSIX filesystem identity. Both separator spellings must therefore
+		// stay in the same Windows-only key arm (#4045 R3).
+		const native = vi
+			.spyOn(fs.realpathSync, "native")
+			.mockImplementation((value) => {
+				if (String(value).startsWith("/proj/"))
+					return "D:\\proj\\providers\\model-fetcher.ts";
+				throw new Error("synthetic missing path");
+			});
+		try {
+			expect(
+				withPlatform("win32", () =>
+					normalizeFilePath("\\proj\\providers\\model-fetcher.ts"),
+				),
+			).toBe(
+				withPlatform("win32", () =>
+					normalizeFilePath("/proj/providers/model-fetcher.ts"),
+				),
+			);
+		} finally {
+			native.mockRestore();
+		}
 	});
 
 	it("preserves the path structure and drive-letter shape — never collapses to a cwd-relative key", () => {
@@ -276,8 +310,42 @@ describe("normalizeFilePath: POSIX adopts on-disk casing (#3098, the live half o
 			// Nothing on disk can say which spelling is real, and on a
 			// case-sensitive filesystem `NOPE` and `nope` are two different
 			// directories — folding one into the other is the #3098 non-goal.
-			expect(normalizeMapKey(absent)).toBe(absent.replace(/\\/g, "/"));
+			// win32 folds the part of the key that names nothing on disk to lower
+			// case (`normalizeMapKey`'s win32 arm, a spelling rule of the key rather
+			// than an on-disk guess) while the existing ancestor keeps its on-disk
+			// spelling, so only the absent tail changes there (#4019).
+			const spelled = tmpDir.replace(/\\/g, "/");
+			const tail = "NOPE/b.ts";
+			expect(normalizeMapKey(absent)).toBe(
+				`${spelled}/${process.platform === "win32" ? tail.toLowerCase() : tail}`,
+			);
 		} finally {
+			cleanup();
+		}
+	});
+
+	it("POSIX relative existing and empty keys keep their prior contract", (ctx) => {
+		// RECURRENCE GUARDED: the Windows-only relative/empty guard once ran on
+		// POSIX too, bypassing realpath casing for relative existing paths and
+		// changing the empty sentinel's owning arm (#4045 F1).
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-relative-");
+		const previousCwd = process.cwd();
+		try {
+			ctx.skip(
+				process.platform === "win32",
+				"POSIX realpath/casing fixture requires a POSIX filesystem; Windows arm is covered by rooted-shape tests",
+			);
+			process.chdir(tmpDir);
+			const alias = createCaseAliasFixture(".", { dirName: "subDir" });
+			ctx.skip(alias.skipReason !== undefined, alias.skipReason ?? "");
+			withPlatform("linux", () => {
+				expect(normalizeFilePath(alias.rawMisCased)).toBe(
+					alias.onDisk.replace(/\\/g, "/"),
+				);
+				expect(normalizeFilePath("")).toBe("");
+			});
+		} finally {
+			process.chdir(previousCwd);
 			cleanup();
 		}
 	});
@@ -497,6 +565,11 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		expect(normalizeMapKey("../src/a.ts")).not.toContain(
 			process.cwd().replace(/\\/g, "/"),
 		);
+		// Recurrence: the native Windows arm used win32.resolve() for this
+		// path-only key, making it depend on the runner's current drive.
+		expect(
+			withPlatform("win32", () => normalizeMapKey("src/../src/a.ts")),
+		).toBe("src/a.ts");
 	});
 
 	it("an empty string is returned unchanged, not invented into the cwd", () => {
@@ -504,6 +577,7 @@ describe("normalizeFilePath: dot segments fold into the canonical key (#3184)", 
 		// documented non-path sentinel in this codebase's path-typed fields
 		// (see `normalizeLoggedPath`'s doc), never a request for the cwd.
 		expect(normalizeMapKey("")).toBe("");
+		expect(withPlatform("win32", () => normalizeMapKey(""))).toBe("");
 	});
 
 	it("a UNC-shaped root keeps its leading double slash on POSIX", (ctx) => {
@@ -574,6 +648,81 @@ describe("toProjectRelativePath: Windows-shaped path relativizes on ANY OS (refs
 		// "../"-prefixed escape.
 		expect(toProjectRelativePath("C:\\other\\a.ts", "C:\\repo")).toBe(
 			"C:/other/a.ts",
+		);
+	});
+});
+
+describe("toProjectRelativePath: root spelled differently from the canonical key (#4101)", () => {
+	// Recurrence: the review graph keys files with `normalizeMapKey` (realpath on
+	// win32, on-disk casing on POSIX) and set them against the caller's root, so
+	// the `hintPath` of every file under an 8.3/junction/subst/mis-cased root
+	// came back absolute. `createCaseAliasFixture` is the POSIX stand-in.
+	it.skipIf(process.platform === "win32")(
+		"relativizes a canonical key against a root that differs by case alone",
+		(ctx) => {
+			const env = setupTestEnvironment("pi-lens-relroot-");
+			try {
+				const fx = createCaseAliasFixture(env.tmpDir, { dirName: "proj" });
+				if (fx.skipReason) return ctx.skip(fx.skipReason);
+				const aliasRoot = path.dirname(fx.rawMisCased);
+				expect(normalizeMapKey(fx.rawMisCased)).toBe(fx.onDisk);
+				expect(
+					toProjectRelativePath(normalizeMapKey(fx.rawMisCased), aliasRoot),
+				).toBe("a.ts");
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"relativizes a file spelled with the alias against a canonical root",
+		(ctx) => {
+			const env = setupTestEnvironment("pi-lens-relroot-");
+			try {
+				const fx = createCaseAliasFixture(env.tmpDir, { dirName: "proj" });
+				if (fx.skipReason) return ctx.skip(fx.skipReason);
+				expect(
+					toProjectRelativePath(fx.rawMisCased, path.dirname(fx.onDisk)),
+				).toBe("a.ts");
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	it("keeps a file that really is outside the root absolute", (ctx) => {
+		const env = setupTestEnvironment("pi-lens-relroot-");
+		try {
+			const fx = createCaseAliasFixture(env.tmpDir, { dirName: "proj" });
+			if (fx.skipReason) return ctx.skip(fx.skipReason);
+			const outside = path.join(env.tmpDir, "elsewhere.ts");
+			fs.writeFileSync(outside, "x\n");
+			expect(
+				toProjectRelativePath(
+					normalizeMapKey(outside),
+					path.dirname(fx.rawMisCased),
+				),
+			).toBe(normalizeMapKey(outside).replace(/\\/g, "/"));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Folded LOW finding: `startsWith("..")` read a directory named `..evil` as an
+	// escape from the root, so its files rendered absolute (the matcher in
+	// `rule-ignores.ts` already pins the same boundary, #3240 r3).
+	it("keeps the root's own parent directory absolute", () => {
+		expect(toProjectRelativePath("/repo", "/repo/sub")).toBe("/repo");
+		expect(toProjectRelativePath("C:\\repo", "C:\\repo\\sub")).toBe("C:/repo");
+	});
+
+	it("treats an in-root directory named with a leading '..' as inside", () => {
+		expect(toProjectRelativePath("/repo/..evil/x.ts", "/repo")).toBe(
+			"..evil/x.ts",
+		);
+		expect(toProjectRelativePath("C:\\repo\\..evil\\x.ts", "C:\\repo")).toBe(
+			"..evil/x.ts",
 		);
 	});
 });
@@ -849,6 +998,252 @@ describe("findLocalToolConfig (refs #680)", () => {
 			}
 		} finally {
 			env.cleanup();
+		}
+	});
+});
+
+describe("Git ownership certainty preserves the legacy marker API", () => {
+	it.each(["missing", "invalid-file", "headless-directory"])(
+		"keeps boolean callback results when the later marker is %s",
+		(shape) => {
+			const env = setupTestEnvironment("pi-lens-marker-callback-");
+			try {
+				const valid = path.join(env.tmpDir, "valid");
+				const absent = path.join(env.tmpDir, "absent");
+				fs.writeFileSync(valid, "gitdir: ../metadata\n");
+				if (shape === "invalid-file") {
+					fs.writeFileSync(absent, "not a Git marker\n");
+				} else if (shape === "headless-directory") {
+					fs.mkdirSync(absent);
+				}
+				const candidates = [valid, absent];
+				// Array supplies an index. A legacy predicate must not interpret it
+				// as an opt-in, on either the successful-stat or exception path.
+				const mapped: boolean[] = candidates.map(isRealGitMarker);
+				expect({
+					mapped,
+					filtered: candidates.filter(isRealGitMarker),
+					every: candidates.every(isRealGitMarker),
+					some: [absent, absent].some(isRealGitMarker),
+				}).toEqual({
+					mapped: [true, false],
+					filtered: [valid],
+					every: false,
+					some: false,
+				});
+				expect(isRealGitMarker(valid, true)).toEqual({ kind: "valid" });
+				expect(isRealGitMarker(absent, true)).toEqual({ kind: "absent" });
+			} finally {
+				env.cleanup();
+			}
+		},
+	);
+
+	it.each(["ENOENT", "ENOTDIR", "EACCES", "ESTALE"])(
+		"keeps %s distinct from a successful marker validation",
+		(code) => {
+			const env = setupTestEnvironment("pi-lens-marker-certainty-");
+			const marker = path.join(env.tmpDir, ".git");
+			const failure = Object.assign(new Error("fixture marker failure"), {
+				code,
+			});
+			const stat = fs.statSync;
+			const spy = vi
+				.spyOn(fs, "statSync")
+				.mockImplementation((file, options) => {
+					if (String(file) === marker) throw failure;
+					return stat(file, options);
+				});
+			syncBuiltinESMExports();
+			try {
+				// R3: legacy false is an API projection, not proof of marker absence.
+				expect(isRealGitMarker(marker)).toBe(false);
+				const detailed = isRealGitMarker(marker, true);
+				if (code === "ENOENT" || code === "ENOTDIR") {
+					expect(detailed).toEqual({ kind: "absent" });
+				} else {
+					expect(detailed).toEqual({ kind: "unavailable", cause: failure });
+					expect(
+						findNearestMarkerRootDetailed(env.tmpDir, [".git"], {
+							markerPredicate: (file) => isRealGitMarker(file, true),
+						}),
+					).toEqual({
+						kind: "unavailable",
+						markerPath: marker,
+						cause: failure,
+					});
+				}
+			} finally {
+				spy.mockRestore();
+				syncBuiltinESMExports();
+				env.cleanup();
+			}
+		},
+	);
+
+	it("retains valid and invalid file/directory marker semantics in both modes", () => {
+		const env = setupTestEnvironment("pi-lens-marker-certainty-shapes-");
+		try {
+			const marker = path.join(env.tmpDir, ".git");
+			const check = (valid: boolean) => {
+				expect(isRealGitMarker(marker)).toBe(valid);
+				expect(isRealGitMarker(marker, true)).toEqual({
+					kind: valid ? "valid" : "absent",
+				});
+			};
+			check(false);
+			fs.writeFileSync(marker, "not a Git marker\n");
+			check(false);
+			fs.writeFileSync(marker, "gitdir: ../metadata\n");
+			check(true);
+			fs.unlinkSync(marker);
+			fs.mkdirSync(marker);
+			check(false);
+			fs.writeFileSync(path.join(marker, "HEAD"), "ref: refs/heads/main\n");
+			check(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps legacy predicate existence ordering and propagates its exceptions", () => {
+		const env = setupTestEnvironment("pi-lens-marker-certainty-legacy-");
+		try {
+			const marker = path.join(env.tmpDir, "present");
+			fs.writeFileSync(marker, "marker\n");
+			const observed: string[] = [];
+			expect(
+				findNearestMarkerRoot(env.tmpDir, ["missing", "present"], {
+					markerPredicate: (file) => {
+						observed.push(file);
+						return true;
+					},
+				}),
+			).toBe(env.tmpDir);
+			expect(observed).toEqual([marker]);
+			expect(() =>
+				findNearestMarkerRoot(env.tmpDir, ["present"], {
+					markerPredicate: () => {
+						throw new Error("legacy predicate failure");
+					},
+				}),
+			).toThrow("legacy predicate failure");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not probe a detailed marker at or above the home ceiling", () => {
+		const env = setupTestEnvironment("pi-lens-marker-detailed-ceiling-");
+		try {
+			// Recurrence: a detailed walk that probes before the ceiling would read
+			// a marker at or above $HOME and report an escaped owner.
+			const probed: string[] = [];
+			expect(
+				findNearestMarkerRootDetailed(env.tmpDir, ["present"], {
+					homeDir: env.tmpDir,
+					markerPredicate: (file) => {
+						probed.push(file);
+						return { kind: "valid" };
+					},
+				}),
+			).toEqual({ kind: "not-found", reason: "home-ceiling" });
+			expect(probed).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("probes markers in order per directory and climbs past an absent one", () => {
+		const env = setupTestEnvironment("pi-lens-marker-detailed-order-");
+		try {
+			const project = path.join(env.tmpDir, "project");
+			const nested = path.join(project, "src");
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(path.join(project, ".git"), "gitdir: ../metadata\n");
+			const visited: string[] = [];
+			expect(
+				findNearestMarkerRootDetailed(nested, [".git", "missing"], {
+					homeDir: env.tmpDir,
+					markerPredicate: (file) => {
+						visited.push(file);
+						return isRealGitMarker(file, true);
+					},
+				}),
+			).toEqual({ kind: "found", root: project });
+			expect(visited).toEqual([
+				path.join(nested, ".git"),
+				path.join(nested, "missing"),
+				path.join(project, ".git"),
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("exposes the exact 64-iteration boundary and home ceiling without changing legacy null", () => {
+		const env = setupTestEnvironment("pi-lens-marker-certainty-depth-");
+		try {
+			fs.mkdirSync(path.join(env.tmpDir, ".git"));
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".git", "HEAD"),
+				"ref: refs/heads/main\n",
+			);
+			const nested = path.join(env.tmpDir, ...Array<string>(64).fill("d"));
+			fs.mkdirSync(nested, { recursive: true });
+			const options = {
+				markerPredicate: (file: string) => isRealGitMarker(file, true),
+			} as const;
+			expect(
+				findNearestMarkerRootDetailed(path.dirname(nested), [".git"], options),
+			).toEqual({ kind: "found", root: env.tmpDir });
+			expect(findNearestMarkerRootDetailed(nested, [".git"], options)).toEqual({
+				kind: "not-found",
+				reason: "depth-limit",
+			});
+			expect(findNearestMarkerRoot(nested, [".git"])).toBeNull();
+			expect(
+				findNearestMarkerRootDetailed(env.tmpDir, [".git"], {
+					...options,
+					homeDir: env.tmpDir,
+				}),
+			).toEqual({ kind: "not-found", reason: "home-ceiling" });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("reports reason root when the walk reaches the filesystem root below an unrelated home", async () => {
+		// Recurrence (#3691 F4): `parent === current` was never exercised. On posix
+		// "/" is an ancestor of every home, so the ceiling always fires first; a
+		// win32 project on another drive from home reaches the root. Load the real
+		// walker under win32 path semantics so every lane runs the same branch.
+		vi.resetModules();
+		vi.doMock("node:path", () => ({
+			...path.win32,
+			default: path.win32,
+		}));
+		try {
+			const win = await import("../../clients/path-utils.js");
+			const probed: string[] = [];
+			expect(
+				win.findNearestMarkerRootDetailed("C:\\work\\proj\\src", [".git"], {
+					homeDir: "D:\\home\\user",
+					markerPredicate: (file) => {
+						probed.push(file);
+						return { kind: "absent" };
+					},
+				}),
+			).toEqual({ kind: "not-found", reason: "root" });
+			expect(probed).toEqual([
+				"C:\\work\\proj\\src\\.git",
+				"C:\\work\\proj\\.git",
+				"C:\\work\\.git",
+				"C:\\.git",
+			]);
+		} finally {
+			vi.doUnmock("node:path");
+			vi.resetModules();
 		}
 	});
 });
@@ -1772,6 +2167,123 @@ describe("matchesWorkspaceMemberPattern dialect table (#2591)", () => {
 	});
 });
 
+describe("workspace glob memo cell cap (#2629)", () => {
+	beforeEach(() => resetDegradationLedger());
+	afterEach(() => resetDegradationLedger());
+
+	it("preserves a below-cap workspace glob match", () => {
+		expect(
+			matchesWorkspaceMemberPattern(
+				"crates/*",
+				"crates/widget",
+				UV_WORKSPACE_MEMBERS_DIALECT,
+			),
+		).toBe(true);
+		expect(
+			getDegradationSummary().filter(
+				(group) => group.kind === "workspace-glob-cap",
+			),
+		).toHaveLength(0);
+	});
+
+	it("declines over-cap matching literals and reports the cap statelessly", () => {
+		// Recurrence prevented: #2629 allocated an unbounded matcher table even when a literal glob matched.
+		// 1,414 literal steps times 1,415 positions is 2,002,225 cells, above the 2,000,000-cell cap.
+		const capReports: number[] = [];
+		const patternA = "a".repeat(1_414);
+		const patternB = "b".repeat(1_414);
+		expect(
+			matchesWorkspaceMemberPattern(
+				patternA,
+				patternA,
+				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(patternA.length),
+			),
+		).toBe(false);
+		expect(
+			matchesWorkspaceMemberPattern(
+				patternB,
+				patternB,
+				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(patternB.length),
+			),
+		).toBe(false);
+		expect(capReports).toEqual([1414, 1414]);
+		expect(getDegradationSummary()).toHaveLength(0);
+
+		resetDegradationLedger();
+		expect(getDegradationSummary()).toHaveLength(0);
+		expect(
+			matchesWorkspaceMemberPattern(
+				patternA,
+				patternA,
+				UV_WORKSPACE_MEMBERS_DIALECT,
+			),
+		).toBe(false);
+		expect(getDegradationSummary()).toHaveLength(0);
+	});
+
+	it("reports distinct over-cap lengths without retaining matcher state", () => {
+		// Recurrence prevented: unique huge pattern lengths cannot grow a matcher-local latch.
+		const capReports: number[] = [];
+		for (let length = 1_414; length <= 1_434; length += 1) {
+			const pattern = "x".repeat(length);
+			expect(
+				matchesWorkspaceMemberPattern(
+					pattern,
+					pattern,
+					UV_WORKSPACE_MEMBERS_DIALECT,
+					() => capReports.push(length),
+				),
+			).toBe(false);
+		}
+
+		expect(capReports).toHaveLength(21);
+		expect(getDegradationSummary()).toHaveLength(0);
+
+		// A length already in the retained set does not count as dropped when the cap is full.
+		const retainedPattern = "x".repeat(1_414);
+		expect(
+			matchesWorkspaceMemberPattern(
+				retainedPattern,
+				retainedPattern,
+				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(retainedPattern.length),
+			),
+		).toBe(false);
+		expect(capReports.at(-1)).toBe(1414);
+
+		resetDegradationLedger();
+		for (let length = 1_414; length <= 1_434; length += 1) {
+			const pattern = "x".repeat(length);
+			matchesWorkspaceMemberPattern(
+				pattern,
+				pattern,
+				UV_WORKSPACE_MEMBERS_DIALECT,
+				() => capReports.push(pattern.length),
+			);
+		}
+		expect(capReports.slice(-21)).toHaveLength(21);
+	});
+
+	it("keeps a realistic upper-size matching glob under the cap", () => {
+		// Recurrence prevented: lowering the cap below realistic manifest work must
+		// not silently turn a valid deep workspace member into a non-member.
+		const relativePath = Array.from({ length: 2049 }, (_, index) =>
+			index % 2 === 0 ? "a" : "b",
+		).join("/");
+		const pattern = "**/".repeat(66) + "**";
+		expect(relativePath.length).toBeGreaterThanOrEqual(4096);
+		expect(
+			matchesWorkspaceMemberPattern(
+				pattern,
+				relativePath,
+				UV_WORKSPACE_MEMBERS_DIALECT,
+			),
+		).toBe(true);
+	});
+});
+
 /**
  * Byte-for-byte pin for the uv side of the fold: `UV_WORKSPACE_MEMBERS_DIALECT`
  * must answer exactly what the pre-fold
@@ -1940,7 +2452,15 @@ describe("the uv-members dialect reproduces the pre-fold minimatch answers (#259
 					relativePath,
 					UV_WORKSPACE_MEMBERS_DIALECT,
 				);
-				const preFold = minimatch(relativePath, normalized, { dot: true });
+				// `platform: "linux"`: minimatch otherwise reads `process.platform` and
+				// on win32 treats the `\` in the `x\y` cell as a separator, while the
+				// matcher under test (which only ever sees `toPosix` output) keeps it a
+				// literal character. The pre-fold answers being reproduced are the
+				// POSIX ones (#4019).
+				const preFold = minimatch(relativePath, normalized, {
+					dot: true,
+					platform: "linux",
+				});
 				if (folded !== preFold && !UV_MINIMATCH_DIVERGENCES.has(key)) {
 					unexpected.push(`${key} folded=${folded} minimatch=${preFold}`);
 				}

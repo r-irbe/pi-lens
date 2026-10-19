@@ -26,22 +26,30 @@ import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolveLanguageRootForFile } from "../../clients/language-profile.js";
 import {
 	MUTATION_ATTRIBUTION_FILE,
+	lookupLearnedMutatingTool,
 	primePersistedMutationAttribution,
 	resetMutationAttribution,
 	shouldArmObservationForTool,
 } from "../../clients/mutation-attribution.js";
+import { PI_LENS_TOOL_NAMES } from "../../clients/tool-config.js";
+import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
 import {
 	armObservedMutation,
 	_setObservedTimeBoundsForTests,
 	resetObservedMutationNet,
 } from "../../clients/observed-mutation.js";
 import { readChangesSince } from "../../clients/project-changes.js";
+import {
+	_resetFormatEventsPublishForTests,
+	wireFormatEventsBusEmitter,
+} from "../../clients/format-events-publish.js";
 import { countFileLines } from "../../clients/read-guard-tool-lines.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 vi.mock("../../clients/pipeline.js", () => ({
 	runPipeline: vi.fn(async () => ({
@@ -52,7 +60,7 @@ vi.mock("../../clients/pipeline.js", () => ({
 	})),
 }));
 
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => makeLspServiceDouble(),
 	resetLSPService: () => {},
 	notifyExternalFileChange: vi.fn(async () => undefined),
@@ -69,6 +77,7 @@ vi.mock("../../clients/bootstrap.js", () => ({
 		metricsClient: {},
 		agentBehaviorClient: { recordToolCall: () => [], formatWarnings: () => "" },
 	}),
+	requestBootstrapClients: async () => ({ complexityClient: undefined }),
 }));
 
 const SOURCE = ["const a = 1;", "const b = 2;", "const c = 3;", ""].join("\n");
@@ -269,8 +278,10 @@ describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn
 			const { runtime, cacheManager } = newSession(env.tmpDir);
 
 			const event = patchEvent(filePath, "call-2430-first");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 
 			// The unknown tool executes and rewrites line 2.
@@ -302,6 +313,253 @@ describe("#2430 acceptance 1 — the FIRST call of an unknown tool lands in turn
 	});
 });
 
+describe("#4139 pi-lens tool attribution boundary", () => {
+	it("does not block LSP reads after two observed pi-tool renames", async () => {
+		// #4139 F5: this must reach the read guard. The bootstrap mock includes
+		// requestBootstrapClients because a thrown complexity lookup is caught as
+		// "no opinion" before the guard, making the old witness vacuous.
+		const env = setupTestEnvironment("pi-lens-4139-read-guard-");
+		try {
+			const filePath = path.join(env.tmpDir, "renamed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+
+			for (const suffix of ["first", "second"]) {
+				const event = {
+					toolName: "lsp_navigation",
+					toolCallId: `call-4139-rename-${suffix}`,
+					input: { path: filePath, operation: "rename", apply: true },
+					content: [{ type: "text", text: "renamed" }],
+				};
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
+				);
+				fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+				await handleToolResult(
+					toolResultDeps({ event, runtime, cacheManager }),
+				);
+			}
+
+			const unreadPath = path.join(env.tmpDir, "unread.ts");
+			fs.writeFileSync(unreadPath, SOURCE);
+			for (const operation of [
+				"hover",
+				"references",
+				"definition",
+				"documentSymbol",
+				"implementation",
+			] as const) {
+				const result = await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({
+							event: {
+								toolName: "lsp_navigation",
+								toolCallId: `call-4139-${operation}`,
+								input: { path: unreadPath, operation },
+							},
+							cwd: env.tmpDir,
+							runtime,
+							cacheManager,
+						}),
+					),
+				);
+				expect(result).toBeUndefined();
+			}
+			expect(
+				getDegradationSummary().some(
+					(entry) =>
+						entry.kind === "tool-call-handler-throw" &&
+						entry.latestReasons.some(
+							(reason) => reason.subject === "lsp_navigation",
+						),
+				),
+			).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not learn any pi-registered tool through the real call/result path", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-pi-tools-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			for (const [index, toolName] of PI_LENS_TOOL_NAMES.entries()) {
+				const filePath = path.join(env.tmpDir, `${index}.ts`);
+				fs.writeFileSync(filePath, SOURCE);
+				const { runtime, cacheManager } = newSession(env.tmpDir);
+				for (const suffix of ["first", "second"]) {
+					const event = {
+						toolName,
+						toolCallId: `call-4139-${index}-${suffix}`,
+						input: { path: filePath, operation: "rename", apply: true },
+						content: [{ type: "text", text: "renamed" }],
+					};
+					await runHandlerExpectingNoThrow(() =>
+						handleToolCall(
+							toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+						),
+					);
+					fs.writeFileSync(filePath, `${SOURCE}const ${suffix} = 1;\n`);
+					await handleToolResult(
+						toolResultDeps({ event, runtime, cacheManager }),
+					);
+				}
+				expect(lookupLearnedMutatingTool(toolName)).toBeUndefined();
+				const hover = {
+					toolName,
+					input: {
+						path: path.join(env.tmpDir, "unread.ts"),
+						operation: "hover",
+					},
+				};
+				expect(classifyMutatingTool(hover)).toBeUndefined();
+			}
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records lens_diagnostic_mark suppress writes through the mutation bridge", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "marked.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const emitted: Array<{ event: string; payload: unknown }> = [];
+			wireFormatEventsBusEmitter((event, payload) => {
+				emitted.push({ event, payload });
+			});
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			await tool.execute(
+				"call-4139-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			const turnState = cacheManager.readTurnState(env.tmpDir);
+			expect(Object.keys(turnState.files ?? {})).toContain("marked.ts");
+			expect(turnState.files["marked.ts"]?.modifiedRanges).toEqual([
+				{ start: 1, end: 1 },
+			]);
+			expect(readChangesSince(env.tmpDir, 0)).toContainEqual(
+				expect.objectContaining({ source: "agent-tool:lens_diagnostic_mark" }),
+			);
+			expect(emitted).toContainEqual(
+				expect.objectContaining({
+					event: "pilens:format:queued",
+					payload: expect.objectContaining({ tool: "edit" }),
+				}),
+			);
+			expect(runtime.pendingDeferredFormatCount).toBeGreaterThan(0);
+		} finally {
+			_resetFormatEventsPublishForTests();
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("drops a suppress write whose session is retired while it awaits", async () => {
+		// #4139 F4 / #3763: a write that crosses session replacement must not
+		// publish turn-state or deferred-format evidence into the new session.
+		const env = setupTestEnvironment("pi-lens-4139-retired-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "retired.ts");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			const run = tool.execute(
+				"call-4139-retired-mark",
+				{
+					filePath,
+					line: 1,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+			runtime.resetForSession();
+			await run;
+
+			expect(cacheManager.readTurnState(env.tmpDir).files).toEqual({});
+			expect(runtime.pendingDeferredFormatCount).toBe(0);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("records the merged suppress comment and its adjacent source range", async () => {
+		const env = setupTestEnvironment("pi-lens-4139-merged-mark-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "merged.ts");
+			fs.writeFileSync(
+				filePath,
+				"const a = 0;\n// pi-lens-ignore: other\nconst value = 1;\n",
+			);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const tool = createLensDiagnosticMarkTool(
+				() => env.tmpDir,
+				undefined,
+				() => runtime.captureSessionGeneration(),
+			);
+			await tool.execute(
+				"call-4139-merged-mark",
+				{
+					filePath,
+					line: 3,
+					message: "known finding",
+					rule: "rule-4139",
+					disposition: "suppress",
+				},
+				undefined,
+				undefined,
+				{ cwd: env.tmpDir },
+			);
+
+			expect(
+				cacheManager.readTurnState(env.tmpDir).files["merged.ts"]
+					?.modifiedRanges,
+			).toEqual([{ start: 2, end: 3 }]);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
 describe("#2430 acceptance 2 — the SECOND call is classified without a snapshot", () => {
 	it("classifies the same tool by name once one mutation has been observed", async () => {
 		const env = setupTestEnvironment("pi-lens-2430-second-");
@@ -317,8 +575,15 @@ describe("#2430 acceptance 2 — the SECOND call is classified without a snapsho
 			// #2423 gap #2430 exists to close.
 			expect(classifyMutatingTool(first)).toBeUndefined();
 
-			await handleToolCall(
-				toolCallDeps({ event: first, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: first,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
 			await handleToolResult(
@@ -362,8 +627,10 @@ describe("#2430 acceptance 2 — persistence is reachable on the PRODUCTION path
 				`${SOURCE}const d = 4;\nconst e = 5;\n`,
 			].entries()) {
 				const event = patchEvent(filePath, `call-2430-persist-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult(
@@ -432,8 +699,10 @@ describe("#2449 review round 3 — one receipt per physical edit", () => {
 				`${SOURCE}const d = 4;\nconst e = 5;\nconst f = 6;\n`,
 			].entries()) {
 				const event = patchEvent(filePath, `call-2449-double-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult(
@@ -546,17 +815,19 @@ describe("#2430 — the net does not arm for a classified tool", () => {
 			const { runtime, cacheManager } = newSession(env.tmpDir);
 
 			const statSpy = vi.spyOn(fs.promises, "stat");
-			await handleToolCall(
-				toolCallDeps({
-					event: {
-						toolName: "write",
-						toolCallId: "call-2430-write",
-						input: { path: filePath, content: SOURCE },
-					},
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: {
+							toolName: "write",
+							toolCallId: "call-2430-write",
+							input: { path: filePath, content: SOURCE },
+						},
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			const observedStats = statSpy.mock.calls.length;
 			statSpy.mockRestore();
@@ -584,12 +855,13 @@ describe("#2430 item 3 — the settled sweep is wired ahead of the deferred drai
 			path.join(import.meta.dirname, "..", "..", "index.ts"),
 			"utf-8",
 		);
-		const sweepAt = indexSource.indexOf(
-			"await runObservedSettledSweepSafely(ctx)",
-		);
+		// #3521: both now take the settle's branch epoch as a second argument
+		// (#3620: the sweep also its lineage, so its call wraps).
+		const sweepAt = indexSource.indexOf("await runObservedSettledSweepSafely(");
 		const drainAt = indexSource.indexOf("await runDeferredMutationDrain(ctx)");
+		// #3576: the refresh runs through the settle's session guard.
 		const refreshAt = indexSource.indexOf(
-			"await refreshObservedLedgerSafely(ctx)",
+			"() => refreshObservedLedgerSafely(ctx)",
 		);
 		expect(sweepAt).toBeGreaterThan(-1);
 		expect(drainAt).toBeGreaterThan(sweepAt);
@@ -631,13 +903,15 @@ describe("#2449 review round 4 — the observed-settle return skips only duplica
 			).toBeUndefined();
 
 			// Call 1 arms, observes and attributes the tool.
-			await handleToolCall(
-				toolCallDeps({
-					event: firstEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: firstEvent,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			fs.writeFileSync(filePath, `${withStale}const d = 4;\n`);
 			await handleToolResult(
@@ -651,13 +925,15 @@ describe("#2449 review round 4 — the observed-settle return skips only duplica
 			const appliedSpy = vi.spyOn(runtime.partialApplyRecords, "record");
 
 			const secondEvent = retryEvent(filePath, "call-2449-narrow-1");
-			await handleToolCall(
-				toolCallDeps({
-					event: secondEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: secondEvent,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 			// The edit removes the exported name cachedExports is holding.
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\nconst e = 5;\n`);
@@ -723,8 +999,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				if (index === 0) {
 					expect(classifyMutatingTool(event as never)).toBeUndefined();
 				}
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult(
@@ -765,8 +1043,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			vi.mocked(runPipeline).mockClear();
 
 			const event = patchEvent(filePath, "call-2464-context-0");
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
 			await handleToolResult(toolResultDeps({ event, runtime, cacheManager }));
@@ -792,6 +1072,15 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			expect(
 				(ctx.telemetry as { writeIndex?: number } | undefined)?.writeIndex,
 			).toBe(runtime.peekWriteIndex());
+			// #3512: the session this dispatch belongs to, for the cascade's
+			// tier-3 touch record.
+			const sessionGeneration = ctx.sessionGeneration as
+				| { generation: number; isCurrent(): boolean }
+				| undefined;
+			expect({
+				generation: sessionGeneration?.generation,
+				current: sessionGeneration?.isCurrent(),
+			}).toEqual({ generation: runtime.sessionGeneration, current: true });
 		} finally {
 			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = previousDataDir;
@@ -848,6 +1137,7 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			const readGuard = {
 				recordWritten,
 				getReadHistory: () => [],
+				contentMatchesLastRead: () => undefined,
 			} as unknown as NonNullable<
 				Parameters<typeof handleToolResult>[0]["readGuard"]
 			>;
@@ -864,8 +1154,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				`${SOURCE}const d = 4;\nconst e = 5;\n`,
 			].entries()) {
 				const event = retryEvent(filePath, `call-2464-post-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				await handleToolResult({
@@ -886,7 +1178,14 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 			).toEqual(["agent-tool:patch_retry", "agent-tool:patch_retry"]);
 			// 1. The staleness stamp is re-taken over the file the pipeline itself
 			//    rewrote, so the agent's next edit is judged by read coverage.
-			expect(recordWritten).toHaveBeenCalledWith(path.resolve(filePath));
+			//    #3865: authorship only. pi-lens does not know the bytes an
+			//    unclassified tool wrote, so FileTime stays at its last
+			//    conversation-backed stamp and line hashes judge the next edit.
+			expect(recordWritten).toHaveBeenCalledWith(path.resolve(filePath), {
+				authorship: "whole-file",
+				stampFileTime: false,
+				contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+			});
 			// 2. The #2402 record is re-stamped with the POST-pipeline hash, so an
 			//    identical retry against the formatted bytes is still recognized as
 			//    already applied instead of escalating the oldText ladder.
@@ -923,6 +1222,227 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 		}
 	});
 
+	// #3865 member 1 (#4187 F3, P8): an unclassified tool's write is credited
+	// as authorship, never as FileTime. Recurrence: the mutation bridge's
+	// observed replay and the observed dispatch's post-pipeline refresh both
+	// re-stamped FileTime, so an edit of a line another writer changed, whose
+	// newest view carries no hash (past READ_HASH_MAX_LINES), passed.
+	it("credits an observed tool's write as authorship without re-stamping FileTime (#3865)", async () => {
+		const env = setupTestEnvironment("pi-lens-3865-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "big.ts");
+			const big = Array.from({ length: 3100 }, (_, i) => `line${i + 1}`);
+			fs.writeFileSync(filePath, big.join("\n"));
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			fs.utimesSync(filePath, longAgo, longAgo);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's whole-file read, past READ_HASH_MAX_LINES: no hashes.
+			runtime.readGuard.recordRead({
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: big.length,
+				effectiveOffset: 1,
+				effectiveLimit: big.length,
+				expandedByLsp: false,
+				turnIndex: 0,
+				writeIndex: 0,
+				timestamp: Date.now(),
+			});
+			big[10] = "EXTERNAL11";
+			fs.writeFileSync(filePath, big.join("\n"));
+			const event = patchEvent(filePath, "call-3865-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			big[1] = "patched2";
+			fs.writeFileSync(filePath, big.join("\n"));
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:patch_file" },
+			]);
+			expect(runtime.readGuard.exportAuthorship().written).toHaveLength(1);
+			const verdict = runtime.readGuard.checkEdit(filePath, [11, 11]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since read");
+			// #4387 (review r2, 3c): a move to this leaf keeps the observed call
+			// and drops the id-less read. The observed credit named line 2 only,
+			// and the pipeline's whole-file credit after it holds no bytes, so it
+			// keeps that scope. Recurrence: it widened the scope to the whole
+			// file, and line 11 passed after the move.
+			runtime.readGuard.retainBranch(new Set(["call-3865-observed"]));
+			expect(runtime.readGuard.checkEdit(filePath, [11, 11]).action).toBe(
+				"block",
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4131 (#4187 F6): an observed tool's replay credits authorship without
+	// the bytes, so it must not re-author bytes another writer changed after
+	// the agent's own write. Recurrence: the replay's recordWritten
+	// re-baselined the authorship over the other writer's change.
+	it("does not let an observed tool's write re-author bytes another writer changed (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "authored.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's bash write authored the file, without a read.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash",
+			});
+			// Another writer changes line 3.
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
+			);
+			const event = patchEvent(filePath, "call-4131-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 333;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			const verdict = runtime.readGuard.checkEdit(filePath, [3, 3]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4187 R2-4, the no-drop side: the observed replay is the one bridge
+	// producer whose tool_call checked the authorship before the write, so it
+	// still advances an intact one. Recurrence: ending every bridge write's
+	// authorship (the rule for writes nothing checked first) would make an
+	// unknown tool's edit of a file the agent wrote cost a re-read.
+	it("keeps the authorship an observed tool's write lands on when no other writer moved it (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-keep-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const filePath = path.join(env.tmpDir, "authored.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash-keep",
+			});
+			const event = patchEvent(filePath, "call-4131-observed-keep");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 3;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:patch_file" },
+			]);
+			expect(runtime.readGuard.checkEdit(filePath, [3, 3]).action).toBe(
+				"allow",
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	// #4131 (#4187 R2-3, probe A2): a tool that names a DIRECTORY replays every
+	// file of that directory it changed, so each of them must end a broken
+	// authorship at the tool_call, not only the path the input named.
+	// Recurrence: the retire covered `input.path` alone, and the replay of a
+	// file inside the named directory re-baselined authorship over another
+	// writer's line 3 (allow).
+	it("does not let a directory-target observed tool re-author bytes another writer changed (#4131)", async () => {
+		const env = setupTestEnvironment("pi-lens-4131-observed-dir-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const dir = path.join(env.tmpDir, "src");
+			fs.mkdirSync(dir);
+			const filePath = path.join(dir, "touched.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			// The agent's bash write authored the file, without a read.
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash-dir",
+			});
+			// Another writer changes line 3.
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 2;", "const c = 333;", ""].join("\n"),
+			);
+			const event = {
+				toolName: "dir_codemod",
+				toolCallId: "call-4131-observed-dir",
+				input: { path: dir, transform: "rename" },
+				content: [{ type: "text", text: "rewrote" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(
+				filePath,
+				["const a = 1;", "const b = 222;", "const c = 333;", ""].join("\n"),
+			);
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: runtime.readGuard,
+			});
+			expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+				{ source: "agent-tool:dir_codemod" },
+			]);
+			const verdict = runtime.readGuard.checkEdit(filePath, [3, 3]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("surfaces a pipeline crash on the observed path the way the classified path does", async () => {
 		// #2464 review round 2, S6. A crash used to be swallowed into a `dbg`
 		// line the model never sees, so an observed tool's edit came back looking
@@ -952,8 +1472,10 @@ describe("#2464 — the observed-settle path also dispatches pipeline analysis",
 				`${SOURCE}const d = 4;\nconst e = 5;\n`,
 			].entries()) {
 				const event = patchEvent(filePath, `call-2464-crash-${index}`);
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 				fs.writeFileSync(filePath, body);
 				outcome = await handleToolResult(
@@ -1009,8 +1531,10 @@ describe("#2464 review round 3 — F1: the observed dispatch shares the classifi
 			const eventB = patchEvent(filePath, "call-2464-f1-b");
 			for (const event of [eventA, eventB]) {
 				expect(classifyMutatingTool(event as never)).toBeUndefined();
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 			}
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1071,8 +1595,10 @@ describe("#2464 review round 3 — F1: the observed dispatch shares the classifi
 			const eventA = patchEvent(filePath, "call-2464-f1-evict-a");
 			const eventB = patchEvent(filePath, "call-2464-f1-evict-b");
 			for (const event of [eventA, eventB]) {
-				await handleToolCall(
-					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+					),
 				);
 			}
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1167,13 +1693,15 @@ describe("#2464 review round 3 — F1: the observed dispatch shares the classifi
 			// Armed BEFORE the classified write, so the settle below sees the same
 			// bytes the classified call just analysed.
 			const observedEvent = patchEvent(filePath, "call-2464-f1-latch-obs");
-			await handleToolCall(
-				toolCallDeps({
-					event: observedEvent,
-					cwd: env.tmpDir,
-					runtime,
-					cacheManager,
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({
+						event: observedEvent,
+						cwd: env.tmpDir,
+						runtime,
+						cacheManager,
+					}),
+				),
 			);
 
 			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1238,8 +1766,10 @@ describe("#2464 review round 3 — F2: the observed dispatch targets a RECORDED 
 				content: [{ type: "text", text: "rewrote 1 file" }],
 			};
 			expect(classifyMutatingTool(event as never)).toBeUndefined();
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			// The tool writes a file INSIDE the directory it named.
 			fs.writeFileSync(insideDir, `${SOURCE}const d = 4;\n`);
@@ -1288,8 +1818,10 @@ describe("#2464 review round 3 — F2: the observed dispatch targets a RECORDED 
 				input: { path: targetDir, rule: "rename" },
 				content: [{ type: "text", text: "rewrote 33 files" }],
 			};
-			await handleToolCall(
-				toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
 			);
 			for (const filePath of files)
 				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
@@ -1309,5 +1841,318 @@ describe("#2464 review round 3 — F2: the observed dispatch targets a RECORDED 
 			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
+	});
+});
+
+describe("#3568: the observed path's dispatches share the handler's session", () => {
+	it("stops dispatching observed paths once the handler's session is replaced (#3596)", async () => {
+		// index.ts abandons a handler at its bound without cancelling it. The
+		// observed loop awaits each path's dispatch before the next, so a
+		// replacement during path 1 used to hand path 2 session 2's generation,
+		// and its cascade touch and admission then landed in session 2 (#3568).
+		// #3596: path 2 is not dispatched at all once the session is replaced;
+		// every write it would make is dropped, so the run is wasted work.
+		const env = setupTestEnvironment("pi-lens-3568-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		_setObservedTimeBoundsForTests({ captureMs: 30_000, settleMs: 30_000 });
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const gated = gatePipeline(vi.mocked(runPipeline) as never);
+		try {
+			const targetDir = path.join(env.tmpDir, "codemod-target");
+			fs.mkdirSync(targetDir, { recursive: true });
+			const files = ["a.ts", "b.ts"].map((name) => {
+				const filePath = path.join(targetDir, name);
+				fs.writeFileSync(filePath, SOURCE);
+				return filePath;
+			});
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const entered = runtime.sessionGeneration;
+			const event = {
+				toolName: "dir_codemod_3568",
+				toolCallId: "call-3568-observed",
+				input: { path: targetDir, rule: "rename" },
+				content: [{ type: "text", text: "rewrote 2 files" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			for (const filePath of files)
+				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			const handler = handleToolResult(
+				toolResultDeps({ event, runtime, cacheManager }),
+			);
+			for (let i = 0; i < 200 && gated.contexts.length < 1; i++)
+				await flushAsyncWork(1);
+			expect(gated.contexts).toHaveLength(1);
+			// `/new` while path 1 is analysed.
+			runtime.resetForSession();
+			gated.release(0, 1);
+			for (let i = 0; i < 200 && gated.contexts.length < 2; i++)
+				await flushAsyncWork(1);
+			gated.release(1, 2);
+			await handler;
+			const sessions = gated.contexts.map((ctx) => {
+				const handle = ctx.sessionGeneration as {
+					generation: number;
+					isCurrent(): boolean;
+				};
+				return { generation: handle.generation, current: handle.isCurrent() };
+			});
+			expect(sessions).toEqual([{ generation: entered, current: false }]);
+		} finally {
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			_setObservedTimeBoundsForTests({});
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("a settle replay that lands after the replacement credits nothing in the new session (#3596)", async () => {
+		// The settle replays each changed file through the mutation bridge after
+		// its own capture and range awaits. With no lineage on the entry the
+		// bridge stamped, queued and listed the dead session's write in the new
+		// session. The reset is driven from the settle's stored-hash lookup,
+		// which runs between those awaits and the replay: a deterministic
+		// stand-in for a `session_start` that lands while the settle awaits.
+		const env = setupTestEnvironment("pi-lens-3596-settle-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		_setObservedTimeBoundsForTests({ captureMs: 30_000, settleMs: 30_000 });
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		vi.mocked(runPipeline).mockClear();
+		try {
+			const targetDir = path.join(env.tmpDir, "codemod-target");
+			fs.mkdirSync(targetDir, { recursive: true });
+			const files = ["a.ts", "b.ts"].map((name) => {
+				const filePath = path.join(targetDir, name);
+				fs.writeFileSync(filePath, SOURCE);
+				return filePath;
+			});
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			const event = {
+				toolName: "dir_codemod_3596",
+				toolCallId: "call-3596-settle",
+				input: { path: targetDir, rule: "rename" },
+				content: [{ type: "text", text: "rewrote 2 files" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			for (const filePath of files) {
+				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+				// Aged, so only an explicit credit can make session 2 allow an edit.
+				fs.utimesSync(filePath, longAgo, longAgo);
+			}
+			const sessionOneGuard = runtime.readGuard;
+			vi.spyOn(sessionOneGuard, "getReadHistory").mockImplementationOnce(() => {
+				runtime.resetForSession();
+				runtime.beginTurn();
+				return [];
+			});
+			await handleToolResult({
+				...toolResultDeps({ event, runtime, cacheManager }),
+				readGuard: sessionOneGuard,
+			});
+			expect({
+				verdicts: files.map(
+					(filePath) => runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+				),
+				queued: runtime.pendingDeferredFormatCount,
+				turnFiles: Object.keys(
+					cacheManager.readTurnState(env.tmpDir).files ?? {},
+				).length,
+				dispatched: vi.mocked(runPipeline).mock.calls.length,
+				// The tool did change both files: the change log keeps them (I5).
+				receipts: readChangesSince(env.tmpDir, 0).map((c) => c.source),
+			}).toEqual({
+				verdicts: ["block", "block"],
+				queued: 0,
+				turnFiles: 0,
+				dispatched: 0,
+				receipts: [
+					"agent-tool:dir_codemod_3596",
+					"agent-tool:dir_codemod_3596",
+				],
+			});
+		} finally {
+			_setObservedTimeBoundsForTests({});
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("after /reload, each observed path's dispatch carries the order turn, not the session's restarted turn (#3540 r2)", async () => {
+		// The widget's write guard outlives `/reload`; a per-path token drawn
+		// from the session's turn would rank below session 1's.
+		const env = setupTestEnvironment("pi-lens-3540-observed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		_setObservedTimeBoundsForTests({ captureMs: 30_000, settleMs: 30_000 });
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const gated = gatePipeline(vi.mocked(runPipeline) as never);
+		try {
+			const targetDir = path.join(env.tmpDir, "codemod-target");
+			fs.mkdirSync(targetDir, { recursive: true });
+			const files = ["a.ts", "b.ts"].map((name) => {
+				const filePath = path.join(targetDir, name);
+				fs.writeFileSync(filePath, SOURCE);
+				return filePath;
+			});
+			const { runtime, cacheManager } = newSession(env.tmpDir);
+			for (let turn = 0; turn < 3; turn += 1) runtime.beginTurn();
+			// #3611: the order turn is a process counter, so its value depends on
+			// every coordinator this file ran; the pin is that it did not restart.
+			const orderTurnBeforeReload = runtime.writeOrderTurn;
+			runtime.resetForSession();
+			runtime.beginTurn();
+			const event = {
+				toolName: "dir_codemod_3540",
+				toolCallId: "call-3540-observed",
+				input: { path: targetDir, rule: "rename" },
+				content: [{ type: "text", text: "rewrote 2 files" }],
+			};
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: env.tmpDir, runtime, cacheManager }),
+				),
+			);
+			for (const filePath of files)
+				fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			const handler = handleToolResult(
+				toolResultDeps({ event, runtime, cacheManager }),
+			);
+			for (let i = 0; i < 200 && gated.contexts.length < 1; i++)
+				await flushAsyncWork(1);
+			gated.release(0, 1);
+			for (let i = 0; i < 200 && gated.contexts.length < 2; i++)
+				await flushAsyncWork(1);
+			gated.release(1, 2);
+			await handler;
+			expect(runtime.turnIndex).toBe(1);
+			expect(
+				gated.contexts.map((ctx) => {
+					const telemetry = ctx.telemetry as {
+						turnIndex: number;
+						orderTurn: number;
+					};
+					return [telemetry.turnIndex, telemetry.orderTurn];
+				}),
+			).toEqual([
+				[1, runtime.writeOrderTurn],
+				[1, runtime.writeOrderTurn],
+			]);
+			expect(runtime.writeOrderTurn).toBeGreaterThan(orderTurnBeforeReload);
+		} finally {
+			ungatePipeline(vi.mocked(runPipeline) as never);
+			_setObservedTimeBoundsForTests({});
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
+/**
+ * #3763 item 1: `recordMutationToolReceipt` writes the live coordinator's
+ * per-turn maps (the write-then-edit transition that demotes a file's
+ * autofix to the deferred pass). A handler that resumes from the settle after
+ * a replacement wrote its receipt into session 2's turn, so a file session 2
+ * wrote was demoted by session 1's edit of it. The recurrence: a receipt that
+ * ignores the handler's own session.
+ */
+describe("#3763 a dead handler's mutation receipt stays out of session 2's turn", () => {
+	async function acrossSettle(
+		slug: string,
+		body: (args: { tmpDir: string; filePath: string }) => Promise<void>,
+	): Promise<void> {
+		const env = setupTestEnvironment(`pi-lens-3763-${slug}-`);
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		ungatePipeline(vi.mocked(runPipeline));
+		try {
+			const filePath = path.join(env.tmpDir, "observed.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			await body({ tmpDir: env.tmpDir, filePath });
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	}
+
+	/** Session 2 wrote `filePath` this turn; its next write's autofix mode. */
+	function sessionTwoWriteMode(
+		runtime: RuntimeCoordinator,
+		filePath: string,
+	): "immediate" | "deferred" {
+		return runtime.recordMutationToolReceipt(filePath, "write").autofixMode;
+	}
+
+	it("an observed edit settling after the replacement leaves session 2's write immediate", async () => {
+		await acrossSettle("observed", async ({ tmpDir, filePath }) => {
+			const { runtime, cacheManager } = newSession(tmpDir);
+			const event = patchEvent(filePath, "call-3763-observed");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event, cwd: tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			const handler = handleToolResult(
+				toolResultDeps({ event, runtime, cacheManager }),
+			);
+			// The handler is parked on the settle's first await.
+			runtime.resetForSession();
+			runtime.beginTurn();
+			sessionTwoWriteMode(runtime, filePath);
+			await handler;
+			expect(sessionTwoWriteMode(runtime, filePath)).toBe("immediate");
+		});
+	});
+
+	it("a learned tool's classified receipt after the replacement leaves session 2's write immediate", async () => {
+		await acrossSettle("classified", async ({ tmpDir, filePath }) => {
+			const { runtime, cacheManager } = newSession(tmpDir);
+			// Call one teaches the name; call two is classified by it and still
+			// armed, so it awaits the settle, which finds no change.
+			const first = patchEvent(filePath, "call-3763-learn");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event: first, cwd: tmpDir, runtime, cacheManager }),
+				),
+			);
+			fs.writeFileSync(filePath, `${SOURCE}const d = 4;\n`);
+			await handleToolResult(
+				toolResultDeps({ event: first, runtime, cacheManager }),
+			);
+			const second = patchEvent(filePath, "call-3763-classified");
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					toolCallDeps({ event: second, cwd: tmpDir, runtime, cacheManager }),
+				),
+			);
+			const { runPipeline } = await import("../../clients/pipeline.js");
+			const dispatchedBefore = vi.mocked(runPipeline).mock.calls.length;
+			const handler = handleToolResult(
+				toolResultDeps({ event: second, runtime, cacheManager }),
+			);
+			runtime.resetForSession();
+			runtime.beginTurn();
+			sessionTwoWriteMode(runtime, filePath);
+			await handler;
+			expect(sessionTwoWriteMode(runtime, filePath)).toBe("immediate");
+			// The dead handler dispatches nothing, so the autofix mode its
+			// dropped receipt falls back to never reaches a pipeline.
+			expect(vi.mocked(runPipeline).mock.calls.length).toBe(dispatchedBefore);
+		});
 	});
 });

@@ -30,9 +30,10 @@ import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { matchingCloseIndex } from "../support/sweep-kit.js";
+import { runHandlerExpectingNoThrow } from "../support/handler-verdict.js";
 
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () =>
 		makeLspServiceDouble({
 			touchFile: touchFileMock,
@@ -182,31 +183,52 @@ describe("#1655 item 1 — a throwing tool_call handler must not block the tool"
 });
 
 describe("#1655 item 2 — pi-lens must not type tool_result fields pi never sets", () => {
-	/** The keys pi's `afterToolCall` assigns on the tool_result event literal. */
+	/**
+	 * The keys pi's `_afterToolCall` assigns on the tool_result event literal
+	 * (pi 0.99.2): `parentToolCallId` and `structuredContent` are conditional
+	 * spreads, present only for a nested call and a structured result.
+	 */
 	const HOST_TOOL_RESULT_KEYS = [
 		"type",
 		"toolName",
 		"toolCallId",
+		"parentToolCallId",
 		"input",
 		"content",
 		"details",
+		"structuredContent",
 		"isError",
 		"usage",
 	];
 
 	it("pins the host-shape fixture against pi's own build", () => {
 		const session = readHostSource(path.join("core", "agent-session.js"));
-		const hook = session.slice(session.indexOf("afterToolCall = async"));
+		// pi 0.87 assigned `afterToolCall = async` inline; 0.99 moved the body
+		// into `_afterToolCall` so nested (codemode) calls share it.
+		const hookStart = session.indexOf("async _afterToolCall(");
+		expect(hookStart, "pi no longer defines _afterToolCall").toBeGreaterThan(
+			-1,
+		);
+		const hook = session.slice(hookStart);
 		const literalStart = hook.indexOf("emitToolResult({");
+		// The literal ends at the closing of the `emitToolResult(` call; a bare
+		// `})` would stop inside the `{}` of a conditional spread.
 		const literal = hook.slice(
 			literalStart,
-			hook.indexOf("})", literalStart) + 2,
+			hook.indexOf("\n            })", literalStart),
 		);
 		// `key: value` plus the shorthand form pi uses for `isError,`.
-		const assigned = [...literal.matchAll(/^\s+(\w+)\s*[:,]/gm)].map(
+		const plain = [...literal.matchAll(/^\s+(\w+)\s*[:,]/gm)].map(
 			(match) => match[1],
 		);
-		expect(new Set(assigned)).toEqual(new Set(HOST_TOOL_RESULT_KEYS));
+		// Conditional spreads: `...(cond ? { key } : {})` and
+		// `...(cond ? {} : { key: value })`.
+		const spread = [...literal.matchAll(/^\s+\.\.\.\(.*$/gm)].flatMap((line) =>
+			[...line[0].matchAll(/\{\s*(\w+)\s*[:}]/g)].map((match) => match[1]),
+		);
+		expect(new Set([...plain, ...spread])).toEqual(
+			new Set(HOST_TOOL_RESULT_KEYS),
+		);
 	});
 
 	it("declares no ToolResultEvent field the host never assigns", () => {
@@ -327,15 +349,17 @@ describe("#1655 item 3 — call-time input must not be re-read after handoff", (
 				],
 			};
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: { toolName: "edit", input },
-					ctx: { cwd: env.tmpDir },
-					ensureLSPConfigInitialized: async () => {
-						input.edits.splice(1);
-					},
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "edit", input },
+						ctx: { cwd: env.tmpDir },
+						ensureLSPConfigInitialized: async () => {
+							input.edits.splice(1);
+						},
+					}),
+				),
 			);
 
 			const summaries = readGuardLogEntries.filter(
@@ -460,12 +484,14 @@ describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
 			runtime.projectRoot = env.tmpDir;
 			const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: { toolName: "read", input: { path: typed } },
-					ctx: { cwd: env.tmpDir },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "read", input: { path: typed } },
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
 			);
 
 			expect(recordRead).toHaveBeenCalledWith(
@@ -488,12 +514,14 @@ describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
 			runtime.projectRoot = env.tmpDir;
 			const missing = path.join(env.tmpDir, "src", "gone d'ecran.ts");
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: { toolName: "read", input: { path: missing } },
-					ctx: { cwd: env.tmpDir },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "read", input: { path: missing } },
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
 			);
 
 			const group = getDegradationSummary().find(
@@ -512,15 +540,17 @@ describe("#1655 item 5 — pi's unicode path-variant ladder", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: {
-						toolName: "write",
-						input: { path: path.join(env.tmpDir, "src", "new d'ecran.ts") },
-					},
-					ctx: { cwd: env.tmpDir },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: {
+							toolName: "write",
+							input: { path: path.join(env.tmpDir, "src", "new d'ecran.ts") },
+						},
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
 			);
 
 			expect(
@@ -645,12 +675,14 @@ describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", ()
 				runtime.projectRoot = env.tmpDir;
 				const recordRead = vi.spyOn(runtime.readGuard, "recordRead");
 
-				await handleToolCall(
-					baseDeps({
-						runtime,
-						event: { toolName: "read", input: { path: typed } },
-						ctx: { cwd: env.tmpDir },
-					}),
+				await runHandlerExpectingNoThrow(() =>
+					handleToolCall(
+						baseDeps({
+							runtime,
+							event: { toolName: "read", input: { path: typed } },
+							ctx: { cwd: env.tmpDir },
+						}),
+					),
 				);
 
 				expect(recordRead).toHaveBeenCalledWith(
@@ -678,12 +710,14 @@ describe("#1655 review F1 — the base resolution pi runs BEFORE the ladder", ()
 			// class of miss silent.
 			const missing = path.join(env.tmpDir, "src", "gone.ts");
 
-			await handleToolCall(
-				baseDeps({
-					runtime,
-					event: { toolName: "read", input: { path: missing } },
-					ctx: { cwd: env.tmpDir },
-				}),
+			await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						event: { toolName: "read", input: { path: missing } },
+						ctx: { cwd: env.tmpDir },
+					}),
+				),
 			);
 
 			const group = getDegradationSummary().find(
@@ -766,20 +800,22 @@ describe("#1655 review F2 — bookkeeping must not discard a block verdict", () 
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 
-			const result = await handleToolCall(
-				baseDeps({
-					runtime,
-					ctx: { cwd: env.tmpDir },
-					event: {
-						toolName: "edit",
-						toolCallId: "call-f2-ok",
-						input: {
-							path: filePath,
-							oldText: "function foo() {\n\treturn 1;\n}",
-							newText: "function foo() {\n\treturn 2;\n}",
+			const result = await runHandlerExpectingNoThrow(() =>
+				handleToolCall(
+					baseDeps({
+						runtime,
+						ctx: { cwd: env.tmpDir },
+						event: {
+							toolName: "edit",
+							toolCallId: "call-f2-ok",
+							input: {
+								path: filePath,
+								oldText: "function foo() {\n\treturn 1;\n}",
+								newText: "function foo() {\n\treturn 2;\n}",
+							},
 						},
-					},
-				}),
+					}),
+				),
 			);
 
 			expect(result).toMatchObject({ block: true });

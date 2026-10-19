@@ -1089,6 +1089,146 @@ describe("handleNotifyOpen", () => {
 });
 
 /**
+ * #3543: a touch resolves `true` only when its content reached the wire; the
+ * `touchFile` debounce entry and drift record hang on that answer. One row per
+ * way a touch's run can end: the client dead by the time the queued run
+ * starts (the only dead-client check since #3543), dying mid-run, the
+ * transport refusing the write (a
+ * destroyed stream), and the write accepted. Recurrence: a run that ended
+ * without sending returned `undefined`, which the queue read as sent.
+ */
+describe("#3543 — a touch resolves true only when its content was sent", () => {
+	const DIED = "write after end: stream destroyed";
+	type Row = {
+		name: string;
+		via: "open" | "change";
+		/** The server already holds the document. */
+		opened: boolean;
+		/** `opengrep` resyncs by didClose + didOpen (`reopenOnResync`). */
+		serverId?: string;
+		/** The client dies after the touch is queued, before its run starts. */
+		deadBeforeRun?: boolean;
+		/** The client dies while this notification is being sent. */
+		dieOn?: string;
+		/** The transport rejects this notification as a destroyed stream. */
+		refuse?: string;
+		sent: boolean;
+	};
+	const rows: Row[] = [
+		{
+			name: "open, dead before the run",
+			via: "open",
+			opened: true,
+			deadBeforeRun: true,
+			sent: false,
+		},
+		{
+			name: "change, dead before the run",
+			via: "change",
+			opened: true,
+			deadBeforeRun: true,
+			sent: false,
+		},
+		{
+			name: "open, first didOpen accepted",
+			via: "open",
+			opened: false,
+			sent: true,
+		},
+		{
+			name: "open, first didOpen refused",
+			via: "open",
+			opened: false,
+			refuse: "textDocument/didOpen",
+			sent: false,
+		},
+		{ name: "open, didChange accepted", via: "open", opened: true, sent: true },
+		{
+			name: "open, didChange refused",
+			via: "open",
+			opened: true,
+			refuse: "textDocument/didChange",
+			sent: false,
+		},
+		{
+			name: "open, reopen accepted",
+			via: "open",
+			opened: true,
+			serverId: "opengrep",
+			sent: true,
+		},
+		{
+			name: "open, reopen didOpen refused",
+			via: "open",
+			opened: true,
+			serverId: "opengrep",
+			refuse: "textDocument/didOpen",
+			sent: false,
+		},
+		{
+			name: "open, dies during the reopen's didClose",
+			via: "open",
+			opened: true,
+			serverId: "opengrep",
+			dieOn: "textDocument/didClose",
+			sent: false,
+		},
+		{
+			name: "change, fallback didOpen accepted",
+			via: "change",
+			opened: false,
+			sent: true,
+		},
+		{
+			name: "change, fallback didOpen refused",
+			via: "change",
+			opened: false,
+			refuse: "textDocument/didOpen",
+			sent: false,
+		},
+		{
+			name: "change, didChange accepted",
+			via: "change",
+			opened: true,
+			sent: true,
+		},
+		{
+			name: "change, didChange refused",
+			via: "change",
+			opened: true,
+			refuse: "textDocument/didChange",
+			sent: false,
+		},
+	];
+
+	it.each(rows)("$name resolves $sent", async (row) => {
+		const state = createMockState(
+			row.serverId ? { serverId: row.serverId } : {},
+		);
+		if (row.opened) {
+			state.openDocuments.add(TEST_KEY);
+			state.documentVersions.set(TEST_KEY, 0);
+			state.openDocumentUris?.set(TEST_KEY, pathToFileURL(TEST_FILE).href);
+		}
+		vi.mocked(state.connection.sendNotification).mockImplementation(
+			async (method) => {
+				if (method === row.dieOn) state.isConnected = false;
+				if (method === row.refuse) throw new Error(DIED);
+			},
+		);
+
+		const touch =
+			row.via === "open"
+				? handleNotifyOpen(state, TEST_FILE, "v1", "typescript", false, true)
+				: handleNotifyChange(state, TEST_FILE, "v1");
+		// The queue starts its run on a microtask: this death lands first.
+		if (row.deadBeforeRun) state.isConnected = false;
+
+		await expect(touch).resolves.toBe(row.sent);
+	});
+});
+
+/**
  * #1668 — external (bash-authored) file changes that never went through
  * textDocument/didOpen/didChange. Reproduces the server-side stale view: a
  * bash-deleted file left NO trace in the fixture client's outbound traffic
@@ -1584,8 +1724,9 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 		expect(state.pushDiagnostics.get(TEST_KEY)).toEqual([]);
 	});
 
-	it("keeps classic TypeScript's first publication authoritative", () => {
+	it("holds classic TypeScript's first publication until the settled push", async () => {
 		const { state, emitPublishDiagnostics } = createCapturingState();
+		vi.useFakeTimers();
 		Object.defineProperty(state, "serverId", { value: "typescript" });
 		Object.defineProperty(state, "launchVariant", { value: "classic" });
 
@@ -1593,6 +1734,8 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 			uri: pathToFileURL(TEST_FILE).href,
 			diagnostics: [diagnostic("classic result", "2322")],
 		});
+		vi.advanceTimersByTime(DEBOUNCE_WAIT_MS);
+		vi.useRealTimers();
 
 		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe(
 			"classic result",
@@ -1761,6 +1904,9 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 		expect(state.documentContentHashes.get(TEST_KEY)).toEqual({
 			version: 2,
 			hash: hashDiagnosticContent(content),
+			changedAtMs: expect.any(Number),
+			openedAtMs: expect.any(Number),
+			openedHash: hashDiagnosticContent(content),
 		});
 
 		emitPublishDiagnostics({
@@ -2004,11 +2150,13 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 			});
 		});
 
-		it("a first-push settle's durationMs is 0 (no debounce wait), not document age", async () => {
+		it("a classic TypeScript settle measures debounce, not document age", async () => {
 			const { state, emitPublishDiagnostics } = createCapturingState();
-			// serverId "typescript" alone (no native-ts7 launchVariant) →
-			// seedFirstPush true — the very first publish settles immediately.
+			vi.useFakeTimers();
+			// Classic TypeScript now holds its measured empty first publish (#3310),
+			// so a real first result uses the bounded debounce path.
 			Object.defineProperty(state, "serverId", { value: "typescript" });
+			Object.defineProperty(state, "launchVariant", { value: "classic" });
 			state.documentOpenedAt.set(TEST_KEY, Date.now() - 90_000);
 
 			pullSequenceEvents.length = 0;
@@ -2017,13 +2165,17 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 				diagnostics: [diagnostic("first push", "2322")],
 			});
 
-			expect(pullSequenceEvents).toHaveLength(1);
-			expect(pullSequenceEvents[0].durationMs).toBe(0);
-			const metadata = pullSequenceEvents[0].metadata as Record<
-				string,
-				unknown
-			>;
-			expect(metadata.settleSource).toBe("first-push");
+			vi.advanceTimersByTime(DEBOUNCE_WAIT_MS);
+			vi.useRealTimers();
+			const settled = pullSequenceEvents.find(
+				(event) =>
+					event.metadata &&
+					(event.metadata as Record<string, unknown>).settledReturn === true,
+			);
+			expect(settled).toBeDefined();
+			expect(settled!.durationMs).toBeLessThan(1000);
+			const metadata = settled!.metadata as Record<string, unknown>;
+			expect(metadata.settleSource).toBe("quiet-window");
 			expect(metadata.elapsedSinceDidOpenMs as number).toBeGreaterThanOrEqual(
 				89_000,
 			);
@@ -2392,23 +2544,83 @@ describe("clientRequestWorkspaceDiagnostics content binding (#1104)", () => {
 		});
 	}
 
-	it("fingerprints disk bytes at request time for a 'full' item and returns the hash", async () => {
-		const state = pullSupportState();
-		const filePath = path.join(os.tmpdir(), `pi-lens-1104-${Date.now()}.ts`);
-		const content = "const y = 2;\n";
-		fs.writeFileSync(filePath, content);
-		try {
-			const uri = pathToFileURL(filePath).href;
-			state.connection.sendRequest = vi.fn().mockResolvedValue({
-				items: [{ uri, kind: "full", resultId: "wr1", items: [] }],
-			});
+	// #3505 (b): a "full" item is bound to the bytes pi-lens SENT the server,
+	// never to a read of the disk after the answer. That post-hoc hash
+	// described the post-edit bytes whenever the file was written while the
+	// server was answering, so the sweep cached the pre-edit verdict as bound
+	// to them. Each case writes the file while the request is in flight.
+	describe("binds a 'full' item to the bytes pi-lens sent (#3505 b)", () => {
+		const SENT = "const y = 2;\n";
+		const EDITED = "const y = (\n";
 
-			const report = await clientRequestWorkspaceDiagnostics(state, 1000);
-
-			expect(report?.[0]?.contentHash).toBe(hashDiagnosticContent(content));
-		} finally {
-			fs.rmSync(filePath, { force: true });
+		async function pullWhileEditing(
+			setup: (state: LSPClientState, key: string) => void,
+			itemVersion: number | null,
+		) {
+			const state = pullSupportState();
+			const filePath = path.join(
+				os.tmpdir(),
+				`pi-lens-3505b-${process.pid}-${Math.random().toString(36).slice(2)}.ts`,
+			);
+			fs.writeFileSync(filePath, SENT);
+			try {
+				setup(state, normalizeMapKey(filePath));
+				const uri = pathToFileURL(filePath).href;
+				state.connection.sendRequest = vi.fn(async () => {
+					// A parallel tool call writes while the server answers.
+					fs.writeFileSync(filePath, EDITED);
+					return {
+						items: [
+							{
+								uri,
+								kind: "full",
+								version: itemVersion,
+								resultId: "wr1",
+								items: [],
+							},
+						],
+					};
+				});
+				const report = await clientRequestWorkspaceDiagnostics(state, 1000);
+				return report?.[0]?.contentHash;
+			} finally {
+				fs.rmSync(filePath, { force: true });
+			}
 		}
+
+		const openAndSent =
+			(version: number) => (state: LSPClientState, key: string) => {
+				state.openDocuments.add(key);
+				state.documentContentHashes.set(key, {
+					version,
+					hash: hashDiagnosticContent(SENT),
+				});
+			};
+
+		it("binds an open document's answer at the version pi-lens last sent", async () => {
+			expect(await pullWhileEditing(openAndSent(2), 2)).toBe(
+				hashDiagnosticContent(SENT),
+			);
+		});
+
+		it("leaves the answer unbound when the reported version is not the one pi-lens last sent", async () => {
+			expect(await pullWhileEditing(openAndSent(2), 1)).toBeUndefined();
+			expect(await pullWhileEditing(openAndSent(2), null)).toBeUndefined();
+		});
+
+		it("leaves the answer unbound for a document pi-lens never sent", async () => {
+			expect(await pullWhileEditing(() => {}, 2)).toBeUndefined();
+		});
+
+		it("leaves the answer unbound for a document pi-lens has since closed", async () => {
+			// The sent record outlives the close (`clearDiagnosticsForPath`), but a
+			// closed document is read from disk again by the server.
+			const closed = (state: LSPClientState, key: string) => {
+				openAndSent(2)(state, key);
+				state.openDocuments.delete(key);
+			};
+			expect(await pullWhileEditing(closed, 2)).toBeUndefined();
+		});
 	});
 
 	it("an 'unchanged' item inherits the prior pull's diagnostics + contentHash and echoes previousResultIds on the next request", async () => {
@@ -2417,11 +2629,19 @@ describe("clientRequestWorkspaceDiagnostics content binding (#1104)", () => {
 		fs.writeFileSync(filePath, "const y = 2;\n");
 		try {
 			const uri = pathToFileURL(filePath).href;
+			// #3505 (b): an open document at the sent version, so the first
+			// answer carries a binding for the second to inherit.
+			state.openDocuments.add(normalizeMapKey(filePath));
+			state.documentContentHashes.set(normalizeMapKey(filePath), {
+				version: 1,
+				hash: hashDiagnosticContent("const y = 2;\n"),
+			});
 			const sendRequest = vi.fn().mockResolvedValueOnce({
 				items: [
 					{
 						uri,
 						kind: "full",
+						version: 1,
 						resultId: "wr1",
 						items: [
 							{
@@ -2439,6 +2659,7 @@ describe("clientRequestWorkspaceDiagnostics content binding (#1104)", () => {
 			state.connection.sendRequest = sendRequest;
 			const first = await clientRequestWorkspaceDiagnostics(state, 1000);
 			const firstHash = first?.[0]?.contentHash;
+			expect(firstHash).toBe(hashDiagnosticContent("const y = 2;\n"));
 			expect(first?.[0]?.diagnostics.length).toBe(1);
 
 			sendRequest.mockResolvedValueOnce({
@@ -3080,7 +3301,14 @@ describe("per-path diagnostics versions (#1531)", () => {
 	 * stamp is proven to be written by the same code path that stores
 	 * `pushDiagnostics` — not by a helper the production push path might skip.
 	 * `typos` is used because its strategy seeds the first push (no debounce
-	 * timer), which keeps the store synchronous. */
+	 * timer), which keeps the store synchronous. Every call below carries a
+	 * `version` (#3548 review r2): typos is also `publishesOnClose`, whose
+	 * fix drops a version-less publish unconditionally before it reaches
+	 * this store — a version-less "real" typos publish is not a shape typos
+	 * ever sends (verified against tekumara/typos-lsp upstream: only its
+	 * did_close artifact omits one), so this double stays production-
+	 * faithful on the seedFirstPush axis under test here without also
+	 * exercising the now-unrelated close-publish filter. */
 	function publishHandlerFor(state: LSPClientState) {
 		setupIncomingHandlers(state, {});
 		const calls = vi.mocked(state.connection.onNotification).mock
@@ -3110,6 +3338,7 @@ describe("per-path diagnostics versions (#1531)", () => {
 
 		publish({
 			uri: pathToFileURL(FILE_A).href,
+			version: 1,
 			diagnostics: [diagnostic("typo in A")],
 		});
 
@@ -3131,6 +3360,7 @@ describe("per-path diagnostics versions (#1531)", () => {
 
 		publish({
 			uri: pathToFileURL(FILE_A).href,
+			version: 1,
 			diagnostics: [diagnostic("typo in A")],
 		});
 		const baselineA = diagnosticsVersionForPath(state, KEY_A);
@@ -3143,6 +3373,7 @@ describe("per-path diagnostics versions (#1531)", () => {
 		// above its captured baseline.
 		publish({
 			uri: pathToFileURL(FILE_B).href,
+			version: 1,
 			diagnostics: [diagnostic("typo in B")],
 		});
 		expect(diagnosticsVersionForPath(state, KEY_A)).toBeLessThanOrEqual(
@@ -3153,6 +3384,7 @@ describe("per-path diagnostics versions (#1531)", () => {
 		// global counter's value, so they never restart below an earlier one.
 		publish({
 			uri: pathToFileURL(FILE_A).href,
+			version: 2,
 			diagnostics: [diagnostic("typo in A again")],
 		});
 		expect(diagnosticsVersionForPath(state, KEY_A)).toBeGreaterThan(baselineA);

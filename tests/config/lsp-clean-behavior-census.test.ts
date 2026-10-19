@@ -32,7 +32,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { strategyKeyForLang } from "../../scripts/lib/clean-signal.mjs";
+import {
+	MEASURED_CLEAN_BEHAVIORS,
+	strategyKeyForLang,
+} from "../../scripts/lib/clean-signal.mjs";
 import { parseTable } from "../../scripts/lib/md-matrix.mjs";
 import { SERVER_DIAGNOSTIC_STRATEGIES } from "../../clients/lsp/wait-policy/strategies.js";
 
@@ -41,13 +44,6 @@ const repoRoot = path.resolve(
 	"../..",
 );
 const MATRIX_PATH = path.join(repoRoot, "docs", "lsp-capability-matrix.md");
-
-/** The only `clean-behavior` values that are a measurement of anything. */
-const MEASURED_CLEAN_BEHAVIORS = new Set([
-	"publishes-versioned",
-	"publishes-unversioned",
-	"silent",
-]);
 
 /**
  * Named admissions for a push-only row the clean-signal probe has not yet
@@ -64,10 +60,6 @@ const MEASURED_CLEAN_BEHAVIORS = new Set([
  * direction AGENTS.md's detector rule forbids.
  */
 const UNMEASURED_PUSH_ADMISSIONS = new Map<string, string>([
-	[
-		"terraform",
-		"terraform-ls: clean-behavior not yet classified by probe-clean-signal.mjs (the matrix tier cell is still `2/3?`); no silentOnClean marker may be set for it until it is",
-	],
 	[
 		"vue",
 		"@vue/language-server: the `publishes-unversioned` cell was an artifact of #3390 (58/45 publishes attributed to vue were tinymist's); nightly 36046209160 re-measured 0/0 with the sink scoped, so the cell is `unknown` until a run observes vue itself publish",

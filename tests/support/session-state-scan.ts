@@ -594,6 +594,35 @@ function containerDeclarationRegex(dir: string): RegExp {
 	return regex;
 }
 
+/**
+ * Module-level container declarations (`const`/`let` bound to a `new` of a
+ * built-in container or a `clients/` class) in one file, by name, in source
+ * order. The same regex {@link scanSessionStateCandidates} applies, for a
+ * file outside `clients/` (`index.ts`, #3611's session-scope ratchet).
+ */
+export function moduleContainerNames(absoluteFile: string): string[] {
+	return containerDeclarationNames(
+		stripCommentsAndStrings(fs.readFileSync(absoluteFile, "utf8")),
+	);
+}
+
+/**
+ * The same container declarations in already-stripped `source`, at an
+ * `indent` (`""` for module scope, `"\t"` for a factory closure's own body:
+ * #3611 r2, the activation-closure ratchet).
+ */
+export function containerDeclarationNames(
+	strippedSource: string,
+	indent = "",
+): string[] {
+	const moduleScope = containerDeclarationRegex(CLIENTS_ROOT);
+	const regex = new RegExp(
+		moduleScope.source.replace(/^\^/, `^${indent}`),
+		"gm",
+	);
+	return [...strippedSource.matchAll(regex)].map((match) => match[1]);
+}
+
 /** An exported reset-shaped function. */
 const EXPORTED_RESET = /^export function (_?(?:reset|clear)[A-Za-z0-9_]*)/gm;
 

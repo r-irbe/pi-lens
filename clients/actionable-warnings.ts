@@ -9,8 +9,13 @@ import {
 	stableFindingId,
 } from "./finding-identity.js";
 import type { LSPCodeAction, LSPDiagnostic } from "./lsp/client.js";
-import { applyWorkspaceEdit } from "./lsp/edits.js";
-import { getLSPService } from "./lsp/index.js";
+import {
+	applyWorkspaceEdit,
+	StaleWorkspaceEditContentError,
+	workspaceEditDiskPaths,
+} from "./lsp/edits.js";
+import { getLSPService } from "./lsp/capabilities.js";
+import { configDisabledAuxiliaryLspServerIds } from "./dispatch/auxiliary-lsp.js";
 import { isUnderDir, normalizeMapKey } from "./path-utils.js";
 import {
 	bounded,
@@ -153,6 +158,23 @@ export interface ActionableWarningsReportFile {
 	 * otherwise have erased it -- and is then the report's own business.
 	 */
 	origin?: "deferred";
+	/**
+	 * #3676: the read guard's branch epoch when THIS entry's build began; an
+	 * entry that merged two observations carries the older epoch, like
+	 * {@link generatedAt}. `/tree` moves neither `projectSeqEnd` nor any
+	 * `fileSeq`, so this is the only axis on which an entry can tell the quick
+	 * fix that the conversation moved since it was observed. The quick fix
+	 * credits its writes with the oldest epoch among the entries it acts on
+	 * ({@link quickFixCreditEpoch}). Absent on a cache file from before #3676.
+	 */
+	branchEpoch?: number;
+	/**
+	 * #3676: the read guard's {@link ReadGuard.lineageKey} when this entry's
+	 * build began. The epoch alone is not an identity across guards (a new guard
+	 * restarts it at 0), and this cache file outlives guards. Entries that merged
+	 * across two keys carry none. Absent on a cache file from before this stamp.
+	 */
+	branchScope?: string;
 	warnings: ActionableWarningRecord[];
 }
 
@@ -628,6 +650,14 @@ export interface BuildActionableWarningsArgs {
 	includeLspCodeActions: boolean;
 	projectSeqStart?: number;
 	projectSeqEnd?: number;
+	/**
+	 * #3676: the read guard's branch epoch, read where `projectSeqEnd` is, before
+	 * the build's first await. The deferred report is assembled from these same
+	 * args, so it carries the epoch of the build that armed it.
+	 */
+	branchEpoch?: number;
+	/** #3676: the guard's `lineageKey`, read beside `branchEpoch`. */
+	branchScope?: string;
 	fileSeqByPath?: Map<string, number>;
 	deltaOnly?: boolean;
 	dbg?: (msg: string) => void;
@@ -645,6 +675,14 @@ export interface BuildActionableWarningsArgs {
 	 * `actionable-warnings` cache the in-band report goes to.
 	 */
 	onDeferredReport?: (report: ActionableWarningsReport) => void;
+	/**
+	 * #4323: the host's flag resolver (the one the explicit diagnostics routes
+	 * use), so the cold LSP read leaves the auxiliaries the operator turned off
+	 * (`--no-opengrep`, `opengrep.enabled=false`) unstarted. Omitted by callers
+	 * that run no cold read (persistent re-verify passes the touch's own
+	 * diagnostics) and in tests, where no flag is set.
+	 */
+	getFlag?: (name: string) => boolean | string | undefined;
 }
 
 /** One file's LSP enrichment plan, resolved before any fresh pull happens. */
@@ -677,6 +715,12 @@ interface LspEnrichmentDeps {
 	 * session boundary had deliberately retired the one it started with.
 	 */
 	lspService: ReturnType<typeof getLSPService>;
+	/**
+	 * #4323: auxiliaries the operator's configuration turns off, resolved once
+	 * per build from `BuildActionableWarningsArgs.getFlag`; the cold read never
+	 * acquires them.
+	 */
+	excludeServerIds?: ReadonlySet<string> | undefined;
 	/** Per-round-trip timeout; the bound a between-files deadline cannot give. */
 	pullTimeoutMs: number;
 	/**
@@ -824,6 +868,9 @@ export async function buildActionableWarningsReport(
 	const cwd = path.resolve(args.cwd);
 	const records: ActionableWarningRecord[] = [...args.dispatchWarnings];
 	const lspService = getLSPService();
+	const excludeServerIds = args.getFlag
+		? configDisabledAuxiliaryLspServerIds(args.getFlag)
+		: undefined;
 	// #2504 review round 5 (F2): when each file's LSP observation FINISHED,
 	// keyed by normalized path. assembleReport used to stamp every entry with
 	// one `new Date()` taken at ASSEMBLY -- which for the deferred loop is the
@@ -958,6 +1005,7 @@ export async function buildActionableWarningsReport(
 		// deferral must not be the only path that is bounded.
 		const inBandDeps: LspEnrichmentDeps = {
 			lspService,
+			excludeServerIds,
 			pullTimeoutMs,
 			// #2504 review round 4 (F2). This is the AWAITED hook: the batch
 			// budget has to bound what happens INSIDE a file, not only how many
@@ -1039,6 +1087,7 @@ export async function buildActionableWarningsReport(
 					combineAbortSignals(args.signal, deferredSignal) ?? deferredSignal;
 				const deferredDeps: LspEnrichmentDeps = {
 					lspService,
+					excludeServerIds,
 					pullTimeoutMs,
 					signal: loopSignal,
 					// OFF the hook by construction: this loop is the answer to
@@ -1212,7 +1261,8 @@ export async function enrichFileFromLsp(
 				}
 			}
 			const pulled = await boundedLspCall(
-				() => lspService.getDiagnostics(filePath),
+				() =>
+					lspService.getDiagnostics(filePath, "full", deps.excludeServerIds),
 				deps,
 			);
 			if (pulled === undefined) {
@@ -1380,6 +1430,8 @@ function assembleReport(
 				stamps?.observedAtByPath.get(normalizeMapKey(filePath)) ??
 				stamps?.fallbackObservedAt ??
 				generatedAt,
+			branchEpoch: args.branchEpoch,
+			branchScope: args.branchScope,
 			warnings,
 		}),
 	);
@@ -1631,6 +1683,14 @@ export function mergeActionableWarningsReports(args: {
 							incumbent.generatedAt ?? newerReport?.generatedAt,
 							entry.generatedAt ?? olderReport?.generatedAt,
 						),
+						branchEpoch: olderBranchEpoch(
+							incumbent.branchEpoch,
+							entry.branchEpoch,
+						),
+						branchScope:
+							incumbent.branchScope === entry.branchScope
+								? incumbent.branchScope
+								: undefined,
 						warnings: mergeWarnings([...incumbent.warnings, ...entry.warnings]),
 					}
 			: { ...entry };
@@ -1767,12 +1827,13 @@ export function publishActionableWarningsReport(
 		// without any file having moved -- name the actual cause instead of
 		// asserting a change that may not have happened.
 		const cause = merged.droppedForSessionMismatch
-			? "the publish crossed a session boundary (a different session's write, or a resumed process) before this turn's in-band publish could keep them"
+			? "the publish crossed a session boundary"
 			: "changed before this turn's in-band publish could keep them";
+		const reason = `${merged.droppedFiles.length} carried-forward entries: findings are LOST on this channel; ${cause} (files: ${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`;
 		incrementDegradationCount({
 			kind: "actionable-warnings-inband-superseded",
 			subject: `${path.resolve(cwd)}:inband-carry-superseded`,
-			reason: `${merged.droppedFiles.length} carried-forward deferred file entry/entries ${cause} (${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""}); their earlier findings are LOST on this channel rather than published against content that has since moved`,
+			reason,
 		});
 		opts.dbg?.(
 			`actionable_warnings: in-band publish dropped ${merged.droppedFiles.length} superseded carried-forward file entry/entries (${merged.droppedFiles.slice(0, 3).join(", ")}${merged.droppedFiles.length > 3 ? ", ..." : ""})`,
@@ -1797,6 +1858,46 @@ function newerStamp(a?: string, b?: string): string | undefined {
 	if (a === undefined) return b;
 	if (b === undefined) return a;
 	return older === a ? b : a;
+}
+
+/**
+ * #3676: the older of two entries' branch epochs. Unlike {@link minDefined}, a
+ * missing half poisons the result: an unstamped entry (a cache file from before
+ * the stamp) has no epoch to vouch for, so the entry that absorbed it vouches
+ * for none.
+ */
+function olderBranchEpoch(a?: number, b?: number): number | undefined {
+	if (typeof a !== "number" || typeof b !== "number") return undefined;
+	return Math.min(a, b);
+}
+
+/**
+ * #3676: the branch epoch the quick fix credits its writes with: the oldest
+ * epoch among the entries it acts on, or `undefined` when there are none, any
+ * one of them was built under another guard than `liveScope` (its
+ * {@link ActionableWarningsReportFile.branchScope}), or carries no valid epoch
+ * (not an integer `>= 0`). One entry that cannot vouch for the live branch
+ * withholds the credit from the whole pass: the pass cannot tell which of its
+ * writes belongs to which entry.
+ */
+export function quickFixCreditEpoch(
+	files: ReadonlyArray<
+		Pick<ActionableWarningsReportFile, "branchEpoch" | "branchScope">
+	>,
+	liveScope: string,
+): number | undefined {
+	let oldest: number | undefined;
+	for (const { branchEpoch, branchScope } of files) {
+		if (branchScope !== liveScope || !isBranchEpoch(branchEpoch))
+			return undefined;
+		oldest = oldest === undefined ? branchEpoch : Math.min(oldest, branchEpoch);
+	}
+	return oldest;
+}
+
+/** An epoch a cache file can legitimately carry: an integer `>= 0`. */
+function isBranchEpoch(value: unknown): value is number {
+	return Number.isInteger(value) && (value as number) >= 0;
 }
 
 function minDefined(a?: number, b?: number): number | undefined {
@@ -1849,7 +1950,7 @@ export function writeDeferredActionableWarningsReport(args: {
 		incrementDegradationCount({
 			kind: "actionable-warnings-deferred-superseded",
 			subject: `${path.resolve(args.cwd)}:deferred-file-superseded`,
-			reason: `${droppedFiles.length} file(s) changed while the deferred LSP pull was reading them (${droppedFiles.slice(0, 3).join(", ")}${droppedFiles.length > 3 ? ", ..." : ""}); their warnings are LOST on this channel rather than published against content that has since moved. Every file that did NOT change was merged into the persisted report`,
+			reason: `${droppedFiles.length} changed file(s): warnings are LOST; unchanged files were merged into the persisted report (files: ${droppedFiles.slice(0, 3).join(", ")}${droppedFiles.length > 3 ? ", ..." : ""})`,
 		});
 		args.dbg?.(
 			`turn_end: deferred actionable-warnings dropped ${droppedFiles.length} superseded file entry/entries`,
@@ -1915,6 +2016,9 @@ export function appendActionableWarningsHistory(
 ): void {
 	const entries: ActionableWarningsHistoryEntry[] = [];
 	for (const file of report.files) {
+		// An incomplete re-verify carries prior warnings; it did not observe them
+		// this turn, so do not append duplicate history rows.
+		if (file.reVerifyIncomplete) continue;
 		for (const warning of file.warnings) {
 			entries.push({
 				timestamp: report.generatedAt,
@@ -2106,23 +2210,70 @@ export async function applyConservativeActionableWarningFixes(args: {
 					});
 					continue;
 				}
+				// #3576: no edit starts after the drain's session was replaced; its
+				// write would land in the next session's files and its code-action
+				// request was the await the replacement straddled.
+				if (
+					args.mutationContext?.session &&
+					args.mutationContext.session.guardedWrite(
+						warning.filePath,
+						() => true,
+					) === undefined
+				) {
+					summary.skipped.push({ id: warning.id, reason: "session_replaced" });
+					continue;
+				}
 				const edit = selected.edit as Parameters<typeof applyWorkspaceEdit>[0];
-				const applied = await applyWorkspaceEdit(
-					edit,
-					args.cwd,
-					args.mutationContext
+				// #3541: the expected content below is compared only where a text
+				// edit first reads a file. A resource operation (create, rename,
+				// delete) is never compared, even on this file, so a conservative
+				// fix is text-only.
+				if (
+					edit.documentChanges?.some(
+						(change) =>
+							typeof change === "object" && change !== null && "kind" in change,
+					)
+				) {
+					summary.skipped.push({
+						id: warning.id,
+						reason: "resource_operation",
+					});
+					continue;
+				}
+				// #3541: and it covers only the file this fix read; an edit that
+				// also writes another file would apply there at the server's
+				// positions unchecked. A path not on disk throws here, and the fix
+				// is skipped as apply_failed.
+				const target = fs.realpathSync.native(warning.filePath);
+				const writesOtherFile = workspaceEditDiskPaths(edit).some(
+					(diskPath) => fs.realpathSync.native(diskPath) !== target,
+				);
+				if (writesOtherFile) {
+					summary.skipped.push({ id: warning.id, reason: "multi_file_edit" });
+					continue;
+				}
+				const applied = await applyWorkspaceEdit(edit, args.cwd, {
+					// #3541: the code action's positions are the server's view of
+					// `content`; inside pi's queue the edit applies only to it. A
+					// file absent at that read (`content` undefined) expected no bytes.
+					expectedContent: new Map([[target, content ?? ""]]),
+					...(args.mutationContext
 						? {
 								mutationContext: {
 									...args.mutationContext,
 									emitSummary: false,
 								},
 							}
-						: undefined,
-				);
+						: {}),
+				});
 				appliedResults.push(applied);
 				for (const changedFile of applied.files) changedFiles.add(changedFile);
 				summary.applied++;
 			} catch (err) {
+				if (err instanceof StaleWorkspaceEditContentError) {
+					summary.skipped.push({ id: warning.id, reason: "stale_content" });
+					continue;
+				}
 				failedCount++;
 				const partial = (
 					err as {

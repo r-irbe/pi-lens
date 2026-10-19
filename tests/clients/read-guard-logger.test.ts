@@ -4,8 +4,13 @@
  * per-read `read_recorded` event stays gated as before.
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { shouldLogEvent } from "../../clients/read-guard-logger.js";
+import {
+	sanitizeCorrelationId,
+	shouldLogEvent,
+} from "../../clients/read-guard-logger.js";
+import { setupTestEnvironment } from "./test-utils.js";
 
 describe("shouldLogEvent", () => {
 	it("always logs read_cap_trimmed, even at default verbosity", () => {
@@ -29,6 +34,91 @@ describe("shouldLogEvent", () => {
 
 	it("still logs the pre-existing always-on events", () => {
 		expect(shouldLogEvent("edit_blocked")).toBe(true);
+	});
+
+	// #3962: the supersession decision must be visible in the REAL sink, not
+	// only in the mocked logger `read-guard.test.ts` installs. A non-zero
+	// bridge contentBinding followed by a covering native re-read of the
+	// changed bytes records `edit_allowed`, never `edit_blocked` with
+	// `contentBindingMismatch`.
+	it("records edit_allowed for a native re-read, not a contentBindingMismatch block", async () => {
+		const env = setupTestEnvironment("read-guard-sink-3962-");
+		const previousMode = process.env.PI_LENS_TEST_MODE;
+		const previousAllows = process.env.PI_LENS_READ_GUARD_LOG_ALLOWS;
+		process.env.PI_LENS_TEST_MODE = "0";
+		process.env.PI_LENS_READ_GUARD_LOG_ALLOWS = "1";
+		vi.resetModules();
+		try {
+			const filePath = path.join(env.tmpDir, "sink.ts");
+			fs.writeFileSync(filePath, "const a = 1;\nconst b = 2;\nconst c = 3;\n");
+			const { captureReadContentBinding, createReadGuard } =
+				await import("../../clients/read-guard.js");
+			const logger = await import("../../clients/read-guard-logger.js");
+			const guard = createReadGuard("sink-3962");
+			const binding = captureReadContentBinding(filePath, 1, 1);
+			expect(binding).toBeDefined();
+			guard.recordRead({
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: 1,
+				effectiveOffset: 1,
+				effectiveLimit: 1,
+				expandedByLsp: false,
+				turnIndex: 0,
+				writeIndex: 0,
+				timestamp: Date.now(),
+				source: "bridge:test",
+				contentBinding: binding,
+			});
+			// External change the bridge never saw, then the native re-read remedy.
+			fs.writeFileSync(filePath, "const a = 99;\nconst b = 2;\nconst c = 3;\n");
+			guard.recordRead({
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: 3,
+				effectiveOffset: 1,
+				effectiveLimit: 3,
+				expandedByLsp: false,
+				turnIndex: 0,
+				writeIndex: 0,
+				timestamp: Date.now(),
+			});
+			expect(guard.checkEdit(filePath, [1, 1])).toEqual({ action: "allow" });
+
+			await logger.flushReadGuardLog();
+			const entries = fs
+				.readFileSync(logger.getReadGuardLogPath(), "utf8")
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							sessionId?: string;
+							event?: string;
+							metadata?: { contentBindingMismatch?: boolean };
+						},
+				)
+				.filter((entry) => entry.sessionId === "sink-3962");
+			expect(entries.some((entry) => entry.event === "edit_allowed")).toBe(
+				true,
+			);
+			expect(
+				entries.some(
+					(entry) =>
+						entry.event === "edit_blocked" &&
+						entry.metadata?.contentBindingMismatch === true,
+				),
+			).toBe(false);
+		} finally {
+			if (previousMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousMode;
+			if (previousAllows === undefined)
+				delete process.env.PI_LENS_READ_GUARD_LOG_ALLOWS;
+			else process.env.PI_LENS_READ_GUARD_LOG_ALLOWS = previousAllows;
+			vi.resetModules();
+			env.cleanup();
+		}
 	});
 
 	it("writes partial-apply outcomes to the real sink at default verbosity", async () => {
@@ -108,5 +198,55 @@ describe("logReadGuardEvent filePath normalization (#2219)", () => {
 		vi.doUnmock("../../clients/env-utils.js");
 		vi.doUnmock("../../clients/ndjson-logger.js");
 		vi.resetModules();
+	});
+});
+
+/**
+ * #3833: every map keyed by a tool-call id (attribution, read widening, the
+ * read-guard branch filter) trusts `sanitizeCorrelationId` to be injective.
+ * The recurrence: a plain 64-char slice merged pi 0.99 codemode's nested
+ * `<openai-parent-id>/<n>` ids into one key, so parallel nested edits shared
+ * one attribution and turn_end reported a false `clean`.
+ */
+describe("sanitizeCorrelationId (#3833)", () => {
+	const parent = `call_${"x".repeat(40)}|fc_${"y".repeat(45)}`;
+
+	it("keeps ids of 64 characters or fewer exactly as before", () => {
+		expect(sanitizeCorrelationId("call_a")).toBe("call_a");
+		expect(sanitizeCorrelationId("  call_b|fc_1 ")).toBe("call_b_fc_1");
+		expect(sanitizeCorrelationId(42)).toBe("42");
+		const exactly64 = "a".repeat(64);
+		expect(sanitizeCorrelationId(exactly64)).toBe(exactly64);
+		expect(sanitizeCorrelationId("   ")).toBeUndefined();
+		expect(sanitizeCorrelationId({})).toBeUndefined();
+	});
+
+	it("bounds a long id to 64 characters of the allowed alphabet, readable prefix first", () => {
+		const out = sanitizeCorrelationId(`${parent}/1`) as string;
+		expect(out.length).toBe(64);
+		expect(out).toMatch(/^[a-zA-Z0-9._:-]+$/);
+		expect(out.startsWith("call_xxxxxxxx")).toBe(true);
+	});
+
+	it("never merges ids that differ anywhere, including past char 64 and at the last char", () => {
+		const raw = [
+			`${parent}/1`,
+			`${parent}/2`,
+			`${parent}/10`,
+			`${parent}/1/1`,
+			`${parent}z/1`,
+			`${"q".repeat(63)}a${"q".repeat(40)}`,
+			`${"q".repeat(63)}b${"q".repeat(40)}`,
+			`${"q".repeat(105)}a`,
+			`${"q".repeat(105)}b`,
+		];
+		const keys = raw.map((id) => sanitizeCorrelationId(id));
+		expect(new Set(keys).size).toBe(raw.length);
+	});
+
+	it("is deterministic and idempotent, so a stored id re-sanitizes to itself", () => {
+		const once = sanitizeCorrelationId(`${parent}/7`) as string;
+		expect(sanitizeCorrelationId(`${parent}/7`)).toBe(once);
+		expect(sanitizeCorrelationId(once)).toBe(once);
 	});
 });

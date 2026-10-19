@@ -20,8 +20,14 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { safeSpawn } from "../../clients/safe-spawn.js";
 import { escapeRegExp } from "../../clients/string-utils.js";
+import { gitExecFileSync } from "./git-fixture-env.mjs";
 
 const SELF_SCAN_CATEGORY = "pi-lens-self-scan";
+
+/** A self-scan rule that declares `severity: info` is advisory (#3684): its
+ * hits are reported but never gate and never enter the baseline. The rule's
+ * own declared severity is the single source of truth -- no parallel list. */
+const ADVISORY_SEVERITY = "info";
 
 /** Repo root, derived from this file's own on-disk location -- never a
  * hardcoded machine path (the #1718 defect). */
@@ -147,7 +153,8 @@ export function runSelfScan({
 
 	return {
 		ruleIds: ids,
-		findings,
+		findings: findings.filter((f) => f.severity !== ADVISORY_SEVERITY),
+		advisoryFindings: findings.filter((f) => f.severity === ADVISORY_SEVERITY),
 		// undefined (not 0) when ast-grep's --inspect output shape changes
 		// underneath us -- an unparsed count must not silently read as
 		// "scanned zero files" and trip the dead-scan guard for the wrong
@@ -169,7 +176,17 @@ export function findingSignature(finding) {
 export function loadBaseline(root = repoRoot()) {
 	const p = baselinePath(root);
 	if (!fs.existsSync(p)) return new Set();
-	const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+	let raw;
+	try {
+		raw = JSON.parse(fs.readFileSync(p, "utf8"));
+	} catch (e) {
+		// A malformed baseline must stay loud: an empty set would resurface
+		// every triaged finding as new instead of naming the bad file.
+		throw new Error(
+			`[astgrep-self-scan] baseline ${p} is not valid JSON: ${e?.message ?? e}`,
+			{ cause: e },
+		);
+	}
 	return new Set(Array.isArray(raw.allowed) ? raw.allowed : []);
 }
 
@@ -188,4 +205,88 @@ export function writeBaseline(signatures, root = repoRoot()) {
 	};
 	fs.writeFileSync(p, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 	return p;
+}
+
+/** The set of tracked files under the scan roots, from `git ls-files`, or
+ * `undefined` when git cannot list them (not a work tree, git unavailable).
+ * The self-scan still runs over the directory roots -- the same argv CI uses --
+ * and drops findings outside this set, so an untracked working-tree scratch file
+ * cannot gate a push CI would never run it in and no file list reaches
+ * ast-grep's argv (Windows cmd.exe/CreateProcess line limits, #3886 r3). A
+ * caller that sees `undefined` keeps the whole directory result. */
+export function trackedSelfScanFileSet(
+	root = repoRoot(),
+	roots = ["clients", "tests"],
+) {
+	try {
+		const out = String(
+			gitExecFileSync(["ls-files", "-z", "--", ...roots], {
+				cwd: root,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+			}),
+		);
+		const files = out
+			.split("\0")
+			.map((line) => line.trim())
+			.filter(Boolean);
+		// git ls-files emits forward-slash repo-relative paths on every
+		// platform, so only the finding side needs normalization.
+		return new Set(files);
+	} catch {
+		// Not a git work tree (or git unavailable): fall back to no filter.
+		return undefined;
+	}
+}
+
+/** Drops findings whose file is not in `tracked` (a set from
+ * `trackedSelfScanFileSet`); an undefined set is a no-op, so a scan that
+ * cannot enumerate tracked files keeps its whole directory result. Finding
+ * paths are normalized so a Windows-shaped finding from ast-grep still
+ * matches git's forward-slash path. (#3886) */
+export function findingsInTrackedFiles(findings, tracked) {
+	if (!tracked) return findings;
+	return findings.filter((f) =>
+		tracked.has(normalizeFindingPath(String(f.file ?? ""))),
+	);
+}
+
+function normalizeFindingPath(file) {
+	return file.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+/** Absolute (real) paths of files changed between
+ * `base` and the working tree, from `git diff` run in `cwd` (the repo root). Throws when git
+ * cannot resolve `base` -- the caller decides how loud that is. (#3684) */
+export function changedFilesSince(base, cwd = process.cwd()) {
+	const out = String(
+		gitExecFileSync(["diff", "--name-only", base], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		}),
+	);
+	return new Set(
+		out
+			.split("\n")
+			.filter(Boolean)
+			.map((name) => realPathOrResolved(path.resolve(cwd, name))),
+	);
+}
+
+/** The subset of `findings` whose file is in `changed` (a set from
+ * `changedFilesSince`); finding paths are resolved against `root`, where
+ * ast-grep ran. (#3684) */
+export function findingsInChangedFiles(findings, changed, root = repoRoot()) {
+	return findings.filter((f) =>
+		changed.has(realPathOrResolved(path.resolve(root, String(f.file ?? "")))),
+	);
+}
+
+function realPathOrResolved(p) {
+	try {
+		return fs.realpathSync(p);
+	} catch {
+		return p;
+	}
 }

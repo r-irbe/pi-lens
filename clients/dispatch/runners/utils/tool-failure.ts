@@ -4,7 +4,12 @@
  */
 import { incrementDegradationCount } from "../../../degradation-ledger.js";
 import { truncateForLedger } from "../../../ledger-bounds.js";
-import type { Diagnostic, DispatchContext, RunnerResult } from "../../types.js";
+import {
+	type Diagnostic,
+	type DispatchContext,
+	findingsResult,
+	type RunnerResult,
+} from "../../types.js";
 import {
 	type ClassifyRunOutcomeInput,
 	classifyRunOutcome,
@@ -308,11 +313,14 @@ export function parseToolRun<D>(
  * Semantics:
  * - findings present        → `classify` decides (default: any blocking
  *                             diagnostic → `failed`/`blocking`, else
- *                             `succeeded`/`warning`).
+ *                             `succeeded`/`warning`). A `failed` verdict
+ *                             carries `failureKind: "blocking_diagnostics"`
+ *                             (`findingsResult` in types.ts, #3781).
  * - no findings, exit 0     → clean: `succeeded`/`none`.
  * - no findings, nonzero exit,
- *   bytes emitted           → `failed` + one parse-error warning diagnostic.
- *                             Never clean (#1781 shape). A runner whose tool
+ *   bytes emitted           → `failed` + one parse-error warning diagnostic,
+ *                             `failureKind: "parser_error"` (not findings,
+ *                             #3796). Never clean (#1781 shape). A runner whose tool
  *                             legitimately exits nonzero on a clean file must
  *                             normalize the status BEFORE calling this.
  */
@@ -344,12 +352,13 @@ export function finishParsedRun(input: FinishParsedRunInput): RunnerResult {
 
 	if (input.diagnostics.length === 0) {
 		if (status !== 0 && raw.trim().length > 0) {
+			const message = `${input.tool} exited ${status} but its output could not be parsed`;
 			return {
 				status: "failed",
 				diagnostics: [
 					{
 						id: `${input.tool}:parse-error:1`,
-						message: `${input.tool} exited ${status} but its output could not be parsed`,
+						message,
 						filePath: input.ctx.filePath,
 						line: 1,
 						column: 1,
@@ -359,6 +368,8 @@ export function finishParsedRun(input: FinishParsedRunInput): RunnerResult {
 					},
 				],
 				semantic: "warning",
+				failureKind: "parser_error",
+				failureMessage: message,
 			};
 		}
 		return { status: "succeeded", diagnostics: [], semantic: "none" };
@@ -366,12 +377,11 @@ export function finishParsedRun(input: FinishParsedRunInput): RunnerResult {
 
 	const mapped = input.classify?.(input.diagnostics);
 	if (mapped) {
-		return { ...mapped, diagnostics: input.diagnostics };
+		return findingsResult(input.diagnostics, mapped);
 	}
 	const hasBlocking = input.diagnostics.some((d) => d.semantic === "blocking");
-	return {
+	return findingsResult(input.diagnostics, {
 		status: hasBlocking ? "failed" : "succeeded",
-		diagnostics: input.diagnostics,
 		semantic: hasBlocking ? "blocking" : "warning",
-	};
+	});
 }

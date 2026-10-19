@@ -41,6 +41,7 @@ describe("lens_diagnostics source=lsp observability (#2860 F11)", () => {
 		const file = path.join(cwd, "bad.ts");
 		fs.writeFileSync(file, "const value: number = 'bad';\n");
 		const service = {
+			announceCreatedFiles: vi.fn(),
 			touchFile: vi.fn(async () => undefined),
 			getDiagnostics: vi.fn(async () => [
 				{

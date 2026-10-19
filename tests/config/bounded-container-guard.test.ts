@@ -25,9 +25,23 @@ const BOUNDED_HELPERS = new Set([
 	"BoundedSet",
 	"PathKeyedMap",
 ]);
-// No currently flagged occurrence is a finite vocabulary. Keep the channel
-// content-keyed so a future exemption must be re-confirmed after an edit.
-const FINITE_REASONS: Readonly<Record<string, string>> = {};
+// Content-keyed, so an exemption must be re-confirmed after an edit.
+const FINITE_REASONS: Readonly<Record<string, string>> = {
+	// #2372: one adapter per live LSPService identity; WeakMap keys are the
+	// bounded process-local service population and entries die with the service.
+	"clients/lsp/capabilities.ts#1e3511a9":
+		"adapter cache is keyed by live LSPService objects and reclaimed with them; it cannot retain path or user-key growth",
+	// #3968: the runner-id identity leaf — written once per runner definition
+	// that enters a `RunnerRegistry` through `register` (the dispatch
+	// registry's own population, finite and ~50 today), never per file, per
+	// session or per user value. A named cap here would drop a legitimate
+	// runner id from the `lsp.servers.<id>.covers` validation — worse wrong
+	// than unbounded over a closed population.
+	"clients/dispatch/known-runner-ids.ts#177da0f7":
+		"runner-id identity written once per RunnerRegistry.register'd runner definition; finite vocabulary, bounded by the dispatch registry's own population",
+	"clients/session-scope.ts#toStartReason:e2e4ae2a":
+		"#3612 `sessionStores`: keyed by store name, one entry per `defineSessionStore` call at module load (a second declaration of a name throws); four stores today, and the session-scope sweep pins every name",
+};
 
 type Verdict = 1 | 2 | 3 | 5;
 type KeyAxis =
@@ -438,8 +452,16 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/python-provenance.ts#b39949e4",
 		"clients/review-graph/builder.ts#CHANGED_SYMBOLS_PREFIX:860385f2",
 		"clients/review-graph/builder.ts#_persistGenerations:fe391d04",
-		"clients/review-graph/builder.ts#_lastWorkerFallbackReasonForTests:ae62be11",
+		// Checkpoint worker requests are keyed by id and drained on completion or
+		// worker death; this admission covers the active-request map.
+		"clients/review-graph/builder.ts#getReviewGraphPersistWorkerHeapStatistics:ae62be11",
 		"clients/review-graph/builder.ts#_checkpointGenerations:7a0f0107",
+		// #3605: `_wasmTrappedFiles`. An entry exists only for a file whose
+		// extraction a web-tree-sitter trap cost, i.e. a path whose content is
+		// one of the client's at most WASM_TRAP_BUDGET + 1 trapped inputs (bounded
+		// by the paths holding a trapped input, not by the input count), and the
+		// file's next extraction without a trap deletes it.
+		"clients/review-graph/builder.ts#touchWorkspaceGraph:cef88570",
 		"clients/review-graph/workspace-modules.ts#getDownstreamModules:49987247",
 		"clients/runtime-tool-result.ts#parseDiffRanges:eb9b9896",
 		"clients/runtime-tool-result.ts#inFlightPipelines:5e20396b",
@@ -456,7 +478,7 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/degradation-ledger.ts#OVERFLOW_KIND:8cf106dd",
 		"clients/degradation-ledger.ts#groups:218d12e1",
 		"clients/degradation-ledger.ts#onceKeys:b8a478d9",
-		"clients/dispatch/auxiliary-lsp.ts#enabledAuxiliaryLspServerIds:dd3e2650",
+		"clients/dispatch/auxiliary-lsp.ts#isEnabledByConfiguration:dd3e2650",
 		"clients/dispatch/collect-later-tier.ts#COLLECT_LATER_THRESHOLD_MS:6c0d1b78",
 		"clients/dispatch/dispatcher.ts#latencyReports:4e5c8069",
 		"clients/dispatch/integration.ts#getCascadeSessionStats:0753e302",
@@ -519,6 +541,9 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 		"clients/word-index.ts#updateWordIndexDocument:8b5e4c9e",
 		"clients/word-index.ts#isCanonicalWordIndexToken:99249de8",
 		"clients/word-index.ts#deserializeWordIndex:d6d64306",
+		// WeakMap entries are content-keyed by live WordIndex objects and are
+		// reclaimed with those objects; this is not an unbounded path-key cache.
+		"clients/word-index.ts#serializedWordIndexCaches:baa74c91",
 		"clients/workspace-topology.ts#PI_LENS_CONFIG_BASENAMES:8403ed7a",
 		"clients/workspace-topology.ts#registerWorkspaceTopologyReset:17d6ff8a",
 		"mcp/server.ts#DEFAULT_CWD:a08d6c7d",
@@ -618,6 +643,32 @@ describe("#2981 long-lived containers are bounded or admitted", () => {
 				minFlagged: 1,
 			});
 			expect(audit.problems, audit.problems.join("\n\n")).toEqual([]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+	it("does not read runtime scratch below the walked root (#4097)", () => {
+		// Named recurrence (#4097): a root-level `index.ts` makes the scan walk
+		// the whole repo root, `.probe-home/` included, and a sibling worker
+		// removing its `worker-home-*` mid-walk killed the file with ENOENT. A
+		// class declared only below `.probe-home/` must not enter the class
+		// index either: the walk never reads scratch.
+		const root = fs.mkdtempSync(
+			path.join(process.cwd(), ".probe-bounded-root-"),
+		);
+		try {
+			const scratch = path.join(root, ".probe-home", "worker-home-a");
+			fs.mkdirSync(scratch, { recursive: true });
+			fs.writeFileSync(
+				path.join(scratch, "planted.ts"),
+				"export class PlantedHomeClass {}\n",
+			);
+			const entry = path.join(root, "index.ts");
+			fs.writeFileSync(
+				entry,
+				"const planted = new PlantedHomeClass();\nexport const touch = () => planted;\n",
+			);
+			expect(scan([entry]).scanned).toBe(0);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

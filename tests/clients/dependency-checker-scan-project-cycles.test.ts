@@ -278,4 +278,40 @@ describe("DependencyChecker.scanProject reads madge's cycle array (#3428)", () =
 		expect(result.count).toBe(0);
 		expect(result.analyzed).toBeUndefined();
 	});
+
+	// #3600: the widget's stale gate judges a folded madge row against the time
+	// the scan READ the import graph. `runScanProject` stamps at its top, before
+	// the spawn; advancing the faked clock inside the scan spawn proves the stamp
+	// is the pre-spawn read time, not the parse/return-site clock.
+	it("stamps scannedAt at the run body, before madge reads the graph (#3600)", async () => {
+		const { DependencyChecker } =
+			await import("../../clients/dependency-checker.js");
+		writeCapturedWorkspace();
+		const capture = loadCapture("circular-two-file");
+		const T0 = 1_900_000_000_000;
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(T0);
+		try {
+			safeSpawnAsync.mockImplementation(
+				async (_cmd: string, args: string[]) => {
+					if (args[0] === "--version") return VERSION_OK;
+					// The scan has now read; a stamp taken after this would be later.
+					vi.setSystemTime(T0 + 2_000);
+					return {
+						status: capture.exitCode,
+						error: null,
+						stdout: capture.stdout,
+						stderr: capture.stderr,
+					};
+				},
+			);
+
+			const result = await new DependencyChecker().scanProject(tmp);
+
+			expect(result.analyzed).toBe(true);
+			expect(result.scannedAt).toBe(new Date(T0).toISOString());
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

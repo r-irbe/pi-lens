@@ -15,6 +15,9 @@ import {
 	walkUpDirs,
 	type WorkspaceMemberGlobDialect,
 } from "./path-utils.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
+import { logExtension } from "./extension-log.js";
+import { getProjectTrustState } from "./project-trust.js";
 
 export type PythonEnvironmentSource =
 	| "virtual-env"
@@ -160,10 +163,43 @@ function isUvWorkspaceMember(
 	const matches =
 		(dialect: WorkspaceMemberGlobDialect) =>
 		(pattern: string): boolean =>
-			matchesWorkspaceMemberPattern(pattern, relative, dialect);
+			matchesWorkspaceMemberPattern(pattern, relative, dialect, () =>
+				recordDegradationOnce({
+					kind: "workspace-glob-cap",
+					subject: String(pattern.length),
+					reason: "workspace glob matcher exceeded its memo-table cell cap",
+				}),
+			);
 	return (
 		!workspace.exclude.some(matches(UV_WORKSPACE_EXCLUDE_DIALECT)) &&
 		workspace.members.some(matches(UV_WORKSPACE_MEMBERS_DIALECT))
+	);
+}
+
+/**
+ * #3871: the process-wide channels a shell can point at any environment on the
+ * machine. A linked-worktree run (`allowAmbient: false`) takes one only when
+ * its root lies inside the requested project root.
+ */
+/** Project-config-sourced environments, refused unless the project is trusted. */
+const PROJECT_SOURCED_PYTHON_SOURCES = new Set<PythonEnvironmentSource>([
+	"project-dot-venv",
+	"project-venv",
+	"uv-workspace",
+]);
+
+const AMBIENT_ENVIRONMENT_VARIABLES = {
+	"uv-project-environment": "UV_PROJECT_ENVIRONMENT",
+	"virtual-env": "VIRTUAL_ENV",
+	conda: "CONDA_PREFIX",
+} as const;
+
+/** True when any ambient Python environment channel is set in `env`. */
+export function hasAmbientPythonEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	return Object.values(AMBIENT_ENVIRONMENT_VARIABLES).some((name) =>
+		Boolean(env[name]),
 	);
 }
 
@@ -174,6 +210,7 @@ function isUvWorkspaceMember(
 export async function detectPythonEnvironment(
 	projectRoot: string,
 	homeDir: string = os.homedir(),
+	options: { allowAmbient?: boolean } = {},
 ): Promise<PythonEnvironment | undefined> {
 	// `path.resolve` once at the seam entry so `isStartDir` below compares like
 	// with like: `walkUpDirs` resolves its input, a caller's argument need not
@@ -206,6 +243,17 @@ export async function detectPythonEnvironment(
 	const uvProjectEnvironment = process.env.UV_PROJECT_ENVIRONMENT;
 	// PEP 723 `uv run --script` environments are cache-keyed by script content;
 	// without a stable project marker or explicit path, they remain undiscoverable.
+	const allowAmbient = options.allowAmbient ?? true;
+	const isWithinProjectRoot = (candidateRoot: string): boolean => {
+		const relative = path.relative(root, path.resolve(candidateRoot));
+		return (
+			relative !== ".." &&
+			!relative.startsWith(`..${path.sep}`) &&
+			// #3871 V1: another Windows drive has no relative path, so
+			// `path.relative` returns the absolute target: no `..`, not inside.
+			!path.isAbsolute(relative)
+		);
+	};
 	const candidates: Array<{
 		root: string | undefined;
 		source: PythonEnvironmentSource;
@@ -236,6 +284,39 @@ export async function detectPythonEnvironment(
 
 	for (const candidate of candidates) {
 		if (!candidate.root) continue;
+		if (
+			!allowAmbient &&
+			candidate.source in AMBIENT_ENVIRONMENT_VARIABLES &&
+			!isWithinProjectRoot(candidate.root)
+		)
+			continue;
+		// A project-sourced interpreter (`.venv`, a uv workspace venv) is a
+		// project-local executable and carries the same trust gate as every other
+		// one (#4268 acceptance 1, MED-6): unknown/untrusted falls through to a
+		// global interpreter, while an explicitly exported `VIRTUAL_ENV`,
+		// `CONDA_PREFIX` or `UV_PROJECT_ENVIRONMENT` remains the user's own
+		// choice. Explicit untrusted always refuses.
+		if (
+			PROJECT_SOURCED_PYTHON_SOURCES.has(candidate.source) &&
+			getProjectTrustState() !== "trusted"
+		) {
+			if (
+				recordDegradationOnce({
+					kind: "trust-refusal",
+					subject: `python-environment:${candidate.root}`,
+					reason: `project Python environment refused: pi project trust is ${getProjectTrustState()}`,
+				})
+			) {
+				logExtension({
+					subsystem: "project-trust",
+					level: "warn",
+					message:
+						"project Python environment refused: mark the project trusted in pi or upgrade pi",
+					metadata: { source: candidate.source },
+				});
+			}
+			continue;
+		}
 		const binDir = path.join(
 			candidate.root,
 			process.platform === "win32" ? "Scripts" : "bin",

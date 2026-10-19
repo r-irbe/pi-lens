@@ -50,7 +50,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HOST_PROVIDED_PACKAGES } from "./lib/host-provided-deps.mjs";
 import { collectSkillEntryPaths } from "./lib/skills-predicate.mjs";
-import { resolveWebTreeSitterPackageDir } from "./lib/web-tree-sitter-dir.mjs";
+import {
+	findCoreGrammarDir,
+	resolveWebTreeSitterPackageDir,
+} from "./lib/web-tree-sitter-dir.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, "..");
@@ -216,33 +219,33 @@ try {
 	);
 }
 
-// tree-sitter grammars — download-grammars.js postinstall writes them into
-// node_modules/web-tree-sitter/grammars/. Locate that dir through the SAME
-// shared ladder the extension runtime uses (#3409 round 1, R3418-2): this probe
-// used to resolve the BARE `web-tree-sitter` specifier and walk up, which throws
-// MODULE_NOT_FOUND inside a `bun build --compile` host — so on the very hosts pi
-// ships as, it reported the grammar asset missing while the exported wasm
-// subpath resolved fine. One ladder, one answer, for the client, the pasted
-// install fingerprint and this script.
-let grammarDetail = "tree-sitter-*.wasm missing (postinstall skipped?)";
-let hasCoreGrammar = false;
+// tree-sitter grammars — the core set ships INSIDE the tarball, in
+// `<pkgRoot>/grammars`, and the runtime reads that dir first
+// (`bundledGrammarsDir` in clients/tree-sitter-client.ts). `web-tree-sitter/
+// grammars` is only the lazy-fetch write target, nothing at install time fills
+// it, so probing it alone warned in every layout and the strict npm gate (#1185)
+// could never drop `--allow-soft`. Check the bundled dir, then fall back to the
+// web-tree-sitter dir, which the extension runtime locates through the SAME
+// shared ladder (#3409 round 1, R3418-2): a bare `web-tree-sitter` resolve
+// throws MODULE_NOT_FOUND inside a `bun build --compile` host.
+const bundledGrammarDir = path.join(pkgRoot, "grammars");
 const webTreeSitterDir = resolveWebTreeSitterPackageDir({
 	resolve: (specifier) => require.resolve(specifier),
 	packageRoot: () => pkgRoot,
 	cwd: () => process.cwd(),
 });
-if (!webTreeSitterDir) {
-	grammarDetail =
-		"web-tree-sitter package dir unresolvable (module resolver, package root and cwd)";
-} else {
-	const grammarDir = path.join(webTreeSitterDir, "grammars");
-	hasCoreGrammar = fs.existsSync(
-		path.join(grammarDir, "tree-sitter-typescript.wasm"),
-	);
-	grammarDetail = hasCoreGrammar
-		? grammarDir
-		: `tree-sitter-*.wasm missing in ${grammarDir} (postinstall skipped?)`;
-}
+const grammarDir = findCoreGrammarDir({
+	packageRoot: pkgRoot,
+	webTreeSitterDir,
+});
+const hasCoreGrammar = grammarDir !== undefined;
+const grammarDetail = hasCoreGrammar
+	? grammarDir
+	: `tree-sitter-typescript.wasm missing in ${bundledGrammarDir}${
+			webTreeSitterDir
+				? ` and ${path.join(webTreeSitterDir, "grammars")}`
+				: " (web-tree-sitter dir unresolvable)"
+		}`;
 record("tree-sitter grammars", "asset", hasCoreGrammar, grammarDetail);
 
 // --- 4. pi.skills manifest resolution, AS INSTALLED (#2587) ----------------

@@ -17,7 +17,7 @@ import {
  * Keys are `clients/`-relative-path:symbol.
  */
 const EXEMPTIONS: Record<string, string> = {
-	"lsp/index.ts:onSpawnInFlight":
+	"lsp/client-registry.ts:onSpawnInFlight":
 		"Read-only callback observer: ensureClientForServer owns the existing state.inFlight coordinator; this callback only resolves the known-slow wait sentinel.",
 	// ── The `ensureInFlight` availability family: #1753's migration backlog ──
 	// Identical shape to the two converted sites (biome-client, sg-runner):
@@ -57,13 +57,18 @@ const EXEMPTIONS: Record<string, string> = {
 	"installer/index.ts:_probeCacheWriteInFlight":
 		"backlog: single probe-cache flush, #1753",
 	// Found by review round 1's widened regex: an interface member, which the
-	// modifier-only version of this scan never saw. `lsp/index.ts:2675-2702` is
+	// modifier-only version of this scan never saw. ClientRegistry's
+	// `ensureClientForServer` (moved out of lsp/index.ts by #2372 slice 3) is
 	// the primitive's shape line for line, identity-checked clear included —
 	// the highest-value migration left on this list.
-	"lsp/index.ts:inFlight":
+	"lsp/client-registry.ts:inFlight":
 		"backlog: LSP spawn dedupe keyed serverId:root, with an " +
-		"identity-checked clear at lsp/index.ts:2701 — hand-rolled " +
-		"singleFlight, #1753",
+		"identity-checked clear in ensureClientForServer's finally — " +
+		"hand-rolled singleFlight, #1753",
+	"lsp/index.ts:inFlight":
+		"alias: LSPState.inFlight holds ClientRegistry's own inFlight Map " +
+		"(#2372 slice 3) for the service's readers; the owner is " +
+		"lsp/client-registry.ts:inFlight, backlog #1753",
 
 	// ── Not the primitive's shape: these hold no promise per key ──
 	"ndjson-logger.ts:inFlightBatch":

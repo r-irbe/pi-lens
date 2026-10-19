@@ -122,6 +122,30 @@ describe("grammarsInstalled (#3424)", () => {
 		}
 	});
 
+	// Recurrence (#1185 F2): the packed install ships the core grammars in
+	// `<package root>/grammars` and nothing fills web-tree-sitter's own dir, so
+	// probing only the latter reported "grammars missing / postinstall did not
+	// run" in the pasted fingerprint for a healthy install. Same fact the
+	// install selftest measures, through `findCoreGrammarDir`.
+	it("finds the grammars the tarball bundles under the package root", () => {
+		const env = setupTestEnvironment("pi-lens-grammar-probe-");
+		try {
+			webTreeSitterPackage(env.tmpDir, false);
+			const bundled = path.join(env.tmpDir, "grammars");
+			fs.mkdirSync(bundled, { recursive: true });
+			fs.writeFileSync(path.join(bundled, "tree-sitter-typescript.wasm"), "");
+			expect(
+				grammarsInstalled({
+					resolve: compiledHost,
+					packageRoot: () => env.tmpDir,
+					cwd: () => path.join(env.tmpDir, "elsewhere"),
+				}),
+			).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("reports missing when no rung finds the package", () => {
 		const env = setupTestEnvironment("pi-lens-grammar-probe-");
 		try {

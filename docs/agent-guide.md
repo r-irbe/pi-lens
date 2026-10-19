@@ -102,7 +102,7 @@ not clean**:
 
 | Label you may see | What it means | What you must NOT do |
 |---|---|---|
-| **`unconfirmed`** | A push-only/silent-on-clean LSP server returned empty; emptiness could not be *proven* clean. | Don't report the file as clean. |
+| **`unconfirmed`** | An LSP result that could not be *proven* clean: a push-only/silent-on-clean server returned empty; an auxiliary scanner did not answer in time; or the file has no project root for a server that needs one (rust-analyzer, csharp-ls/OmniSharp, FSAutocomplete) and the line names the missing marker. | Don't report the file as clean. |
 | **`cold` (not applicable / unavailable this run)** | A heavyweight analyzer (knip/jscpd/madge/gitleaks/govulncheck/trivy/dead-code) didn't contribute. | Don't fold its silence into "no issues." |
 | **`partial` / `truncated` / file-cap** | A walk/scan hit a file cap or coverage limit; results are a partial view. | Don't treat as whole-project coverage. |
 | **`stale`** | A cached diagnostic's file changed on disk since the scan. Secrets findings demote to `🔑 ACTION NEEDED` advisory with the line number withheld, never silently dropped; govulncheck keeps the CVE and drops only the cached line. | Don't trust the stale value or its line number. Re-scan to confirm. |
@@ -128,6 +128,10 @@ is blocking when `semantic === "blocking"`, else it falls back to severity):
   a blocker does, but it is not "no action required" like an advisory either —
   the finding is unverified, not dismissed. Re-run a secrets scan to confirm
   or clear it.
+- **⏱️ Late runner diagnostics** — a slow (collect-later) runner's findings arrive at
+  turn end on the advisory channel, so they never gate `git commit`/`git push`;
+  when one is blocking it reads "blocking: fix before continuing" instead of
+  "no action required", and a runner that timed out or errored says so separately.
 - **Advisory** — informational (🟡 warnings, 📜 license notes, style/hygiene).
   Address when relevant; they do not gate completion.
 
@@ -147,7 +151,9 @@ Don't try to route around it — clear the blockers, then commit. The guard is s
 pi-lens monitors that you **read a file before editing it** (`clients/read-guard.ts`).
 Edits fail or warn when:
 
-1. **Zero-read** — you never read the file this conversation.
+1. **Zero-read** — you never read the file this conversation, or your write
+   record of it expired after 30 idle minutes (the block says "the earlier
+   write record ... expired"). Read it again.
 2. **Stale** — the file changed on disk since you read it (content-hash checked).
 3. **Out-of-range** — your edit target wasn't covered by any read.
 
@@ -163,8 +169,11 @@ Helpful mechanics you can rely on:
 
 - **Coverage accumulates** across reads — two reads (lines 1–100 and 101–200) together
   cover a full-file write.
-- **Symbol expansion** — small reads (≤ ~60 lines) are silently widened to the
-  enclosing function/method/class, and coverage is recorded at symbol level.
+- **Symbol expansion** — small reads (≤ 100 lines) are widened to the enclosing
+  function/method/class (or Markdown section), and coverage is recorded at
+  symbol level. The result starts with a `[pi-lens: read widened ...]` note
+  naming the requested and the returned lines; ask for `limit` above 100 for
+  the exact range. It is off with the read guard (`--no-read-guard`).
 - `read_symbol` / `read_enclosing` reads count as edit coverage for that symbol range.
 - Markdown warns instead of blocking; `.txt`/`.log` are exempt.
 - Escape hatch (human): `/lens-allow-edit <path>` arms one exemption.

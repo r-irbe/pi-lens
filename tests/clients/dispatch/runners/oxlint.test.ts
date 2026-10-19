@@ -136,6 +136,12 @@ describe("oxlint runner", () => {
 		expect(RUNNER_SKIP_REASONS).toEqual([
 			"no-files-matched",
 			"configured-non-biome-linter",
+			// #3968: policy-deferred work, sanctioned — a runner may skip because
+			// its capability is owned by a covering LSP lane, or because its tool
+			// categorically cannot serve the file's dialect. Both are policy
+			// decisions carried to the delivery surface, never a silent clean.
+			"dialect-unsupported",
+			"covered-by-primary",
 		]);
 		const valid: RunnerResult = {
 			status: "skipped",
@@ -569,7 +575,13 @@ describe("oxlint runner", () => {
 
 				expect(outcome.status).toBe(expectedStatus);
 				expect(outcome.skipReason).toBe(expectedSkipReason);
-				expect(outcome.failureKind).toBe(expectedFailureKind);
+				// A parsed-nothing row is finishParsedRun's parse-error arm (#3796).
+				expect(outcome.failureKind).toBe(
+					expectedFailureKind ??
+						(expectedDegradation === "runner-parsed-nothing"
+							? "parser_error"
+							: undefined),
+				);
 				const degradationKinds = logLatency.mock.calls
 					.map(
 						([entry]) =>

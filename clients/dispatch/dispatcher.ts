@@ -14,6 +14,7 @@
  * - BaselineStore: Track pre-existing issues for delta mode
  */
 
+import type { GenerationHandle } from "../generation-guard.js";
 import { logExtension, type ExtensionLogLevel } from "../extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -66,10 +67,22 @@ import {
 	observeRunnerLatency,
 } from "./collect-later-tier.js";
 import { deferRunnerFindings } from "./pending-runner-findings.js";
+import {
+	ADOPTED_ROOT_RUNNER_ALLOWLIST,
+	filterGroupsForAdoptedRoot,
+} from "./adopted-root-runners.js";
 
-import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
+import {
+	applyRulePolicy,
+	resolvedRulePolicyMap,
+	rulePolicyMapFromConfig,
+} from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
-import { isRunnerSkipReason } from "./types.js";
+import {
+	hasUsableResult,
+	isRunnerClaimSource,
+	isRunnerSkipReason,
+} from "./types.js";
 
 const dispatcherProbeFlights = createAvailabilityProbeFlight<
 	Awaited<ReturnType<typeof probeToolAsync>>
@@ -84,9 +97,14 @@ import type {
 	RunnerGroup,
 	RunnerRegistry as RunnerRegistryContract,
 	RunnerResult,
+	RunnerClaimSource,
 	RunnerSkipReason,
 } from "./types.js";
-import { formatDiagnostics } from "./utils/format-utils.js";
+import {
+	DELTA_UNUSED_PROMOTION_NOTE,
+	formatDiagnostics,
+} from "./utils/format-utils.js";
+import { registerRunnerId } from "./known-runner-ids.js";
 
 // --- Runner Registry ---
 
@@ -96,6 +114,11 @@ export class RunnerRegistry implements RunnerRegistryContract {
 	register(runner: RunnerDefinition): void {
 		if (this.runners.has(runner.id)) return;
 		this.runners.set(runner.id, runner);
+		// The registry is the runner-id identity source (#3968): every id that
+		// enters any registry is the set `lsp.servers.<id>.covers` validation
+		// projects from (`clients/dispatch/known-runner-ids.ts`, an import
+		// leaf so the config loader can ask without importing this graph).
+		registerRunnerId(runner.id);
 	}
 
 	get(id: string): RunnerDefinition | undefined {
@@ -324,6 +347,12 @@ export function createDispatchContext(
 	 * worklog append; see DispatchContext.telemetryModel's doc. */
 	telemetryModel?: string,
 	telemetryProvider?: string,
+	/** #3568: the session of a post-write dispatch, for its deferred runners. */
+	sessionGeneration?: GenerationHandle,
+	/** Stable session identity for deferred runner delivery. */
+	sessionId?: string,
+	/** Root ownership selected by the shared analysis-root seam. */
+	analysisRootMode?: import("../analysis-root.js").AnalysisRootMode,
 ): DispatchContext {
 	const absoluteFilePath = resolveRunnerPath(cwd, filePath);
 	const normalizedProjectRoot = normalizeMapKey(
@@ -356,6 +385,7 @@ export function createDispatchContext(
 				})
 			: undefined;
 	const projectConfig = loadPiLensProjectConfig(normalizedCwd);
+	const rulePolicy = resolvedRulePolicyMap(normalizedProjectRoot);
 
 	return {
 		filePath: normalizedFilePath,
@@ -363,6 +393,7 @@ export function createDispatchContext(
 		cwd: normalizedCwd,
 		kind,
 		fileRole,
+		analysisRootMode,
 		generatedEvidence: generatedDetail?.evidence,
 		generatedLineShapeMean: generatedDetail?.lineShapeMean,
 		pi,
@@ -370,9 +401,12 @@ export function createDispatchContext(
 		deltaMode: !pi.getFlag("no-delta"),
 		facts,
 		projectConfig,
+		rulePolicy,
 		blockingOnly,
 		modifiedRanges,
 		writeIndex,
+		sessionGeneration,
+		sessionId,
 		telemetryModel,
 		telemetryProvider,
 		toolCwdMemo: {},
@@ -541,6 +575,7 @@ function promoteDeltaUnusedToBlockers(diagnostics: Diagnostic[]): Diagnostic[] {
 			...d,
 			severity: "error",
 			semantic: "blocking",
+			promotionNote: DELTA_UNUSED_PROMOTION_NOTE,
 			fixSuggestion:
 				d.fixSuggestion ??
 				"Remove the unused declaration or rename with '_' prefix if intentionally unused.",
@@ -576,7 +611,11 @@ export interface RunnerLatency {
 		| "pending";
 	diagnosticCount: number;
 	semantic: string;
+	/** The runner's own `failureKind`, when it set one (#3781). */
+	failureKind?: string;
 	skipReason?: RunnerSkipReason;
+	/** WHO supplied the `covered-by-primary` claim (#3968 F2). */
+	claimSource?: RunnerClaimSource;
 	unconfirmedServerIds?: readonly string[];
 	deferredServerIds?: readonly string[];
 }
@@ -594,9 +633,22 @@ export interface DispatchLatencyReport {
 	warnings: number;
 }
 
+/**
+ * Build the synthetic coverage notice for this dispatch, or `undefined` when
+ * the runners covered the file.
+ *
+ * `dedupe` is the push/pull axis, always supplied by the sole caller
+ * (`dispatchForFile`). `true` is the pi push surface, where the session-scoped
+ * `coverageNoticeSeen` latch keeps a per-edit notice from repeating on every
+ * keystroke. A pull surface (`pilens_analyze`) passes `false`: each call is an
+ * independent question, so the notice must come back every time, and the latch
+ * is left untouched so a later push still gets its once-per-session notice
+ * (refs #3791).
+ */
 function buildCoverageNotice(
 	ctx: DispatchContext,
 	runnerLatencies: RunnerLatency[],
+	dedupe: boolean,
 ): Diagnostic | undefined {
 	if (!ctx.kind) return undefined;
 	const lspEnabled = !ctx.pi.getFlag("no-lsp");
@@ -652,8 +704,10 @@ function buildCoverageNotice(
 		// scanner that recovered a delivery path (or lost one) kept the stale
 		// wording for the rest of the session.
 		const onceKey = `${ctx.kind}:${ctx.filePath}:${dedupeSet(silentServerIds)}|${dedupeSet(deferredServerIds)}`;
-		if (coverageNoticeSeen.has(onceKey)) return undefined;
-		coverageNoticeSeen.add(onceKey);
+		if (dedupe) {
+			if (coverageNoticeSeen.has(onceKey)) return undefined;
+			coverageNoticeSeen.add(onceKey);
+		}
 		const coverageParts: string[] = [];
 		if (deferredServerIds.length > 0) {
 			coverageParts.push(
@@ -675,19 +729,21 @@ function buildCoverageNotice(
 		};
 	}
 
-	// Check primary runners first
-	const primaryHasCoverage = relevant.some(
-		(r) => r.status === "succeeded" || r.status === "failed",
-	);
+	// A runner covers the file when it reached a verdict about these bytes:
+	// `succeeded`, or `failed` whose own findings failed the check
+	// (`failureKind: "blocking_diagnostics"`). A timed-out or spawn-failed
+	// primary produced no usable result and must not suppress the notice
+	// (#3867). `hasUsableResult` owns that rule in dispatch/types.ts.
+	const primaryHasCoverage = relevant.some(hasUsableResult);
 	if (primaryHasCoverage) return undefined;
 
-	const allPrimarySkipped = relevant.every(
-		(r) =>
-			r.status === "skipped" ||
-			r.status === "when_skipped" ||
-			r.status === "test_file_skipped",
+	// A primary still in flight (collect-later) may deliver findings at turn
+	// end, so it withholds the notice. A skipped or broken primary produced
+	// nothing for these bytes, so it falls through to the fallback check.
+	const primaryStillInFlight = relevant.some(
+		(r) => r.status === "pending" || r.status === "deferred",
 	);
-	if (!allPrimarySkipped) return undefined;
+	if (primaryStillInFlight) return undefined;
 
 	const plan = getToolPlan(ctx.kind);
 	const fallbackRunnerIds = new Set(
@@ -711,21 +767,29 @@ function buildCoverageNotice(
 		"fact-rules",
 		"opengrep",
 	]);
-	const anyLinterHasCoverage = runnerLatencies.some(
+
+	// These fallback runners provide type coverage when the primary group is
+	// unavailable. Keep this explicit until runner metadata owns this capability.
+	const TYPE_CAPABLE_FALLBACK_RUNNERS = new Set(["mypy"]);
+	const anyFallbackHasCoverage = runnerLatencies.some(
 		(r) =>
 			fallbackRunnerIds.has(r.runnerId) &&
 			!STRUCTURAL_RUNNERS.has(r.runnerId) &&
-			(r.status === "succeeded" || r.status === "failed"),
+			hasUsableResult(r) &&
+			(!plan?.capabilities.includes("types") ||
+				TYPE_CAPABLE_FALLBACK_RUNNERS.has(r.runnerId)),
 	);
-	if (anyLinterHasCoverage) return undefined;
+	if (anyFallbackHasCoverage) return undefined;
 
 	const onceKey = `${ctx.kind}:${ctx.filePath}`;
-	if (coverageNoticeSeen.has(onceKey)) return undefined;
-	coverageNoticeSeen.add(onceKey);
+	if (dedupe) {
+		if (coverageNoticeSeen.has(onceKey)) return undefined;
+		coverageNoticeSeen.add(onceKey);
+	}
 
 	return {
 		id: `coverage-unavailable:${ctx.kind}:${path.basename(ctx.filePath)}`,
-		message: `Pi-lens ${ctx.kind} analysis unavailable — language tools are missing or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).`,
+		message: `Pi-lens ${ctx.kind} analysis unavailable — a language tool is missing, timed out, or failed to run, or the LSP server isn't ready yet, so this file was not fully checked (not a clean result).`,
 		filePath: ctx.filePath,
 		severity: "warning",
 		semantic: "warning",
@@ -1004,7 +1068,11 @@ async function runGroup(
 					status: result.status,
 					diagnosticCount: result.diagnostics.length,
 					semantic: result.semantic ?? semantic,
-					metadata: { tier: "collect-later", delivered: "turn_end" },
+					metadata: {
+						tier: "collect-later",
+						delivered: "turn_end",
+						...failureRowMetadata(result),
+					},
 				});
 				return result;
 			});
@@ -1016,6 +1084,8 @@ async function runGroup(
 				markedAtMs,
 				writeIndex: ctx.writeIndex,
 				promise: deferred,
+				session: ctx.sessionGeneration,
+				sessionId: ctx.sessionId,
 			});
 			// A deferred runner is still an observed runner. Keep it visible in
 			// both the edit latency report and the widget until its turn-end result
@@ -1084,6 +1154,13 @@ async function runGroup(
 			result.status === "skipped" && isRunnerSkipReason(result.skipReason)
 				? result.skipReason
 				: undefined;
+		// WHO claimed, for `covered-by-primary` (#3968 F2). Admitted only on
+		// actual skips and only through the closed-taxonomy guard, like
+		// skipReason, so free text cannot enter durable latency metadata.
+		const claimSource =
+			result.status === "skipped" && isRunnerClaimSource(result.claimSource)
+				? result.claimSource
+				: undefined;
 
 		latencies.push({
 			runnerId,
@@ -1093,8 +1170,14 @@ async function runGroup(
 			status: result.status,
 			diagnosticCount: result.diagnostics.length,
 			semantic: result.semantic ?? semantic,
+			...(result.failureKind !== undefined && {
+				failureKind: result.failureKind,
+			}),
 			...(skipReason !== undefined && {
 				skipReason,
+			}),
+			...(claimSource !== undefined && {
+				claimSource,
 			}),
 			...(result.unconfirmedServerIds !== undefined && {
 				unconfirmedServerIds: result.unconfirmedServerIds,
@@ -1122,14 +1205,10 @@ async function runGroup(
 						}))
 					: undefined,
 			metadata:
-				result.status === "failed" && result.failureKind
-					? {
-							failureKind: result.failureKind,
-							failureMessage: result.failureMessage,
-						}
-					: skipReason
-						? { skipReason }
-						: undefined,
+				failureRowMetadata(result) ??
+				(skipReason
+					? { skipReason, ...(claimSource !== undefined && { claimSource }) }
+					: undefined),
 		});
 		recordRunner(
 			ctx.filePath,
@@ -1166,8 +1245,53 @@ export async function dispatchForFile(
 	groups: RunnerGroup[],
 	registry: RunnerRegistryContract,
 	onRunnerResult?: RunnerResultSink,
+	/**
+	 * Push/pull coverage-notice dedupe (refs #3791). Defaults to `true` (the pi
+	 * push surface's once-per-session latch). A pull surface passes `false` so
+	 * every call carries the notice — see {@link buildCoverageNotice}.
+	 */
+	options?: { dedupeCoverageNotice?: boolean },
 ): Promise<DispatchResult> {
 	const _overallStart = Date.now();
+	if (ctx.analysisRootMode === "adopted") {
+		// #4242 phase A (per-file linters): an adopted root runs ONLY the explicit
+		// admission list of config-free, code-free runners, and only from global or
+		// pi-lens-managed binaries. The default is refused, so a newly registered
+		// runner stays off an adopted root until `ADOPTED_ROOT_RUNNER_ALLOWLIST`
+		// admits it. Whole-project scanners and test runners are not in the plan
+		// for a per-file dispatch, and turn-end tests stay off via the foreign
+		// checkout gate.
+		const planned = groups.flatMap((g) => g.runnerIds);
+		groups = filterGroupsForAdoptedRoot(groups);
+		const admitted = new Set(groups.flatMap((g) => g.runnerIds));
+		logLatency({
+			type: "phase",
+			filePath: ctx.filePath,
+			phase: "dispatch_adopted_root_allowlist",
+			durationMs: 0,
+			metadata: {
+				admissionList: ADOPTED_ROOT_RUNNER_ALLOWLIST.join(","),
+				admitted: groups.flatMap((g) => g.runnerIds).join(","),
+				refused: planned
+					.flatMap((id) => (admitted.has(id) ? [] : [id]))
+					.join(","),
+				noAdmittedRunner: groups.length === 0,
+			},
+		});
+		if (groups.length === 0) {
+			return {
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			};
+		}
+	}
 	if (ctx.fileRole === "generated") {
 		// The generated short-circuit (refs #2346): never ran before this fix
 		// for name-less machine-emitted files (a scraped/minified page has no
@@ -1309,9 +1433,11 @@ export async function dispatchForFile(
 	// the same root here keeps the two surfaces in agreement. `ctx.projectConfig`
 	// itself is untouched — thresholds and mutation flags keep their existing
 	// language-root resolution.
-	const rulePolicy = rulePolicyMapFromConfig(
-		loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
-	);
+	const rulePolicy =
+		ctx.rulePolicy ??
+		rulePolicyMapFromConfig(
+			loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
+		);
 	// The output-only filter pipeline: LSP/docker overlap suppression + inline
 	// `pi-lens-ignore` + agent/user dispositions + project rule policy. Applied
 	// AFTER dedupe so the pi renderer, widget, and delta all see one filtered
@@ -1342,7 +1468,10 @@ export async function dispatchForFile(
 			ctx.filePath,
 			fileContent,
 		);
-		return applyRulePolicy(disposition, rulePolicy);
+		return applyRulePolicy(disposition, rulePolicy, {
+			root: ctx.projectRoot ?? ctx.cwd,
+			filePath: ctx.filePath,
+		});
 	};
 	let visibleDiagnostics = applyOutputFilters(dedupedDiagnostics);
 	let resolvedCount = 0;
@@ -1402,7 +1531,11 @@ export async function dispatchForFile(
 
 	const inlineBlockers = blockers;
 	const inlineFixed = fixedItems;
-	const coverageNotice = buildCoverageNotice(ctx, runnerLatencies);
+	const coverageNotice = buildCoverageNotice(
+		ctx,
+		runnerLatencies,
+		options?.dedupeCoverageNotice ?? true,
+	);
 
 	// Format output — only blocking issues shown inline
 	// Warnings tracked but not shown (noise) — surfaced via lens_diagnostics
@@ -1478,6 +1611,7 @@ export async function dispatchForFile(
 	});
 
 	return {
+		latencyReport,
 		diagnostics: visibleDiagnostics,
 		blockers,
 		warnings,
@@ -1527,6 +1661,21 @@ function normalizeDiagnosticFilePath(
 	}
 
 	return resolveRunnerPath(ctx.cwd, rawPath || ctx.filePath);
+}
+
+/**
+ * The `failureKind` of a failed run, for the latency.log runner row (#3796).
+ * Inline and collect-later rows share it, so the log analyzer reads one place.
+ */
+function failureRowMetadata(
+	result: RunnerResult,
+): { failureKind: string; failureMessage: string | undefined } | undefined {
+	return result.status === "failed" && result.failureKind
+		? {
+				failureKind: result.failureKind,
+				failureMessage: result.failureMessage,
+			}
+		: undefined;
 }
 
 async function runRunner(

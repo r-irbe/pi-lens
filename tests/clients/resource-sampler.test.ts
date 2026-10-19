@@ -21,6 +21,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setPlatform } from "../support/platform-stub.js";
 import {
 	getDegradationSummary,
 	resetDegradationLedger,
@@ -123,12 +124,6 @@ function makeFakeChild(opts: {
 }
 
 const realPlatform = process.platform;
-function setPlatform(platform: NodeJS.Platform): void {
-	Object.defineProperty(process, "platform", {
-		value: platform,
-		configurable: true,
-	});
-}
 function requireMap<T>(result: Map<number, T> | null): Map<number, T> {
 	if (result === null) throw new Error("expected a completed sample");
 	return result;

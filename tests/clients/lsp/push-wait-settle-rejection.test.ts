@@ -49,6 +49,7 @@ function makeServer(id: string, aux: boolean) {
 		id,
 		name: id,
 		extensions: [".ts"],
+		idleEviction: "resident",
 		...(aux ? { role: "auxiliary" as const } : {}),
 		root: async () => "C:/repo",
 		spawn: vi.fn(async () => ({ process: makeFakeProcess(), source: "test" })),
@@ -74,6 +75,7 @@ function makeClient(delayMs: number, serverId: string) {
 		getDiagnosticsVersionForPath: vi.fn((p: string) => stamps.get(p) ?? 0),
 		getDiagnostics: vi.fn(() => []),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(async () => {}),
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),

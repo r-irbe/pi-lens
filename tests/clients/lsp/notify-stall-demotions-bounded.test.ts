@@ -8,7 +8,7 @@
  * (it exists purely to gate a later re-demotion decision at
  * clients/lsp/index.ts:~3237), so eviction is observed via `.get()` through
  * the same private-method harness cast the existing
- * typescript-idle-eviction.test.ts / service-scanner-coverage-gap.test.ts
+ * idle-eviction.test.ts / service-scanner-coverage-gap.test.ts
  * suites already use for `demoteForNotifyStall`.
  *
  * `demoteForNotifyStall`'s only guard is identity: `state.clients.get(key)

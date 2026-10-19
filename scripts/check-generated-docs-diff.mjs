@@ -1,10 +1,8 @@
 import { appendFileSync, readFileSync } from "node:fs";
-import { compareGeneratedDocs } from "./lib/md-matrix.mjs";
+import { compareGeneratedDocs, GENERATED_LSP_DOCS } from "./lib/md-matrix.mjs";
 import { gitExecFileSync } from "./lib/git-fixture-env.mjs";
 
-const files = ["docs/lsp-capability-matrix.md", "docs/servercapabilities.md"];
-
-const changed = files.some((file) => {
+const changed = GENERATED_LSP_DOCS.some((file) => {
 	const previous = gitExecFileSync(["show", `HEAD:${file}`], {
 		encoding: "utf8",
 	});

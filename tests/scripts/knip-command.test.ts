@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveKnipCommand } from "../../scripts/lib/knip-command.mjs";
+import { withPlatform } from "../support/platform-stub.js";
 
 const tempDirs: string[] = [];
 
@@ -39,16 +40,9 @@ describe("resolveKnipCommand (#2698 review rounds 2-3)", () => {
 
 	it("is platform-invariant — forcing process.platform to win32 changes nothing (shape 30 guard: no module-load platform const, no live-read branch to force)", () => {
 		const before = resolveKnipCommand([]);
-		const original = Object.getOwnPropertyDescriptor(process, "platform")!;
-		Object.defineProperty(process, "platform", {
-			value: "win32",
-			configurable: true,
-		});
-		try {
+		withPlatform("win32", () => {
 			expect(resolveKnipCommand([])).toEqual(before);
-		} finally {
-			Object.defineProperty(process, "platform", original);
-		}
+		});
 	});
 
 	it('throws a clear error when the resolved package.json has no "knip" bin entry', () => {

@@ -77,6 +77,7 @@ import {
 	logReadGuardEvent,
 	type ReadGuardEditBatchSummary,
 } from "./read-guard-logger.js";
+import type { LineageHandle } from "./session-scope.js";
 
 /**
  * What the mutation does to the file, independent of the tool's name.
@@ -130,6 +131,12 @@ type MutationProvenance =
  */
 interface MutationLineResult {
 	touchedLines: [number, number] | undefined;
+	/**
+	 * #3650: the raw target path the adapter read from its own shape,
+	 * unresolved, exactly as the tool spelled it. Omitted when the adapter
+	 * names no path, so the classifier falls back to the static field list.
+	 */
+	path?: string;
 	/** Individual ranges for a multi-range edit; the guard checks each one. */
 	editRanges?: [number, number][];
 	preflightError?: string;
@@ -141,7 +148,6 @@ interface MutationLineResult {
 	 */
 	unresolvedReason?: string;
 }
-
 /** Optional context an adapter uses for telemetry and file probing. */
 export interface MutatingToolContext {
 	/** Resolved absolute path. When it is absent, adapters do not log. */
@@ -190,6 +196,7 @@ export interface MutatingToolClassification {
 	kind: MutationKind;
 	touchedLines?: [number, number];
 	editRanges?: [number, number][];
+	authorshipUnknown?: boolean;
 	preflightError?: string;
 	editBatchSummary?: ReadGuardEditBatchSummary;
 	/** Set when an adapter recognized the shape but could not name the lines. */
@@ -270,6 +277,31 @@ function resolveMutationPath(
  */
 export function readMutationPathField(event: unknown): string | undefined {
 	return resolveMutationPath(asRecord((event as { input?: unknown })?.input));
+}
+/**
+ * #3650: this helper owns the bookkeeping `tool_result` path (the value
+ * `handleToolResult` feeds written-this-session, deferred formatting, and
+ * post-mutation diagnostics). The `tool_result_received` latency marker keeps
+ * its own label-only cascade in `index.ts`; this helper does not answer for it.
+ *
+ * Precedence: pi's own `path` spelling wins first — that fast path keeps the
+ * common case to a single field read with no adapter probing, and it assumes
+ * no registered adapter declares `path` (none does today; such an adapter
+ * would agree with `classifyMutatingTool` below, which prefers the
+ * adapter-declared path). Otherwise the event is classified with
+ * `recognizeOnly: true` (the edit already landed; adapters must not read
+ * the file or log) and the classification's path — adapter-declared first,
+ * then the static `path`/`filePath`/`file_path` fallback — is returned.
+ *
+ * Non-mutating events keep today's value: `read` carries `input.path` (fast
+ * path, unchanged), and an unrecognized shape without `input.path` answers
+ * `undefined`, exactly as the hardcoded `.path` read did before.
+ */
+export function readToolResultPathField(event: unknown): string | undefined {
+	const input = asRecord((event as { input?: unknown })?.input);
+	const ownPath = input["path"];
+	if (typeof ownPath === "string" && ownPath.length > 0) return ownPath;
+	return classifyMutatingTool(event, { recognizeOnly: true })?.path;
 }
 
 /**
@@ -766,6 +798,7 @@ export const PI_LENS_SYNTHETIC_MUTATION_FIELD = "piLensSyntheticMutation";
 export function classifyMutatingTool(
 	event: unknown,
 	ctx: MutatingToolContext = {},
+	adapters: readonly MutationShapeAdapter[] = MUTATION_SHAPE_ADAPTERS,
 ): MutatingToolClassification | undefined {
 	const toolName = readToolName(event);
 	if (toolName === undefined) return undefined;
@@ -788,8 +821,15 @@ export function classifyMutatingTool(
 		};
 	}
 
-	for (const adapter of MUTATION_SHAPE_ADAPTERS) {
+	// #3650: the adapter list is injectable for tests only (Part 3's runtime
+	// registration API is explicitly out of scope); production callers use the
+	// default registry.
+	for (const adapter of adapters) {
 		let resolved = adapter.resolve(input, ctx);
+		// #3650: read through optional chaining BEFORE the guard, so this
+		// branch adds no new possibly-undefined use under the strict-optional
+		// ratchet (which pins the five pre-existing ones below).
+		const adapterPath = resolved?.path;
 		if (resolved === undefined) continue;
 		if (resolved.touchedLines !== undefined) {
 			carryResolvedRanges(event, resolved);
@@ -802,7 +842,7 @@ export function classifyMutatingTool(
 		}
 		return {
 			toolName,
-			path: resolveMutationPath(input),
+			path: adapterPath ?? resolveMutationPath(input),
 			kind: adapter.kind,
 			touchedLines: resolved.touchedLines,
 			editRanges: resolved.editRanges,
@@ -853,8 +893,11 @@ export function classifyMutatingTool(
 export interface BridgeMutationEntry {
 	filePath: string;
 	kind: MutationKind;
+	/** Stable activation identity for durable turn-state attribution. */
+	sessionId?: string;
 	touchedLines?: [number, number];
 	editRanges?: [number, number][];
+	authorshipUnknown?: boolean;
 	/** Producer identity, surfaced as the tool name on the classification. */
 	consumer?: string;
 	/**
@@ -889,6 +932,29 @@ export interface BridgeMutationEntry {
 	 * falls back to `"bridge"`.
 	 */
 	provenance?: "observed" | "settled-sweep";
+	/**
+	 * #4187 R4-1: the pi tool call this write belongs to, when one exists. The
+	 * read guard licenses an authorship advance per call
+	 * (`ReadGuard.noteCheckedPaths`), and a bytes-less record advances only a
+	 * path its OWN call checked: a producer with no call of its own (a
+	 * server-initiated `workspace/applyEdit`, a drain, a co-process extension)
+	 * names none, so its write can only end an authorship. The guard sanitizes
+	 * it, so a producer passes the host's raw id.
+	 */
+	toolCallId?: string;
+	/**
+	 * #3521: the read guard's branch epoch the producer captured before it
+	 * awaited (the agent_settled sweep). A `/tree` in between means the write
+	 * is not credited to the new branch. Absent: the write is current.
+	 */
+	readGuardBranchEpoch?: number;
+	/**
+	 * #3620/#3709: the lineage handle an in-process producer captured before it
+	 * awaited (the settled sweep, the tool_result settle). Once its scope has
+	 * retired, the bridge writes none of the live session's state. External
+	 * producers omit it and are handled as before.
+	 */
+	lineage?: LineageHandle;
 }
 
 /**
@@ -909,6 +975,7 @@ export function classifyBridgeMutation(
 		kind: entry.kind,
 		touchedLines: entry.touchedLines,
 		editRanges: entry.editRanges,
+		authorshipUnknown: entry.authorshipUnknown,
 		provenance,
 		source: provenance === "bridge" ? "mutation-bridge" : "observed-mutation",
 	};

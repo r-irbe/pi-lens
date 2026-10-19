@@ -62,6 +62,7 @@ function makeServer(id: string, ext: string) {
 		id,
 		name: id,
 		extensions: [ext],
+		idleEviction: "resident",
 		root: async () => "C:/repo",
 		spawn: vi.fn(async () => ({ process: {}, source: "test" })),
 	};
@@ -109,6 +110,7 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 			getOperationSupport: () => ({}),
 			serverId: "typescript",
 			notify: {
+				announceCreated: () => undefined,
 				// Mirrors `handleNotifyOpen`'s real branch structure closely enough
 				// to reproduce the bug/fix: first open of a path enqueues a
 				// watched-files change; a later call for an already-open path is
@@ -249,6 +251,7 @@ describe("runWorkspaceDiagnostics — pre-open is bounded, not just fast (#615)"
 			getOperationSupport: () => ({}),
 			serverId: "typescript",
 			notify: {
+				announceCreated: () => undefined,
 				// Deliberately never resolves — reproduces a stuck notification
 				// write / hung server. Before #615 this hung `preOpenGroupFiles`
 				// forever, with no heartbeat and no way for the sweep to move on.
@@ -291,6 +294,7 @@ describe("runWorkspaceDiagnostics — pre-open is bounded, not just fast (#615)"
 			getOperationSupport: () => ({}),
 			serverId: "typescript",
 			notify: {
+				announceCreated: () => undefined,
 				open: vi.fn(() => new Promise<void>(() => {})),
 			},
 			waitForDiagnostics: vi.fn(async () => []),

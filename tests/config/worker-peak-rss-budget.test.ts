@@ -19,6 +19,7 @@ import { WORKER_PEAK_RSS_BUDGET_MB } from "../../scripts/lib/worker-budget.mjs";
 import { runTeardownWithMemReport } from "../support/vitest-setup.js";
 import {
 	PEAK_RSS_ADMISSIONS,
+	PEAK_RSS_HEADROOM_WARN_MB,
 	type PeakRssAdmission,
 	peakRssProblem,
 	reportPeakRss,
@@ -124,6 +125,39 @@ describe("#3058 per-file peak RSS is registered or fails", () => {
 		]);
 		expect(reportOn(10)).toEqual([
 			"[mem-file] peakRssMb=10 heapUsedMb=12 externalMb=3 tests/fixture/heavy.test.ts\n",
+		]);
+	});
+
+	it("warns inside the headroom band before the gate goes red (#3565)", () => {
+		// Recurrence: over 18 CI runs vi-mock-export-sweep (2,026-2,049 MB) and
+		// index-integration (1,873-2,052 MB) straddled the 2,048 MB budget, and
+		// each went red on a commit that touched nothing it loads. The band is
+		// the only signal that arrives before the red.
+		const edge = WORKER_PEAK_RSS_BUDGET_MB - PEAK_RSS_HEADROOM_WARN_MB;
+		const record = (peak: number) =>
+			`[mem-file] peakRssMb=${peak} heapUsedMb=12 externalMb=3 tests/fixture/heavy.test.ts\n`;
+		expect(reportOn(edge)).toEqual([record(edge)]);
+		const [, warning] = reportOn(edge + 1);
+		expect(warning).toBe(
+			`::warning title=peak-RSS headroom::tests/fixture/heavy.test.ts peaked at ${edge + 1} MB, within ${PEAK_RSS_HEADROOM_WARN_MB} MB of its ${WORKER_PEAK_RSS_BUDGET_MB} MB ceiling (tests/support/worker-peak-rss.ts, #3565). Cut its footprint before GC timing alone takes it over.\n`,
+		);
+		expect(reportOn(WORKER_PEAK_RSS_BUDGET_MB)).toHaveLength(2);
+		// The band follows an admitted ceiling, not the budget.
+		const admissions = {
+			"tests/fixture/heavy.test.ts": {
+				peakRssMb: 4000,
+				reason: "native grammar arenas, tracked by #3058",
+			},
+		};
+		expect(
+			reportOn(4000 - PEAK_RSS_HEADROOM_WARN_MB, { admissions }),
+		).toHaveLength(1);
+		expect(reportOn(4000, { admissions })[1]).toContain(
+			"of its 4000 MB ceiling",
+		);
+		// Off linux the budget is not enforced, so there is no band either.
+		expect(reportOn(edge + 1, { platform: "win32" })).toEqual([
+			record(edge + 1),
 		]);
 	});
 

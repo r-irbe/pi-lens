@@ -2,7 +2,7 @@
 
 ### LSP Support
 
-pi-lens includes **46 language server definitions** (including four cross-cutting *auxiliary* scanners that attach alongside the file's language server — Opengrep, ast-grep, zizmor, and typos — see below). LSP is **enabled by default**; use `--no-lsp` to disable it for a session. Servers are auto-discovered from PATH, project `node_modules`, and managed installs. When a server is not installed, pi-lens offers an interactive install prompt.
+pi-lens includes **49 language server definitions** (including four cross-cutting *auxiliary* scanners that attach alongside the file's language server — Opengrep, ast-grep, zizmor, and typos — see below). LSP is **enabled by default**; use `--no-lsp` to disable it for a session. Servers are auto-discovered from PATH, project `node_modules`, and managed installs. When a server with a managed installer is not installed, pi-lens offers an interactive install prompt; toolchain-bundled servers, such as Lean's `lake`, are PATH-only, and pi-lens never installs or manages them.
 
 **LSP Idle Management:** LSP servers shut down after 240 seconds of inactivity (no files modified) to free resources. The timer resets when you resume editing, preventing cold-start penalties during active development.
 
@@ -19,7 +19,7 @@ pi-lens includes **46 language server definitions** (including four cross-cuttin
 - **`capabilities`** — shows which operations are supported by the active LSP server(s) for a file, read directly from the cached `initialize` response (no round-trip).
 - **Symbol column resolution** — passing `symbol: "myFunc"` instead of an exact `character` position resolves the correct column automatically. Use `symbol: "foo#2"` for the second occurrence of `foo` on the line.
 
-LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Swift, Dart, Lua, C/C++, Zig, Haskell, Lean 4 (lake serve), Elixir, Gleam, Typst (tinymist), Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
+LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rust, Ruby (ruby-lsp + solargraph), PHP, PowerShell, C# (omnisharp), F#, Java (JDT LS, with Lombok javaagent support when a Lombok jar is available), Kotlin, Lean, Swift, Dart, Lua, C/C++, Zig, Haskell, Elixir, Gleam, Typst (tinymist), Markdown (marksman), OCaml, Clojure, CUE (syntax and parse diagnostics; evaluation errors via the cue-vet auxiliary runner), Terraform, Nix, Bash, Shuck (zsh-aware shell language server), Fish, CMake, Docker, YAML, JSON, HTML, TOML, Prisma, Vue, Svelte, CSS.
 
 ### Formatters
 
@@ -109,6 +109,10 @@ the full behavior and honest limits.
 
 pi-lens builds a review graph (`file → symbol → dependency`) during session and uses it at turn end to render an impact cascade: which files were affected by a change and how diagnostics propagated through the dependency graph. Nodes track kind, language, and export status; edges track contains/imports/calls/references.
 
+### Knip at turn end and linked worktrees
+
+knip follows git ignore rules (`.gitignore` and `.git/info/exclude`) and nothing else, so linked worktrees that live inside the project (for example `.worktrees/*`) are walked as project files: on a pi-lens clone with six of them, 83 percent of the project paths knip saw were worktree files, and a scan took 10.9 s cold and 3.1 s warm instead of 2.6 s and 0.6 s. pi-lens drops their issues from the verdict, runs knip in the worktree that owns an edit, and stops waiting for a root whose last two scans both outlasted the turn_end budget (the knip row then reads `reason: "scan-exceeds-budget"` and the ledger counts `turn-end-knip-nested-worktrees`). It does not edit your repository: to remove the cost, add `/.worktrees/` (or your worktree directory) to the project's `.gitignore`.
+
 ### Read-Before-Edit Guard
 
 pi-lens enforces a **read-before-edit** policy on all file writes and edits. Before allowing a `write` or `edit` tool call on an existing file, it verifies that the agent has previously read sufficient context:
@@ -118,7 +122,7 @@ pi-lens enforces a **read-before-edit** policy on all file writes and edits. Bef
 - **Out-of-range block** — blocks if the edit target lines fall outside the ranges previously read, ensuring the agent cannot modify code it hasn't seen
 - **Snapshot validation** — covered edit ranges are hash-checked against the lines the agent actually saw at read time; stale-range edits are rejected even when range coverage exists. Hash capture covers reads up to 3 000 lines
 
-Coverage is tracked across multiple reads: two reads of lines 1–100 and 101–200 together satisfy a full-file write. Symbol-expanded reads (small reads silently widened to the enclosing symbol via tree-sitter) count toward coverage at the symbol level. Markdown files generate a warning instead of blocking (edits outside the section-expanded read range are warned, not silently passed). Plain-text (`.txt`) and log (`.log`) files remain fully exempt.
+Coverage is tracked across multiple reads: two reads of lines 1–100 and 101–200 together satisfy a full-file write. Symbol-expanded reads (small reads widened to the enclosing symbol via tree-sitter, labelled with a leading note) count toward coverage at the symbol level. Markdown files generate a warning instead of blocking (edits outside the section-expanded read range are warned, not silently passed). Plain-text (`.txt`) and log (`.log`) files remain fully exempt.
 
 Override for a single edit: `/lens-allow-edit <path>`
 
@@ -179,7 +183,7 @@ pi-lens MCP server expose the same shape to Claude Code / any MCP client.
 
 At `turn_end`, pi-lens writes `<project-data-dir>/cache/actionable-warnings.json` summarizing fixable warnings introduced by the current turn. This powers the optional conservative autofix at `agent_end`.
 
-`<project-data-dir>` is whatever `getProjectDataDir(cwd)` resolves to: `<project>/.pi-lens` only when that legacy directory already exists, otherwise `~/.pi-lens/projects/<project-slug>` (or a `PILENS_DATA_DIR` location). The turn-end advisory points at `lens_diagnostics mode=delta` first and names the resolved file second, so you never have to work the layout out by hand (#2521).
+`<project-data-dir>` is whatever `getProjectDataDir(cwd)` resolves to: `<project>/.pi-lens` only when that legacy directory already exists when the process first resolves the root (a `.pi-lens` created mid-process takes effect at the next process start), otherwise `~/.pi-lens/projects/<project-slug>` (or a `PILENS_DATA_DIR` location). The turn-end advisory points at `lens_diagnostics mode=delta` first and names the resolved file second, so you never have to work the layout out by hand (#2521).
 
 **Report contents:**
 
@@ -229,6 +233,42 @@ One event per logical write batch (not per file) — e.g. a single eslint `--fix
 **Non-goals:** pi-lens does not (yet) consume anyone's bus events, and does not emit for edits the agent makes itself through its own tool calls — the host already knows about those. This is a broadcast-only surface; see `#478` for the planned `pilens:rpc:*` request/response query API that will reuse the same versioning discipline.
 
 **Kill switch:** `PI_LENS_BUS_PUBLISH=0` disables publishing entirely (see `docs/environment-variables.md`). Publishing is fire-and-forget — a disabled/unavailable/throwing bus never affects the write path's own success or latency.
+
+### Bus Events — `pilens:format:*` (#673)
+
+Deferred formatting has a separate lifecycle on the same `pi.events` bus:
+
+```
+pilens:format:queued  { v: 1, source: "pi-lens", filePath, cwd, tool, kinds,
+                        ownerSessionId?, turnIndex?, batchId? }
+pilens:format:start   { v: 1, source: "pi-lens", cwd, paths, fileCount, kinds,
+                        ownerSessionId?, turnIndex?, batchId? }
+pilens:format:done    { v: 1, source: "pi-lens", cwd, paths, fileCount, kinds,
+                        ownerSessionId?, turnIndex?, batchId?, settled? }
+```
+
+Paths and `cwd` are absolute, normalized strings. `queued` is emitted when a
+file first enters the deferred queue; `start` is emitted when a non-empty
+claimed format batch begins; and `done` is emitted after all formatters in that
+batch and any late-write resyncs have settled. `paths: []` on `done` means the
+batch changed no bytes. `batchId` is process-unique and monotonic across
+coordinator generations, so
+two same-millisecond reloads cannot share a lifecycle identity. A normal
+`pilens:format:done` has `settled: true` (or omits the additive field for old
+producers). If the formatter remains unsettled after the bounded hook/format
+drain, pi-lens emits one terminal `pilens:format:done` with `settled: false`
+and the still-pending paths, and records one `deferred-format-unsettled`
+degradation for that batch. A later formatter write is resynced by the late
+continuation and does not emit a second done event.
+The session and turn fields let a listener match the lifecycle to its own
+session and turn; consumers must not infer ownership from paths or timing.
+
+These are visibility events, not a flush API. They are fire-and-forget and can
+be absent when the bus is disabled, unwired, stale, or throws. Replaced-session
+and aborted drains publish only for work they actually claim and finish; work
+requeued for its owner is not
+announced as done by the replacing session. The events are additive v1 schemas
+and may gain optional fields without a version bump.
 
 **Fix provenance (#502):** `FilesTouchedPayload` gained an additive, optional `fixes` field so a diff/review consumer can distinguish a pi-lens-mechanical hunk from an agent edit:
 
@@ -294,7 +334,7 @@ Late-joiners are a non-problem in-process — extensions activate at `session_st
 
 ### Opportunistic Read Expansion
 
-When the agent reads a small slice of a file (≤ 60 lines), pi-lens transparently expands the read to the full enclosing symbol (function, method, or class) using the tree-sitter AST. The agent receives the full symbol as context, and the read guard records symbol-level coverage so edits anywhere within that symbol pass without requiring the agent to have read every line individually. Expansion runs within a 200 ms budget and falls back silently on unsupported file types or parse failures.
+When the agent reads a small slice of a file (≤ 100 lines), pi-lens expands the read to the full enclosing symbol (function, method, or class) using the tree-sitter AST, or to the enclosing heading section of a Markdown file. The result starts with a `[pi-lens: read widened ...]` note naming the requested and the returned lines; a `limit` above 100 reads the exact range. Expansion is off with the read guard (`--no-read-guard` or `readGuard.enabled=false`). The agent receives the full symbol as context, and the read guard records symbol-level coverage so edits anywhere within that symbol pass without requiring the agent to have read every line individually. Expansion runs within a 200 ms budget and falls back silently on unsupported file types or parse failures.
 
 Supported: TypeScript, TSX, JavaScript, JSX, Python, Go, Rust, Ruby, Java, Kotlin, Dart, Elixir, C, C++, C#, PHP, Swift, Lua, OCaml, Zig, Bash.
 

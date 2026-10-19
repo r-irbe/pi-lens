@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 import {
@@ -16,6 +15,7 @@ import {
 	diagnosticsIpcPathForCwd,
 	requestWarmCodeActions,
 	requestWarmDiagnostics,
+	unlinkStaleUnixSocket,
 	type WarmCodeActionRange,
 	type WarmCodeActionsResult,
 	type WarmCodeActionsRequest,
@@ -195,13 +195,9 @@ async function serveRequest(
 function startServer(cwd: string): void {
 	state.server?.close();
 	const endpoint = diagnosticsIpcPathForCwd(cwd, process.pid);
-	if (process.platform !== "win32") {
-		try {
-			fs.unlinkSync(endpoint);
-		} catch {
-			// No stale socket.
-		}
-	}
+	// Only a stale socket at a name that still carries OUR pid: a truncated
+	// shared name may be another live session's endpoint (#4376 review r1, F1).
+	unlinkStaleUnixSocket(endpoint, { ownerPid: process.pid });
 	const server = net.createServer((socket) => {
 		socket.setEncoding("utf8");
 		// #3389: an ACCEPTED socket with no `error` listener rethrows, and

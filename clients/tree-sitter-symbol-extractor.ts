@@ -8,7 +8,7 @@ import { EXTENSION_TO_GRAMMAR, KIND_TO_GRAMMAR } from "./language-registry.js";
 import * as path from "node:path";
 import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
 import type { Symbol, SymbolKind, SymbolRef } from "./symbol-types.js";
-import type { TreeSitterClient } from "./tree-sitter-client.js";
+import { type TreeSitterClient, wasmQueryInput } from "./tree-sitter-client.js";
 
 // Tree-sitter query patterns for symbol extraction
 const SYMBOL_QUERIES: Record<string, { defs: string; refs: string }> = {
@@ -812,10 +812,14 @@ export class TreeSitterSymbolExtractor {
 
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query/Language types
 	private compileQuery(Query: any, language: any, src: string, label: string) {
+		// #3678 F-C: key a compile trap to the query source, so one
+		// always-trapping query is charged to itself instead of spending the
+		// process budget at every extractor init and aborting on the fourth.
+		const input = wasmQueryInput(`${this.languageId}:${label}:${src}`);
 		try {
 			return new Query(language, src);
 		} catch (err) {
-			if (this.client.reportWasmAbort(err)) throw err;
+			if (this.client.reportWasmAbort(err, input)) throw err;
 			logTreeSitterDiagnostic({
 				subsystem: "symbol-extractor",
 				languageId: this.languageId,
@@ -843,8 +847,12 @@ export class TreeSitterSymbolExtractor {
 		// Extract definitions (guarded — a language's defs query may have failed to
 		// compile while its imports query succeeded, or vice versa).
 		if (this.defQuery) {
+			// #4368 r1 F2: split once per file, not once per definition.
+			let lines: string[] | undefined;
+			const lineAt = (row: number): string =>
+				(lines ??= content.split("\n"))[row] ?? "";
 			for (const match of this.queryMatches(this.defQuery, tree.rootNode)) {
-				const symbol = this.parseDefMatch(match, relativePath, content);
+				const symbol = this.parseDefMatch(match, relativePath, lineAt);
 				if (symbol) symbols.push(symbol);
 			}
 		}
@@ -857,25 +865,33 @@ export class TreeSitterSymbolExtractor {
 			}
 		}
 
-		// Extract imports (optional — only for languages with an IMPORT_QUERIES entry)
-		const imports: ImportRef[] = [];
-		if (this.importQuery) {
-			for (const match of this.queryMatches(this.importQuery, tree.rootNode)) {
-				const ref = parseImportMatch(match);
-				if (ref) imports.push(ref);
-			}
-		}
-
 		return {
 			symbols,
 			refs,
-			imports,
+			imports: this.extractImports(tree),
 			coverage: {
 				definitions: this.defQuery ? "complete" : "unavailable",
 				references: this.refQuery ? "complete" : "unavailable",
 				imports: this.importQuery ? "complete" : "unavailable",
 			},
 		};
+	}
+
+	/**
+	 * The import references alone (optional: only for languages with an
+	 * IMPORT_QUERIES entry). #4368 r1 F2: a caller that needs only imports
+	 * (the forward-import resolver) runs this instead of {@link extract}, whose
+	 * definitions pass is the cost of a large file.
+	 */
+	// biome-ignore lint/suspicious/noExplicitAny: Tree type
+	extractImports(tree: any): ImportRef[] {
+		const imports: ImportRef[] = [];
+		if (!this.importQuery) return imports;
+		for (const match of this.queryMatches(this.importQuery, tree.rootNode)) {
+			const ref = parseImportMatch(match);
+			if (ref) imports.push(ref);
+		}
+		return imports;
 	}
 
 	private queryMatches(query: any, rootNode: any): any[] {
@@ -891,7 +907,7 @@ export class TreeSitterSymbolExtractor {
 	private parseDefMatch(
 		match: any,
 		filePath: string,
-		content: string,
+		lineAt: (row: number) => string,
 	): Symbol | null {
 		const captures: Record<string, { text: string; node: unknown }> = {};
 
@@ -975,7 +991,7 @@ export class TreeSitterSymbolExtractor {
 		if (!name || !kind || !defNode) return null;
 
 		// Check if exported (basic heuristic: has export keyword before it)
-		const isExported = this.isExported(defNode, content);
+		const isExported = this.isExported(defNode, lineAt);
 		const signature = params ? this.extractSignature(params, kind) : undefined;
 		// Scope/visibility signals (additive; the review graph ignores them).
 		// `local`: nearest enclosing scope is a function body (#259).
@@ -1039,13 +1055,6 @@ export class TreeSitterSymbolExtractor {
 			!!n && n.type === TreeSitterSymbolExtractor.COMMENT_NODE_KIND;
 		const isDeco = (n: any) =>
 			!!n && TreeSitterSymbolExtractor.DECORATOR_NODE_KINDS.has(n.type);
-		// web-tree-sitter materializes a NEW node object on every `.children`/
-		// `.parent` access (no stable identity), so siblings must be located by
-		// START POSITION, never by reference (`===`) — same reasoning as
-		// `startIndex` comparisons in `extractDecorators`.
-		const samePos = (a: any, b: any) =>
-			a?.startPosition?.row === b?.startPosition?.row &&
-			a?.startPosition?.column === b?.startPosition?.column;
 		const sameStartRow = (a: any, b: any) =>
 			a?.startPosition?.row === b?.startPosition?.row;
 
@@ -1063,10 +1072,6 @@ export class TreeSitterSymbolExtractor {
 			node = parent;
 		}
 
-		const siblings: any[] = node.parent?.children ?? [];
-		const idx = siblings.findIndex((s) => samePos(s, node));
-		if (idx <= 0) return undefined;
-
 		// Walk backwards from the declaration, skipping decorators/annotations
 		// (Python/TS often have `@decorator` between the doc comment and the def),
 		// collecting a contiguous run of comment nodes with no other named node
@@ -1074,33 +1079,29 @@ export class TreeSitterSymbolExtractor {
 		// the closest already-accepted neighbor (the declaration itself, or the
 		// decorator block above it) — a candidate comment separated from THAT
 		// row by a blank line is rejected even when it's the only candidate.
-		let cursor = idx - 1;
-		while (cursor >= 0 && isDeco(siblings[cursor])) cursor--;
+		// #4368 r1 F2: through `previousSibling`, never the parent's whole
+		// children list, which made every definition cost the size of its scope.
+		let cursor = node.previousSibling;
+		while (cursor && isDeco(cursor)) cursor = cursor.previousSibling;
 		let boundaryRow: number | undefined = node.startPosition?.row;
-		let end = -1; // inclusive end index of the accepted comment run
-		let start = -1; // inclusive start index of the accepted comment run
-		while (cursor >= 0 && isComment(siblings[cursor])) {
-			const candidate = siblings[cursor];
+		const run: any[] = []; // the accepted comment run, nearest first
+		while (cursor && isComment(cursor)) {
 			const gapRows =
-				boundaryRow !== undefined &&
-				typeof candidate.endPosition?.row === "number"
-					? boundaryRow - candidate.endPosition.row
+				boundaryRow !== undefined && typeof cursor.endPosition?.row === "number"
+					? boundaryRow - cursor.endPosition.row
 					: 0;
 			if (gapRows > 1) break; // separated by a blank line — not attached
-			if (end < 0) end = cursor;
-			start = cursor;
-			boundaryRow = candidate.startPosition?.row;
-			cursor--;
+			run.push(cursor);
+			boundaryRow = cursor.startPosition?.row;
+			cursor = cursor.previousSibling;
 		}
-		if (start < 0 || end < 0) return undefined;
+		if (run.length === 0) return undefined;
+		run.reverse();
 
-		const raw = siblings
-			.slice(start, end + 1)
-			.map((n) => String(n.text ?? ""))
-			.join("\n");
+		const raw = run.map((n) => String(n.text ?? "")).join("\n");
 		const text = this.summarizeDocComment(raw);
 		if (!text) return undefined;
-		const startLine = (siblings[start].startPosition?.row ?? 0) + 1;
+		const startLine = (run[0].startPosition?.row ?? 0) + 1;
 		return { text, startLine };
 	}
 
@@ -1191,14 +1192,17 @@ export class TreeSitterSymbolExtractor {
 		};
 		const out: string[] = [];
 
-		// (1) Contiguous decorator siblings immediately before the declaration.
-		// Children are in source order, so collect decorators and reset on any
-		// other NAMED sibling — leaving only the block directly above `node`.
-		for (const sib of node.parent?.children ?? []) {
-			if (sib.startIndex >= node.startIndex) break; // preceding only
-			if (isDeco(sib)) out.push(text(sib));
-			else if (sib.isNamed) out.length = 0;
+		// (1) Contiguous decorator siblings immediately before the declaration:
+		// walk back from it and stop at the first other NAMED sibling, leaving
+		// only the block directly above `node`. #4368 r1 F2: never materialize
+		// the parent's children, which made every definition cost the size of
+		// its scope (quadratic for a module of top-level definitions).
+		const above: string[] = [];
+		for (let sib = node.previousSibling; sib; sib = sib.previousSibling) {
+			if (isDeco(sib)) above.push(text(sib));
+			else if (sib.isNamed) break;
 		}
+		out.push(...above.reverse());
 
 		// (2) Own leading children: TS class decorators, or annotations nested in a
 		// `modifiers` container (Java/Kotlin).
@@ -1266,19 +1270,17 @@ export class TreeSitterSymbolExtractor {
 	}
 
 	// biome-ignore lint/suspicious/noExplicitAny: Node type
-	private isExported(node: any, content: string): boolean {
+	private isExported(node: any, lineAt: (row: number) => string): boolean {
 		// A symbol is exported only at module scope. Anchor the keyword at the
 		// START of the declaration line (so `const exportName = …`, or "export"
 		// inside a comment, doesn't count), and require the AST walk to reach an
 		// export statement WITHOUT crossing a function body.
-		const lines = content.split("\n");
-		const lineIdx = node.startPosition.row;
-		const line = lines[lineIdx] || "";
-		return /^\s*export\b/.test(line) || this.hasExportModifier(node, content);
+		const line = lineAt(node.startPosition.row);
+		return /^\s*export\b/.test(line) || this.hasExportModifier(node);
 	}
 
 	// biome-ignore lint/suspicious/noExplicitAny: Node type
-	private hasExportModifier(node: any, _content: string): boolean {
+	private hasExportModifier(node: any): boolean {
 		// Walk up to an export statement, but bail the moment we cross a function
 		// or block body (`statement_block`): a symbol nested inside an exported
 		// function is a LOCAL, not a module export (the #256 false-API bug). Class

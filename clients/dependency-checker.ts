@@ -19,6 +19,7 @@ import { findNodeToolBinary } from "./package-manager.js";
 import { isFullyQualified } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { compareOrdinal } from "./string-utils.js";
+import { getIsolatedNpxSpawnOptions } from "./tool-probe.js";
 import {
 	createAvailabilityChecker,
 	discoverManagedTool,
@@ -108,7 +109,17 @@ function parseMadgeCycles(
 	baseDir: string,
 	projectRoot: string,
 ): { circular: CircularDep[]; circularFiles: Set<string> } {
-	const parsed = JSON.parse(stdout || "[]");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout || "[]");
+	} catch (err) {
+		// Both callers classify a malformed report in their own try/catch. The
+		// context here keeps malformed madge output from reading as "no cycles"
+		// (#2154) while naming what failed to parse.
+		throw new Error(
+			`madge report is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 	const cycles: string[][] = Array.isArray(parsed) ? parsed : [];
 	const circular: CircularDep[] = [];
 	const circularFiles = new Set<string>();
@@ -776,7 +787,10 @@ export class DependencyChecker {
 				[...prefix, ...buildMadgeArgs(normalized, projectRoot)],
 				{
 					timeout: 15000,
+					// A cache-only npx fallback must not read the project's `.npmrc`
+					// (#4268 acceptance 3); a resolved madge keeps the project cwd.
 					cwd: projectRoot,
+					...(cmd === "npx" ? getIsolatedNpxSpawnOptions() : {}),
 				},
 			);
 
@@ -1051,9 +1065,13 @@ export class DependencyChecker {
 	/**
 	 * Full project scan (for /check-deps command)
 	 */
-	async scanProject(
-		cwd?: string,
-	): Promise<{ circular: CircularDep[]; count: number } & AnalysedRootSignal> {
+	async scanProject(cwd?: string): Promise<
+		{
+			circular: CircularDep[];
+			count: number;
+			scannedAt?: string;
+		} & AnalysedRootSignal
+	> {
 		const projectRoot = path.resolve(cwd || process.cwd());
 
 		// Return early for non-existent or empty directories before probing/installing.
@@ -1095,7 +1113,16 @@ export class DependencyChecker {
 	private async runScanProject(
 		projectRoot: string,
 		gen: number,
-	): Promise<{ circular: CircularDep[]; count: number } & AnalysedRootSignal> {
+	): Promise<
+		{
+			circular: CircularDep[];
+			count: number;
+			scannedAt?: string;
+		} & AnalysedRootSignal
+	> {
+		// #3600: stamp the read time at the top of the run body, before madge
+		// reads the import graph a widget row's freshness is judged against.
+		const scannedAt = new Date().toISOString();
 		try {
 			const { cmd, prefix } = await this.resolveMadge(projectRoot);
 			const result = await safeSpawnAsync(
@@ -1103,7 +1130,10 @@ export class DependencyChecker {
 				[...prefix, ...buildMadgeArgs(projectRoot, projectRoot)],
 				{
 					timeout: 30000,
+					// A cache-only npx fallback must not read the project's `.npmrc`
+					// (#4268 acceptance 3); a resolved madge keeps the project cwd.
 					cwd: projectRoot,
+					...(cmd === "npx" ? getIsolatedNpxSpawnOptions() : {}),
 				},
 			);
 
@@ -1127,7 +1157,7 @@ export class DependencyChecker {
 			// Every other return here (missing root, no top-level source file,
 			// madge unavailable, spawn error, parse throw) is the SAME empty shape
 			// and must not be read as "no cycles in this project".
-			return { circular, count: circular.length, analyzed: true };
+			return { circular, count: circular.length, analyzed: true, scannedAt };
 		} catch (err: any) {
 			this.log(`Scan error: ${err.message}`);
 			return { circular: [], count: 0 };

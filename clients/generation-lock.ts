@@ -20,10 +20,15 @@
  * can only delay a takeover, never admit one.
  */
 
+import { randomInt } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { incrementDegradationCount } from "./degradation-ledger.js";
+import { BoundedFifoMap } from "./bounded-cache.js";
+import {
+	incrementDegradationCount,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 
 const GENERATION = /^lock\.(\d+)(\.released)?$/;
 
@@ -149,6 +154,69 @@ export function releaseGeneration(hold: GenerationHold): void {
 	}
 }
 
+/** A running heartbeat started by {@link startGenerationHeartbeat}. */
+export interface GenerationHeartbeat {
+	/** Stop refreshing. Idempotent; the holder calls this in `finally`. */
+	stop(): void;
+}
+
+/**
+ * How often a heartbeat refreshes a held generation's mtime: a quarter of the
+ * lease, floored at 1s so a very short lease (tests) never thrashes the
+ * filesystem. A quarter leaves three missed ticks of margin before a
+ * contender's `pidFileIsStale` would judge the generation stale (#3515).
+ */
+export function heartbeatIntervalMs(leaseMs: number): number {
+	return Math.max(1_000, Math.floor(leaseMs / 4));
+}
+
+/**
+ * Keep a held generation's mtime fresh so a hold that legitimately outlives
+ * its lease is never judged stale by a contender's `tryAcquireGeneration`
+ * (#3515: an ERESOLVE npm install can run two 120s attempts inside the
+ * installer's 180s lease). An unref'd interval — it must never keep the
+ * process alive on its own — that the holder always stops in `finally`,
+ * released or not. A failed `utimesSync` (the generation directory gone, a
+ * transient I/O error) is swallowed here: `ownsTopGeneration` below is what
+ * the holder checks before a write it cannot safely race, not this tick.
+ */
+export function startGenerationHeartbeat(
+	hold: GenerationHold,
+	intervalMs: number,
+): GenerationHeartbeat {
+	const file = generationPath(hold.dir, hold.generation);
+	const timer = setInterval(() => {
+		try {
+			const now = new Date();
+			fs.utimesSync(file, now, now);
+		} catch {
+			// Best effort; see doc comment above.
+		}
+	}, intervalMs);
+	timer.unref();
+	return { stop: () => clearInterval(timer) };
+}
+
+/**
+ * Whether `hold` is still the live top generation: its own generation is
+ * neither marked released nor superseded by a taker that judged it stale.
+ * The holder calls this right before a write it cannot safely race with a
+ * second holder (#3515) — `startGenerationHeartbeat` is what USUALLY keeps
+ * that race from becoming reachable at all; this is the check for the tick
+ * it missed (a suspended process, a blocked event loop, a heartbeat write
+ * that failed). Any error reading the directory (removed, unreadable) is
+ * "no longer owned": the safe direction for a check guarding a write.
+ */
+export function ownsTopGeneration(hold: GenerationHold): boolean {
+	try {
+		const entries = fs.readdirSync(hold.dir);
+		if (entries.includes(releasedName(hold.generation))) return false;
+		return topGeneration(entries) === hold.generation;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * One acquisition attempt: undefined when the lock is held or another taker
  * won the race; the caller backs off and retries. Any other filesystem error
@@ -193,4 +261,83 @@ export function tryAcquireGeneration(
 	}
 	removeBelowPredecessor(dir, entries, hold.generation);
 	return hold;
+}
+
+// #3578: per lock directory, the holder a wait last ran out on, named by its
+// top generation file and the `<pid> <ms>` it holds. Only a later holder
+// writes another name, so a match is that same holder, still inside. An
+// unreadable holder is `undefined`, which never matches.
+const timedOutHolders = new BoundedFifoMap<string, string | undefined>(16);
+
+/**
+ * The current top generation's `lock.<n> <pid> <ms>` name, or `undefined` if
+ * the directory or its top generation file cannot be read. Exported for
+ * {@link "./bounded-pid-file-lock.js"}'s own #3594 remembered-holder skip,
+ * which keys on the same holder identity against a different lock directory.
+ */
+export function topGenerationHolder(dir: string): string | undefined {
+	try {
+		const top = topGeneration(fs.readdirSync(dir));
+		return `lock.${top} ${fs.readFileSync(generationPath(dir, top), "utf8").trim()}`;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Run `op` holding the lock at `dir`, retrying after a 5-25 ms synchronous
+ * backoff until `waitMs` runs out (#3509, #3511). The caller keeps its hold
+ * far below `staleMs`, the lease after which another process takes over.
+ * `held: false` means the wait ran out or a filesystem error other than
+ * contention stopped acquisition (`cause`); `op` did not run.
+ *
+ * #3578: once a wait has run out on a holder, a later call that finds the
+ * same holder still inside tries once and returns without waiting again. A
+ * new holder gets the full wait; a holder past its lease is taken over on
+ * that first try.
+ */
+export function withGenerationLockSync<T>(
+	dir: string,
+	timing: { staleMs: number; waitMs: number },
+	op: () => T,
+): { held: true; value: T } | { held: false; cause?: unknown } {
+	const deadline = Date.now() + timing.waitMs;
+	const timedOutHolder = timedOutHolders.get(dir);
+	for (;;) {
+		let hold: GenerationHold | undefined;
+		try {
+			hold = tryAcquireGeneration(dir, timing.staleMs);
+		} catch (cause) {
+			return { held: false, cause };
+		}
+		if (hold) {
+			if (hold.tookOverStale) recordGenerationTakeover(hold);
+			try {
+				return { held: true, value: op() };
+			} finally {
+				releaseGeneration(hold);
+			}
+		}
+		if (
+			timedOutHolder !== undefined &&
+			topGenerationHolder(dir) === timedOutHolder
+		) {
+			recordDegradationOnce({
+				kind: "generation-lock-wait-skipped",
+				subject: dir,
+				reason: `did not wait: ${timedOutHolder} still holds the lock after an earlier wait ran out`,
+			});
+			return { held: false };
+		}
+		if (Date.now() >= deadline) {
+			timedOutHolders.set(dir, topGenerationHolder(dir));
+			return { held: false };
+		}
+		Atomics.wait(
+			new Int32Array(new SharedArrayBuffer(4)),
+			0,
+			0,
+			randomInt(5, 26),
+		);
+	}
 }

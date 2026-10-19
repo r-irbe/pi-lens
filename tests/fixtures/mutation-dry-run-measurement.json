@@ -1,0 +1,244 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-10-07",
+  "issue": "https://github.com/apmantza/pi-lens/issues/4092",
+  "ci": {
+    "failing": {
+      "run": 37629970371,
+      "jobs": {
+        "0": 112823805274,
+        "1": 112823805396
+      },
+      "testFiles": 123,
+      "defaultTimeoutSeconds": 300,
+      "selections": {
+        "0": "related 307 -> covering 200 -> kept 123 (123 own, 10 probe failed)",
+        "1": "related 565 -> covering 369 -> kept 123 (123 own, 194 probe failed)"
+      },
+      "log": "ERROR DryRunExecutor Initial test run timed out!"
+    },
+    "passing": {
+      "run": 37605896822,
+      "testFiles": 88,
+      "jobs": {
+        "0": 112742146544,
+        "1": 112742146399
+      },
+      "dryRunNetMs": {
+        "0": [
+          231338,
+          241061
+        ],
+        "1": [
+          248678,
+          254002
+        ]
+      },
+      "log": "INFO DryRunExecutor Initial test run succeeded. Ran 1 tests in 4 minutes and 8 seconds (net 248678 ms, overhead 2 ms)."
+    },
+    "dispatchRound1": {
+      "run": 37650871948,
+      "head": "d9ae33280e408264df7cab4ff9fcc36210b90ccf",
+      "shards": {
+        "0": {
+          "job": 112893826635,
+          "selection": "related 317 -> covering 204 -> kept 60 (60 own, 22 probe failed, 74 over the runtime cap, ~240 s kept)",
+          "vitestDurationSeconds": 459.84,
+          "failed": "tests/scripts/mutate.test.ts 16 of 33 (mutate.mjs: refusing dirty file), 367714 ms"
+        },
+        "1": {
+          "job": 112893826647,
+          "selection": "related 573 -> covering 358 -> kept 74 (74 own, 213 probe failed, 60 over the runtime cap, ~238 s kept)",
+          "vitestDurationSeconds": 524.8,
+          "failed": "tests/scripts/mutate.test.ts, same 16"
+        }
+      },
+      "cause": "Stryker in-place mode wrote // @ts-nocheck into every tracked file (2306 on a checkout), dirtying the tree; fixed by disableTypeChecks: false"
+    }
+  },
+  "local": {
+    "command": "unset PI_LENS_TEST_MAX_WORKERS; taskset -c 0,1 node_modules/.bin/vitest run --configLoader runner --testTimeout 30000 --reporter=json --outputFile=<out>.json <the 122 files below>  (same with taskset -c 0-3)",
+    "selection": "the 123 files both shards of run 37629970371 ran (job logs, `tests involved:`), minus tests/scripts/dispatch-safety.test.ts, which does not exist at e7dc66d18",
+    "host": "32-core dev box, load average 4.8-8, vitest 5.0.3, node 22.22.1",
+    "runs": [
+      {
+        "cores": 2,
+        "wallSeconds": 449,
+        "sumFileSeconds": 390.4,
+        "files": 122,
+        "maxFileSeconds": 168.73
+      },
+      {
+        "cores": 4,
+        "wallSeconds": 358,
+        "sumFileSeconds": 351.93,
+        "files": 122,
+        "maxFileSeconds": 157.61
+      }
+    ],
+    "fileSecondsAtTwoCores": {
+      "tests/clients/cascade-graph-occupancy.test.ts": 4.63,
+      "tests/clients/dispatch/rule-id-normalize.test.ts": 0,
+      "tests/clients/dispatch/rule-policy.test.ts": 0.01,
+      "tests/clients/dispatch/runner-claim-source-guard.test.ts": 0.02,
+      "tests/clients/dispatch/runners/go-vet.test.ts": 0.25,
+      "tests/clients/dispatch/runners/oxlint.test.ts": 0.65,
+      "tests/clients/dispatch/runners/reported-path-attribution.test.ts": 2.16,
+      "tests/clients/dispatch/runners/runner-helpers-covers.test.ts": 0.13,
+      "tests/clients/dispatch/runners/runner-helpers.test.ts": 0.41,
+      "tests/clients/dispatch/runners/shell-dialect-fold.test.ts": 0.77,
+      "tests/clients/dispatch/runners/shellcheck.test.ts": 0.16,
+      "tests/clients/dispatch/runners/shuck-lsp-smoke.test.ts": 0,
+      "tests/clients/dispatch/runners/taplo.test.ts": 0.16,
+      "tests/clients/flake-shape-ratchet.test.ts": 1.22,
+      "tests/clients/grammar-runtime-imports.test.ts": 0.03,
+      "tests/clients/grammar-source.test.ts": 0.01,
+      "tests/clients/install-diagnostics.test.ts": 0.01,
+      "tests/clients/installer/installer-lifecycle.integration.test.ts": 18.21,
+      "tests/clients/instance-reaper-pid-reuse.test.ts": 2.73,
+      "tests/clients/instance-reaper-registry-scan-escalation.test.ts": 0.08,
+      "tests/clients/instance-reaper-unref.test.ts": 0.01,
+      "tests/clients/instance-registry-race.test.ts": 5.49,
+      "tests/clients/lsp-covers-config.test.ts": 0.03,
+      "tests/clients/lsp/docker-official-fallback.test.ts": 0.29,
+      "tests/clients/lsp/idle-eviction-enabled-servers.test.ts": 0.28,
+      "tests/clients/lsp/launch.test.ts": 0.75,
+      "tests/clients/lsp/sweep-warmup-fallback-family.test.ts": 1.54,
+      "tests/clients/lsp/sweep-warmup.test.ts": 1.83,
+      "tests/clients/module-report-bash.test.ts": 0.09,
+      "tests/clients/module-report-wasm-failure.test.ts": 0.13,
+      "tests/clients/path-utils-win32-absolute.test.ts": 0.42,
+      "tests/clients/path-utils.test.ts": 0.12,
+      "tests/clients/process-snapshot-owner-tags.test.ts": 0,
+      "tests/clients/process-snapshot.test.ts": 0.01,
+      "tests/clients/project-lens-config.test.ts": 0.14,
+      "tests/clients/read-bridge.test.ts": 0.03,
+      "tests/clients/read-guard-conversation-evidence.test.ts": 0.55,
+      "tests/clients/read-guard-logger.test.ts": 0.03,
+      "tests/clients/read-guard.test.ts": 0.32,
+      "tests/clients/resource-sampler-scanner-attribution.test.ts": 0.01,
+      "tests/clients/resource-sampler.test.ts": 0.22,
+      "tests/clients/test-runner-windows-gradle.test.ts": 0.16,
+      "tests/clients/tool-cwd.test.ts": 0.95,
+      "tests/clients/tree-sitter-wasm-trap.test.ts": 0.12,
+      "tests/config/advisory-tool-workflow.test.ts": 0.01,
+      "tests/config/agents-governance.test.ts": 0.02,
+      "tests/config/allow-scripts-ci-gate.test.ts": 0.02,
+      "tests/config/bounded-container-guard.test.ts": 0.01,
+      "tests/config/codeql-workflow.test.ts": 0.04,
+      "tests/config/covers-config-claim-sweep.test.ts": 0.03,
+      "tests/config/docs-only-ci-skip.test.ts": 0.02,
+      "tests/config/git-fixture-governance.test.ts": 2.36,
+      "tests/config/github-workflow-permissions.test.ts": 0.01,
+      "tests/config/global-dir-probe-redirect.test.ts": 0.8,
+      "tests/config/glossary-synonym-sweep.test.ts": 0.3,
+      "tests/config/heavy-advisory-gate-workflow.test.ts": 0.32,
+      "tests/config/hook-await-bounds.test.ts": 0.37,
+      "tests/config/install-smoke-gates.test.ts": 0.01,
+      "tests/config/lane-mechanics-contract.test.ts": 0,
+      "tests/config/lsp-gate-population.test.ts": 0.01,
+      "tests/config/lsp-idle-eviction-measurement.test.ts": 0.01,
+      "tests/config/lsp-idle-eviction-registry.test.ts": 0,
+      "tests/config/pi-lens-config-schema.test.ts": 0.01,
+      "tests/config/sharded-aggregate-failure-policy.test.ts": 0.01,
+      "tests/config/shell-dialect-ownership-sweep.test.ts": 0.36,
+      "tests/config/stryker-nightly-workflow.test.ts": 0.06,
+      "tests/config/sweep-floor-coverage.test.ts": 0.54,
+      "tests/config/targeted-tests-workflow.test.ts": 4.6,
+      "tests/config/test-history-workflow.test.ts": 0.3,
+      "tests/config/timing-sensitive-coverage.test.ts": 0.06,
+      "tests/config/tla-coverage-governance.test.ts": 0.03,
+      "tests/config/tmp-fixture-hygiene.test.ts": 1.79,
+      "tests/config/tool-smoke-notify-gate.test.ts": 0.02,
+      "tests/config/turn-end-lane-boundaries.test.ts": 0.01,
+      "tests/config/unit-tests-shard-workflow.test.ts": 0.03,
+      "tests/config/win32-gate-lane.test.ts": 2.44,
+      "tests/config/windows-vitest-failure-count.test.ts": 0,
+      "tests/config/windows-vitest-workflow.test.ts": 0.02,
+      "tests/config/workflow-pull-request-reachability.test.ts": 0.09,
+      "tests/config/workflow-writers-governance.test.ts": 0.18,
+      "tests/docs/features-counts.test.ts": 0.01,
+      "tests/index-3917-orphan-sweep-scope.test.ts": 0.02,
+      "tests/mcp/analyze-cli.test.ts": 21.96,
+      "tests/packaging-pack-manifest.test.ts": 13.96,
+      "tests/scripts/bundle-dist.test.ts": 0.01,
+      "tests/scripts/changelog-entries.test.ts": 1.84,
+      "tests/scripts/check-action-pins.test.ts": 0.03,
+      "tests/scripts/check-allow-scripts.test.ts": 0.37,
+      "tests/scripts/check-pr-body.test.ts": 6.15,
+      "tests/scripts/check-snapshot-persist-ratio.test.ts": 0.01,
+      "tests/scripts/ci-test-diff.test.ts": 1.17,
+      "tests/scripts/ci-verdict-deferred-advisory.test.ts": 0.01,
+      "tests/scripts/ci-verdict-orchestrator.test.ts": 0.07,
+      "tests/scripts/ci-verdict-rest-transport.test.ts": 0.05,
+      "tests/scripts/ci-verdict.test.ts": 0.36,
+      "tests/scripts/download-test-history-artifacts.test.ts": 0.28,
+      "tests/scripts/exec-isolation.test.ts": 0,
+      "tests/scripts/gen-test-shard-weights.test.ts": 0.01,
+      "tests/scripts/guard-bash-hook.test.ts": 168.73,
+      "tests/scripts/knip-command.test.ts": 0.01,
+      "tests/scripts/lsp-fixture-workspace.test.ts": 0.23,
+      "tests/scripts/lsp-idle-eviction-promote.test.ts": 0.45,
+      "tests/scripts/mutate-fixture.test.ts": 0,
+      "tests/scripts/mutate.test.ts": 27.39,
+      "tests/scripts/mutation-report-render.test.ts": 0.15,
+      "tests/scripts/notify-tool-smoke-red.test.ts": 2.04,
+      "tests/scripts/pr-worktree.test.ts": 2.75,
+      "tests/scripts/pre-commit-hook.test.ts": 0.49,
+      "tests/scripts/pre-push-targeted-tests.test.ts": 32.5,
+      "tests/scripts/process-scan.test.ts": 0.06,
+      "tests/scripts/smoke-tools-lsp-fixture-registration.test.ts": 1.5,
+      "tests/scripts/smoke-tools-resolution.test.ts": 0.24,
+      "tests/scripts/stryker-diff.test.ts": 33.42,
+      "tests/scripts/stryker-nightly.test.ts": 0.58,
+      "tests/scripts/test-history-rollup.test.ts": 0.03,
+      "tests/scripts/test-history-selection.test.ts": 0.01,
+      "tests/scripts/tool-smoke-drift.test.ts": 0.01,
+      "tests/scripts/web-tree-sitter-dir.test.ts": 0.01,
+      "tests/scripts/with-memory-watch.test.ts": 11.99,
+      "tests/scripts/workflow-run-evidence.test.ts": 0.01,
+      "tests/support/require-built-dist.test.ts": 0,
+      "tests/tools/lens-diagnostics-lsp-paths-directories.test.ts": 1.44
+    }
+  },
+  "derived": {
+    "meanFileSeconds": 3.2,
+    "fileOverheadSeconds": 0.5,
+    "p95FileSeconds": 12,
+    "medianFileSeconds": 0.12
+  },
+  "recommended": {
+    "maxDryRunSeconds": 240,
+    "dryRunTimeoutMinutes": 10,
+    "unknownTestSeconds": 12,
+    "testFileOverheadSeconds": 0.5
+  },
+  "cappedReplay": {
+    "description": "The same 122 files through selectMutationTests with the recommended runtime cap, coverage unknown (every file own, hash order), per-file seconds from fileSecondsAtTwoCores; then the kept files run under the same vitest command at taskset -c 0,1.",
+    "keptFiles": 101,
+    "overBudgetFiles": 21,
+    "estimatedSeconds": 240,
+    "cores": 2,
+    "wallSeconds": 243,
+    "sumFileSeconds": 192.3,
+    "strykerDryRun": {
+      "description": "The same 101 kept files through the REAL Stryker --dryRunOnly (disableTypeChecks off), taskset -c 0,1, command runner = the vitest dry-run command; vitest Duration line.",
+      "cores": 2,
+      "wallSeconds": 279.6,
+      "factorOverPlainVitest": 1.15,
+      "note": "one failure: tests/clients/flake-shape-ratchet.test.ts, a baseline row this round raised (8 to 9), unrelated to timing"
+    }
+  },
+  "allUnknownReplay": {
+    "description": "All 122 files as own tests with no probe timing, through selectMutationTests with the recommended cap, over 400 renamed populations (path-hash orders); actual = the measured per-file seconds (fileSecondsAtTwoCores) + overhead of the kept files. Replayed by the test.",
+    "variants": 400,
+    "unknownSeconds": 12,
+    "actualSecondsP50": 44.80000000000001,
+    "actualSecondsP95": 220.51999999999992,
+    "actualSecondsMax": 267.67999999999995,
+    "withMeanUnknown3_2": {
+      "actualSecondsP95": 359.7899999999999,
+      "actualSecondsMax": 383.8799999999998
+    }
+  }
+}

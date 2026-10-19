@@ -45,6 +45,8 @@ interface RegisterOpts {
 	 * Defaults to 0: a bare hit credits the match line only (#1904).
 	 */
 	contextMargin?: number;
+	/** The search's tool call, the provenance a branch move keeps (#3521). */
+	toolCallId?: string;
 }
 
 /**
@@ -121,6 +123,7 @@ export function registerSearchReads(
 			turnIndex: opts.turnIndex,
 			writeIndex: opts.writeIndex,
 			timestamp: Date.now(),
+			...(opts.toolCallId !== undefined && { toolCallId: opts.toolCallId }),
 		});
 		recorded++;
 	}

@@ -48,7 +48,7 @@
  * - The assertion needle is `assert[\w$]*` followed by `.` or `(`, so an
  *   ordinary identifier that happens to start with `assert` — `assertions.`,
  *   `assertCount(` — clears the body without asserting anything.
- * - {@link SKIP_CALL} accepts any receiver outside the it/test/describe/suite
+ * - `hasSkipCall` (sweep-kit) accepts any receiver outside the it/test/describe/suite
  *   blocklist, so an unrelated `queue.skip(3)` reads as a skip call.
  * - An ASI bare `return` with no semicolon is likewise invisible; oxfmt writes
  *   the semicolon, so it cannot survive a formatted commit here.
@@ -60,13 +60,19 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	callbackBodyBrace,
+	hasSkipCall,
+	isFunctionBrace,
+	lineOf,
 	listSourceFiles,
 	matchingCloseIndex,
-	matchingOpenIndex,
+	nextNonSpace,
 	readWalkedFiles,
 	relativePosix,
 	stripSource,
+	testDeclarations,
 } from "./sweep-kit.js";
+import { vitestCollects } from "./vitest-collection.js";
 
 export const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -99,163 +105,6 @@ export function vacuousSkipKey(entry: {
  */
 const ASSERTION = /(?<![\w$.])(?:expect|expectTypeOf|assert[\w$]*)\s*[.(]/;
 
-/** `ctx.skip(...)` / `skip(...)` / `this.skip()`, but never `it.skip(...)`. */
-const SKIP_CALL = /(?<![\w$])(?:([\w$]+)\s*\.\s*)?skip\s*\(/g;
-
-const SKIP_QUALIFIER_BLOCKLIST = new Set(["it", "test", "describe", "suite"]);
-
-/** Modifiers that take their own argument list before the test call. */
-const ARGUMENT_TAKING_MODIFIERS = new Set(["each", "skipIf", "runIf", "for"]);
-
-/** `(`-introducing keywords whose `) {` opens a BLOCK, not a function body. */
-const CONTROL_KEYWORDS = new Set([
-	"if",
-	"for",
-	"while",
-	"switch",
-	"catch",
-	"with",
-]);
-
-/** Bare-brace keywords — `try {`, `else {`, `do {`, `finally {`, `catch {`. */
-const BLOCK_KEYWORDS = new Set(["try", "else", "do", "finally", "catch"]);
-
-function skipBefore(body: string): boolean {
-	SKIP_CALL.lastIndex = 0;
-	for (const match of body.matchAll(SKIP_CALL)) {
-		if (!match[1] || !SKIP_QUALIFIER_BLOCKLIST.has(match[1])) return true;
-	}
-	return false;
-}
-
-function prevNonSpace(source: string, from: number): number {
-	let i = from;
-	while (i >= 0 && /\s/.test(source[i])) i--;
-	return i;
-}
-
-function wordEndingAt(source: string, end: number): string {
-	if (end < 0 || !/[\w$]/.test(source[end])) return "";
-	let start = end;
-	while (start > 0 && /[\w$]/.test(source[start - 1])) start--;
-	return source.slice(start, end + 1);
-}
-
-/**
- * Does the `{` at `index` open a FUNCTION body (as opposed to a block or an
- * object literal)? Decided from the preceding token: `=> {` and `) {` are
- * function bodies unless that `)` closes a control-flow head.
- */
-function isFunctionBrace(source: string, index: number): boolean {
-	const j = prevNonSpace(source, index - 1);
-	if (j < 0) return false;
-	if (source[j] === ">" && source[j - 1] === "=") return true;
-	if (source[j] === ")") {
-		const open = matchingOpenIndex(source, j, "(", ")");
-		if (open < 0) return false;
-		const head = wordEndingAt(source, prevNonSpace(source, open - 1));
-		return !CONTROL_KEYWORDS.has(head);
-	}
-	const word = wordEndingAt(source, j);
-	if (word) return !BLOCK_KEYWORDS.has(word);
-	return false;
-}
-
-/**
- * Walk from an `it`/`test` identifier through its modifier chain to the `(`
- * that opens the TEST call itself — `it(`, `it.only(`, `it.each([...])(`,
- * `it.skipIf(cond)(`, ``it.each`table`(``. Returns -1 when the chain does not
- * end in a call (`it.todo` with no parens, a bare mention).
- */
-function testCallParen(source: string, identifierEnd: number): number {
-	let i = identifierEnd;
-	let lastModifier = "";
-	for (;;) {
-		i = prevNonSpaceForward(source, i);
-		if (i >= source.length) return -1;
-		const ch = source[i];
-		if (ch === ".") {
-			const start = prevNonSpaceForward(source, i + 1);
-			let end = start;
-			while (end < source.length && /[\w$]/.test(source[end])) end++;
-			if (end === start) return -1;
-			lastModifier = source.slice(start, end);
-			i = end;
-			continue;
-		}
-		if (ch === "`" && ARGUMENT_TAKING_MODIFIERS.has(lastModifier)) {
-			const close = source.indexOf("`", i + 1);
-			if (close < 0) return -1;
-			lastModifier = "";
-			i = close + 1;
-			continue;
-		}
-		if (ch === "(") {
-			if (!ARGUMENT_TAKING_MODIFIERS.has(lastModifier)) return i;
-			const close = matchingCloseIndex(source, i, "(", ")");
-			if (close < 0) return -1;
-			lastModifier = "";
-			i = close + 1;
-			continue;
-		}
-		return -1;
-	}
-}
-
-function prevNonSpaceForward(source: string, from: number): number {
-	let i = from;
-	while (i < source.length && /\s/.test(source[i])) i++;
-	return i;
-}
-
-function lineOf(source: string, index: number): number {
-	let line = 1;
-	for (let i = 0; i < index; i++) if (source[i] === "\n") line++;
-	return line;
-}
-
-/**
- * The test's name: the first argument, sliced out of the RAW source.
- * `stripSource` preserves every index, so the delimiters found in the stripped
- * text address the same characters in the original.
- */
-function testNameAt(raw: string, stripped: string, callParen: number): string {
-	const start = prevNonSpaceForward(stripped, callParen + 1);
-	const quote = stripped[start];
-	if (quote !== '"' && quote !== "'" && quote !== "`") return "";
-	const close = stripped.indexOf(quote, start + 1);
-	if (close < 0) return "";
-	return raw.slice(start + 1, close);
-}
-
-const TEST_IDENTIFIER = /(?<![\w$.])(?:it|test)(?![\w$])/g;
-
-/**
- * Index of the `{` opening the test's callback body, or -1 when the call has
- * no inline callback (an extracted handler, a concise arrow body). Nested
- * groups are skipped whole so that a brace inside an options object or an
- * `each` table cannot be mistaken for the body.
- */
-function callbackBodyBrace(
-	stripped: string,
-	callParen: number,
-	callEnd: number,
-): number {
-	for (let i = callParen + 1; i < callEnd; i++) {
-		const ch = stripped[i];
-		if (ch === "(" || ch === "[") {
-			i = matchingCloseIndex(stripped, i, ch, ch === "(" ? ")" : "]");
-			if (i < 0) return -1;
-			continue;
-		}
-		if (ch !== "{") continue;
-		if (isFunctionBrace(stripped, i)) return i;
-		i = matchingCloseIndex(stripped, i, "{", "}");
-		if (i < 0) return -1;
-	}
-	return -1;
-}
-
 /** Every vacuous early return in one file's source text. */
 export function scanVacuousSkipsInSource(
 	file: string,
@@ -263,12 +112,11 @@ export function scanVacuousSkipsInSource(
 ): VacuousSkip[] {
 	const stripped = stripSource(raw, { strings: "blank" });
 	const found: VacuousSkip[] = [];
-	TEST_IDENTIFIER.lastIndex = 0;
-	for (const match of stripped.matchAll(TEST_IDENTIFIER)) {
-		const callParen = testCallParen(stripped, match.index + match[0].length);
-		if (callParen < 0) continue;
-		const callEnd = matchingCloseIndex(stripped, callParen, "(", ")");
-		if (callEnd < 0) continue;
+	// Every `it`/`test` call, live or not: a skipped test's early return is
+	// the same shape, and the walk is the shared one (#4393).
+	for (const declaration of testDeclarations(raw, stripped)) {
+		if (declaration.callee !== "it" && declaration.callee !== "test") continue;
+		const { callParen, callEnd } = declaration;
 		const bodyOpen = callbackBodyBrace(stripped, callParen, callEnd);
 		if (bodyOpen < 0) continue;
 		const bodyClose = matchingCloseIndex(stripped, bodyOpen, "{", "}");
@@ -278,7 +126,7 @@ export function scanVacuousSkipsInSource(
 		found.push({
 			file,
 			line: lineOf(stripped, hit),
-			testName: testNameAt(raw, stripped, callParen),
+			testName: declaration.title,
 		});
 	}
 	return found;
@@ -311,7 +159,7 @@ function firstVacuousReturn(
 		}
 		if (functionDepth > 0 || !isBareReturnAt(stripped, i)) continue;
 		const before = stripped.slice(bodyOpen + 1, i);
-		return ASSERTION.test(before) || skipBefore(before) ? -1 : i;
+		return ASSERTION.test(before) || hasSkipCall(before) ? -1 : i;
 	}
 	return -1;
 }
@@ -321,20 +169,21 @@ function isBareReturnAt(stripped: string, i: number): boolean {
 	if (stripped[i] !== "r" || stripped.slice(i, i + 6) !== "return")
 		return false;
 	if (i > 0 && /[\w$.]/.test(stripped[i - 1])) return false;
-	const after = prevNonSpaceForward(stripped, i + 6);
+	const after = nextNonSpace(stripped, i + 6);
 	return stripped[after] === ";" || stripped[after] === "}";
 }
 
 /**
- * Every `*.test.ts` under `tests/`, minus the fixture tree — vitest treats
- * `tests/fixtures` as INPUT to tests rather than as tests, and its contents are
- * deliberately shaped like the code under test.
+ * Every file under `tests/` that vitest's own config collects
+ * ({@link vitestCollects}). The walk prunes `fixtures/` only for speed:
+ * vitest treats that tree as INPUT to tests, and the config, not this prune,
+ * decides membership.
  */
 export function listTestFiles(): string[] {
 	return listSourceFiles(path.join(repoRoot, "tests"), {
 		extensions: [".ts"],
 		exclude: (relative) => relative.startsWith("fixtures/"),
-	}).filter((file) => file.endsWith(".test.ts"));
+	}).filter((file) => vitestCollects(relativePosix(repoRoot, file)));
 }
 
 /** Scan the whole `tests/` tree for tests that pass by returning early.

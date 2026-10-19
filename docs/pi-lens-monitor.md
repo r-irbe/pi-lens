@@ -4,10 +4,39 @@ Read a LIVE pi-lens session's logs and report what the numbers say, so the
 maintainer does not have to. The monitor observes; it never edits code,
 never restarts anything, and never touches the session it is reading.
 
-Read first: `AGENTS.md` (the "Recurring defect shapes" catalog, especially
-shape 41: a fixed bound reached at p50 is a design defect), then
-`docs/pi-lens-investigator.md` for the forensics conventions this role
-inherits. This contract adds the standing readout.
+Read first: the engineering principles (`docs/engineering-principles.md`),
+then `AGENTS.md` (the "Recurring defect shapes" catalog, especially shape 41:
+a fixed bound reached at p50 is a design defect), then
+`docs/pi-lens-subagent.md` and `docs/pi-lens-investigator.md` for the
+forensics conventions this role inherits. This contract adds the standing
+readout.
+
+## Memory samples
+
+memory_sample records include bounded attribution fields for diagnosing host
+memory growth:
+
+- process.heapUsedBytes is the reading at sample time;
+  process.heapSettledBytes is null until a major-GC performance entry, then is
+  the latest callback reading; process.heapSettledMajorGcCount makes its age
+  visible.
+- process.externalNonBufferBytes is externalBytes - arrayBuffersBytes.
+- subsystems.persistWorkers.reviewGraph and
+  subsystems.persistWorkers.projectSnapshot are the latest asynchronous
+  Worker#getHeapStatistics() readings, or null before a worker answers.
+- subsystems.treeSitter.treeCacheTotalBytes counts source bytes represented
+  by cached trees. Native/WASM growth is attributed by
+  process.externalNonBufferBytes; no tree-count estimate is emitted.
+- subsystems.wordIndex.wireBytes is the UTF-8 length of the word index's JSON,
+  taken natively while the snapshot persist encodes the body, and is null
+  until that index's current serialized form is persisted, and again once the
+  serialized form is released at `agent_settled` (the `word_index_memo_released`
+  row in latency.log records the release and its trigger).
+- samplerDurationMs measures the sampler's own record-assembly wall time,
+  excluding the surrounding turn.
+
+All fields are in the existing record and are O(1) reads or latest-value
+snapshots; no additional telemetry sink is created.
 
 ## Inputs
 
@@ -49,7 +78,49 @@ inherits. This contract adds the standing readout.
 6. **Backlogs**: `lsp_document_drift` rows by disposition, files affected,
    `driftAgeMs` p50/p95/max; `agent_end_deferred_mutation_drain` durations and
    coalesced path counts; `deferred_format_file` runs with `changed:true`
-   versus total.
+   versus total. A formatter that never settles is visible only as an
+   anti-join (#3828): a `deferred_format_post_exit_resync` row with
+   `outcome:"abandoned"` (beside the `hook-await-exceeded` degradation
+   `off_hook:deferred-format-post-exit-resync`) and no
+   `deferred_format_late_resync` row on the same `filePath` afterwards. Report
+   the count of such files. A late row names what happened to the file
+   (#3828 r3): `resynced` is the healthy end of the chain; `unheld`,
+   `no-service` and `vanished` had nothing to sync; `deferred` is still queued
+   for the next drift pass; `failed` did not land. The in-band
+   (`--immediate-format`) caller writes the same rows as `inband_format_late_resync`
+   (#3858) with the same outcomes. Both callers write one
+   `format_late_resync_chained` row (`metadata.which`: `inband` or `deferred`)
+   when the give-up chains the late resync (#3873), so a give-up is countable by
+   `filePath` even for a formatter that never settles or an Escape; a chained
+   file with no later `*_format_late_resync` row on the same `filePath` is the
+   anti-join to report.
+   **Session decisions** (#3873; each row is one lifecycle event, none is per
+   occurrence in a loop): `session_handoff_slot` (`op`: `stashed`, `replaced`,
+   `taken`, `key-mismatch-left` (once per stale slot), `forwarded`,
+   `unconsumed-at-exit`; `by`,
+   `reason`, `keyHash`, `storeNames`, `ageMs`), `session_handoff_adopt` (one
+   per primary start: `tried[]` with `source`, `found`, `version`, `ageMs`,
+   `storeNames`, and `chosen`), `session_store_action` (one per declared store
+   per primary start: `action` `adopt`/`reset`/`skip`, `payloadPresent`,
+   `itemsIn`/`itemsKept`/`itemsDropped`), `session_scope_transition` with the
+   `end` (a scope superseded without a shutdown) and `demote` (a start in a
+   replacement gap that is not the successor the shutdown named: a subagent
+   that binds in the gap is one, a real successor an interrupting reload
+   displaced is another; a subagent beside a live primary writes none)
+   transitions,
+   `session_end_fence_rollup` (one per primary shutdown: `sources[]` with
+   `guarded` and `dropped`, plus totals), `lsp_created_import_scan_rollup`
+   (one per primary shutdown when the created-module producer ran: `calls`,
+   `importers`, `targets`, `capped`, `oversized`, `totalMs`, `maxMs`). Read `read_guard_branch_retained` with
+   `payloadReads`: `kept 0, dropped 0` is a missing payload when `payloadReads`
+   is `null`, an empty read set at `0`, and an ignored payload when it is above
+   0 beside a `payloadVersion` that is not the current one.
+   `session_start_total` carries `basis`, `gapMs` and `lineageMatch`;
+   `agent_nudge` carries `fileKeys` (hash8), `originSessionIds`, `scopeId` and
+   `queueEpoch`, so one touch delivered in three drains is three epochs;
+   a no-client `lsp_touch_file` carries `candidates[]` (`serverId`, `rooted`,
+   `clientFound`, `generation`) for the file's primary servers only, 8 at most;
+   an auxiliary server is listed only in `clientScope: "all"` touches, the one scope that resolves its root (the with-auxiliary scope reports it in `auxiliary_readiness`).
 7. **Timeouts**: `lsp_diagnostics_timeout`, `lsp_nav_request_timeout`,
    `lsp_client_wait_timeout` counts with `serverIds`/`source`.
 8. **Delta**: for each of the above, the change since the previous readout,
@@ -69,8 +140,7 @@ inherits. This contract adds the standing readout.
 
 - Premise first: before naming a constant or a seam, read the code that owns
   it (`clients/lsp/index.ts`, `clients/pipeline.ts`, `clients/runtime-agent-end.ts`,
-  `clients/lsp/document-drift.ts`). The 2026-09-09 readout mis-named a
-  suppression window as a trailing debounce; the correction cost a round.
+  `clients/lsp/document-drift.ts`).
 - Bounded output: the readout is one comment or one file. Never one line per
   row of the log. Quote at most three raw rows, each cut at 300 characters.
 - No repo edits, no Git commands, no restarts, no writes under `~/.pi-lens`.

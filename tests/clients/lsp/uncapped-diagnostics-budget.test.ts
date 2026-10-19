@@ -62,6 +62,7 @@ function makeServer(id: string, ext: string) {
 		id,
 		name: id,
 		extensions: [ext],
+		idleEviction: "resident",
 		root: async () => ROOT,
 		spawn: vi.fn(async () => ({ process: makeFakeProcess(), source: "test" })),
 	};
@@ -95,6 +96,7 @@ function makeSilentClient(serverId: string, budgets: number[]) {
 		getAllDiagnostics: vi.fn(() => new Map()),
 		getDiagnosticBinding: vi.fn(() => undefined),
 		notify: {
+			announceCreated: () => undefined,
 			open: vi.fn(async () => {}),
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),

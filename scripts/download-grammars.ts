@@ -55,6 +55,11 @@ export const SOURCE_OVERRIDES: Record<string, SourceOverride> = {
 		version: "0.7.1",
 		url: "https://unpkg.com/@tree-sitter-grammars/tree-sitter-yaml@0.7.1/tree-sitter-yaml.wasm",
 	},
+	"tree-sitter-bash.wasm": {
+		package: "tree-sitter-bash",
+		version: "0.25.1",
+		url: "https://unpkg.com/tree-sitter-bash@0.25.1/tree-sitter-bash.wasm",
+	},
 };
 
 /**

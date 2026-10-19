@@ -7,18 +7,23 @@
  * - Config file finders
  */
 
+import { emitBounded } from "../../../bounded-telemetry.js";
+import { resolveAnalysisRootPath } from "../../../analysis-root.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { delimiter, resolve as resolveCommandPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { logSessionStart } from "../../../sessionstart-logger.js";
 import { incrementDegradationCount } from "../../../degradation-ledger.js";
 import { getGlobalPiLensDir } from "../../../file-utils.js";
+import { getProjectTrustState } from "../../../project-trust.js";
 import {
 	createGenerationSource,
 	type GenerationHandle,
 } from "../../../generation-guard.js";
 import { PathKeyedMap } from "../../../path-keyed-map.js";
 import {
+	isUnderDir,
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 } from "../../../path-utils.js";
@@ -32,27 +37,38 @@ import {
 	resetPathWalkMemo,
 	type InstallAttempt,
 } from "../../../installer/index.js";
-import {
-	getServersForFileWithConfig,
-	isServerDisabled,
-} from "../../../lsp/config.js";
+import { getServersForFileWithConfig } from "../../../lsp/config.js";
+// The covers-fact LEAF, not the server registry: importing clients/lsp/server.js
+// here closes a dependency cycle through the installer's graph
+// (`no-client-cycles`, dependency-cruiser #2125).
+import { BUILTIN_SERVER_RUNNER_COVERS } from "../../../lsp/server-covers.js";
+// Also a leaf: the role vocabulary imports nothing, so the ONE auxiliary
+// predicate (#1488) costs this file no edge into the registry graph.
+import { isAuxiliary } from "../../../lsp/server-traits.js";
 import {
 	findGlobalBinary,
 	findLocalBinAt,
 	findLocalBinsUpwards,
 	findLocalBinUpwards,
+	localBinPath,
 	VENDOR_BIN_DIRS,
 	VENV_BIN_DIRS,
 } from "../../../package-manager.js";
 import { logLatency } from "../../../latency-logger.js";
-import { safeSpawnAsync } from "../../../safe-spawn.js";
-import { probeToolAsync } from "../../../tool-probe.js";
+import {
+	safeSpawnAsync,
+	resolveWindowsCommandForEnvironment,
+} from "../../../safe-spawn.js";
+import {
+	getIsolatedNpxSpawnOptions,
+	probeToolAsync,
+} from "../../../tool-probe.js";
 import { compareOrdinal } from "../../../string-utils.js";
 import {
 	getToolCommandSpec,
 	shouldAutoInstallTool,
 } from "../../../tool-policy.js";
-import type { DispatchContext } from "../../types.js";
+import type { DispatchContext, RunnerClaimSource } from "../../types.js";
 import { isInSpawnTimeoutCooldown } from "../../../spawn-timeout-cooldown.js";
 import { resolveToolCwd } from "../../../tool-cwd.js";
 import { createAvailabilityProbeFlight } from "../../../availability-probe-flight.js";
@@ -89,27 +105,115 @@ export {
 } from "./availability-policy.js";
 
 /**
- * True when the LSP runner will cover `ctx.filePath` via the given PRIMARY server
- * id. Used by CLI runners that duplicate a linter a warm LSP already wraps
- * (taplo↔`toml` LSP = `taplo lsp`; shellcheck↔`bash` LSP runs shellcheck
- * internally) so they SELF-SKIP and stop double-reporting the same findings (#233)
- * — the same dormant-when-LSP-covers pattern the ast-grep napi runner uses.
+ * The covering lane a runner should defer to: the file's SELECTED PRIMARY
+ * server claims one of its declared runner capabilities, with the gate
+ * commands the caller must probe (`DispatchContext.hasTool`) before honoring
+ * the fact — a covering lane that cannot run never defers, so coverage never
+ * regresses.
+ */
+export interface PrimaryRunnerCoverage {
+	/** The covering server's id (the file's selected primary). */
+	serverId: string;
+	/**
+	 * Probeable commands gating the covering lane. A builtin fact gates on
+	 * the fact's own commands; a CUSTOM row's declared claim gates on that
+	 * row's own command (projected from `CustomServerConfig.command`),
+	 * symmetric with the builtin facts — an absent custom binary means the
+	 * claim is not honored and the CLI runner runs, so coverage never
+	 * silently drops to a config typo (#3968 F2). A builtin-shaped row whose
+	 * claim comes only from a config-declared `covers` (never produced by the
+	 * real pipeline) carries none.
+	 */
+	gateCommands: readonly string[];
+	/**
+	 * Which fact source supplied the claim — row provenance, never an id
+	 * lookup (#3968 F2). The runners stamp it on the skip so the durable
+	 * latency row shows who claimed (`covered-by-primary` + `claimSource`).
+	 */
+	claimSource: RunnerClaimSource;
+}
+
+/**
+ * The capability question behind the #233 self-skip: does the file's selected
+ * PRIMARY LSP server subsume `runnerId` (a dispatch runner id — the RUNNER
+ * capability, never a server id)? Used by CLI runners that duplicate a linter
+ * a warm LSP already wraps (shcheck → the `bash`/`shuck` LSPs embed
+ * shellcheck; taplo CLI → the `toml` LSP embeds the taplo linter) so they
+ * SELF-SKIP and stop double-reporting the same findings.
  *
- * Non-spawning and conservative: honors the `no-lsp` kill switch + per-server
- * disable/config, and only matches when this server is the SELECTED primary for
- * the file (first non-auxiliary candidate). The caller additionally gates on tool
- * availability, so coverage never regresses when the LSP is absent/disabled.
+ * The claim has two sources, read in one place: the server row's own
+ * `covers` field (config-declared, the stacked PR's channel) and the builtin
+ * facts table `BUILTIN_SERVER_RUNNER_COVERS` (clients/lsp/server-covers.ts —
+ * the importable leaf, not the registry), which additionally carries the
+ * availability gate commands. Callers gate with `coveringLaneAvailable` so a
+ * missing covering lane never skips.
+ *
+ * The old spelling — `lspPrimaryCoversFile(ctx, "bash")`, a literal SERVER id
+ * at a call site asking about a RUNNER's capability — was #3968's defect: a
+ * custom/covers-capable shell LSP could not defer the runner (the zdot
+ * workaround needed `disabledServers: ["bash"]` to make `bash` NOT the
+ * primary). Non-spawning and conservative: honors the `no-lsp` kill switch;
+ * the primary itself is availability-independent BY SELECTION (disabled
+ * servers never select), and availability gate work happens in
+ * `coveringLaneAvailable`.
  */
 export function lspPrimaryCoversFile(
 	ctx: DispatchContext,
-	serverId: string,
-): boolean {
-	if (ctx.pi?.getFlag?.("no-lsp")) return false;
-	if (isServerDisabled(serverId, ctx.filePath)) return false;
+	runnerId: string,
+): PrimaryRunnerCoverage | undefined {
+	if (ctx.pi?.getFlag?.("no-lsp")) return undefined;
 	const primary = getServersForFileWithConfig(ctx.filePath).find(
-		(s) => s.role !== "auxiliary",
+		(s) => !isAuxiliary(s),
 	);
-	return primary?.id === serverId;
+	if (!primary) return undefined;
+	// Claim provenance is resolved by ROW provenance, never by id lookup
+	// (#3968 F2): a custom row (`lsp.servers.<id>`) shares its id's namespace
+	// with the builtin table, so an id-keyed fact lookup would inherit a
+	// claim the declared server never made — a `lsp.servers.bash` overlay is
+	// NOT the builtin bash server, and its bare registration must never
+	// suppress the CLI runner. eab4bcc12 dropped the false claim; this also
+	// scopes the GATE, which that round left ungated (a custom row's declared
+	// skip carried no probe at all).
+	const fact = primary.custom
+		? undefined
+		: BUILTIN_SERVER_RUNNER_COVERS.get(primary.id);
+	const covers = primary.covers ?? fact?.runnerIds;
+	if (!covers?.includes(runnerId)) return undefined;
+	// The gate follows the claim's source. A builtin fact probes the fact's
+	// commands; a custom claim probes the covering lane's own binary — the
+	// same shape `launchLSP` resolves, `command` being the binary token with
+	// args a separate field. A custom row whose command projection is absent
+	// (an older released writer's shape) cannot name a gate binary, so the
+	// claim is not honored at all: fail closed to the CLI runner.
+	const gateCommands = fact
+		? fact.gateCommands
+		: primary.custom
+			? primary.command
+				? [primary.command]
+				: undefined
+			: [];
+	if (gateCommands === undefined) return undefined;
+	return {
+		serverId: primary.id,
+		gateCommands,
+		claimSource: fact ? "builtin-fact" : "declared",
+	};
+}
+
+/**
+ * The availability half of the seam: every gate command the covering fact
+ * names must probe present (`ctx.hasTool`), else the runner must NOT skip —
+ * coverage never regresses (#3968's "when the covering lane is absent, no
+ * skip").
+ */
+export async function coveringLaneAvailable(
+	ctx: DispatchContext,
+	cover: PrimaryRunnerCoverage,
+): Promise<boolean> {
+	for (const gate of cover.gateCommands) {
+		if (!(await ctx.hasTool(gate))) return false;
+	}
+	return true;
 }
 
 const _realThisDir = (() => {
@@ -367,6 +471,83 @@ async function findManagedReleaseBinary(
 	return verdict === "ok" || verdict === "unverified" ? candidate : null;
 }
 
+/**
+ * #4309: resolve every adopted-runner binary before any probe or spawn.
+ * PATH entries are interpreted at the runner cwd and the chosen absolute path
+ * is retained, so a relative PATH cannot select a different executable later.
+ * Managed shims and symlinks obey the same adopted/session containment rule.
+ */
+export function resolveAdoptedRootCommand(
+	command: string,
+	ctx: DispatchContext,
+	cwd: string,
+): string | null {
+	// Neither admitted command has a release installer; use the managed shim
+	// candidates and PATH without probing either before containment.
+	const candidates = managedNodeToolCandidates(command);
+	let selected = candidates.find(
+		(candidate) => candidate && fs.existsSync(candidate),
+	);
+	if (!selected) {
+		if (process.platform === "win32") {
+			selected = resolveWindowsCommandForEnvironment(
+				command,
+				cwd,
+				process.env,
+			)?.resolvedPath;
+		} else {
+			selected = (process.env.PATH ?? "")
+				.split(delimiter)
+				.map((dir) => resolveCommandPath(cwd, dir, command))
+				.find((candidate) => {
+					try {
+						fs.accessSync(candidate, fs.constants.X_OK);
+						return fs.statSync(candidate).isFile();
+					} catch {
+						return false;
+					}
+				});
+		}
+	}
+	if (!selected) return null;
+	try {
+		const binary = fs.realpathSync.native(selected);
+		const session = ctx.projectRoot ?? ctx.cwd;
+		const adopted = resolveAnalysisRootPath(ctx.filePath, session);
+		if (!adopted) return null;
+		const roots = [adopted, session].map((root) =>
+			fs.realpathSync.native(root),
+		);
+		if (
+			roots.some(
+				(root) =>
+					binary === root ||
+					isUnderDir(binary, root) ||
+					isUnderDir(selected, root),
+			)
+		) {
+			emitBounded(
+				"adopted_root_binary_refused",
+				`${ctx.filePath}:${command}:${binary}`,
+				{
+					filePath: ctx.filePath,
+					durationMs: 0,
+					metadata: { command, binary },
+				},
+				{
+					ledgerKind: "adopted-root-binary-refused",
+					risingEdgePer: "identity",
+				},
+			);
+			return null;
+		}
+		return binary;
+	} catch {
+		// An unreadable identity cannot prove that executing it is safe.
+		return null;
+	}
+}
+
 // =============================================================================
 // VENV-AWARE COMMAND FINDER
 // =============================================================================
@@ -398,13 +579,23 @@ export function createVenvFinder(
 	command: string,
 	windowsExt = "",
 	verificationArgs: string[] = ["--version"],
-): (cwd: string) => Promise<string> {
-	return async (cwd: string): Promise<string> => {
-		const venvBin = findLocalBinAt(command, cwd, {
-			windowsExt,
-			binDirs: VENV_BIN_DIRS,
-		});
-		if (venvBin) return venvBin;
+	/**
+	 * Adopted-root policy (#4242): when `false`, the project-local `.venv` rung is
+	 * skipped entirely, so a project-local interpreter is neither probed nor run.
+	 * The default (`true`) preserves every session-root caller unchanged.
+	 */
+	allowProjectLocal = true,
+): (cwd: string) => Promise<VenvResolution> {
+	return async (cwd: string): Promise<VenvResolution> => {
+		if (allowProjectLocal) {
+			const venvBin = localBinPath(
+				findLocalBinAt(command, cwd, {
+					windowsExt,
+					binDirs: VENV_BIN_DIRS,
+				}),
+			);
+			if (venvBin) return { path: venvBin, rung: "venv" };
+		}
 
 		// Managed-dir install (~/.pi-lens/tools/node_modules/.bin/<command>) — the
 		// same shim `ensureTool()` installs npm-strategy tools into. Checked BEFORE
@@ -417,16 +608,16 @@ export function createVenvFinder(
 		// session, so a shim that cannot run falls through to PATH instead of
 		// shadowing a working binary (#1657).
 		const managed = await findManagedNodeToolBinary(command, verificationArgs);
-		if (managed) return managed;
+		if (managed) return { path: managed, rung: "managed-dir" };
 
 		// Release-managed install (`~/.pi-lens/bin/<command>`) — where `ensureTool`
 		// puts every github/maven/archive-strategy tool. Same rung, same reason as
 		// the npm shim above, for the other half of the managed families (#2140).
 		const release = await findManagedReleaseBinary(command, verificationArgs);
-		if (release) return release;
+		if (release) return { path: release, rung: "managed-release" };
 
 		// Fall back to global
-		return command;
+		return { path: command, rung: "path" };
 	};
 }
 
@@ -484,6 +675,11 @@ export interface AvailabilityCheckerOptions {
 	environment?: (cwd: string) => Promise<NodeJS.ProcessEnv>;
 	/** Compatibility for legacy probes whose test doubles carry no failure kind. */
 	unclassifiedFailureOutcome?: AvailabilityOutcome;
+	/**
+	 * Adopted-root policy (#4242): `false` resolves only managed or PATH binaries,
+	 * never a project-local `.venv` one. Omitted keeps the session default.
+	 */
+	allowProjectLocal?: boolean;
 }
 
 /**
@@ -505,6 +701,11 @@ export async function getManagedToolEnvironment(
 		env = { ...process.env };
 	}
 	if (!cwd) return env;
+	// A project-local bin dir on PATH can execute the project's own shim for the
+	// managed tool's dependencies, so it carries the same trust gate as the
+	// direct lookups (#4268). Global and managed tools still run; only the path
+	// augmentation that reaches INTO the project is withheld.
+	if (getProjectTrustState() !== "trusted") return env;
 	const separator = process.platform === "win32" ? ";" : ":";
 	const currentPath = env.PATH || env.Path || process.env.PATH || "";
 	const localBin = path.join(cwd, "node_modules", ".bin");
@@ -742,41 +943,38 @@ function sourceTagForToolId(toolId: string): ProbeEvidence["source"] {
 	}
 }
 
+/** Which rung in `createVenvFinder` supplied the command for this probe. */
+type VenvResolution = {
+	path: string;
+	rung: "venv" | "managed-dir" | "managed-release" | "path";
+};
+
 /**
- * `binary`/`source` for a probe that resolved through one of pi-lens's OWN
- * managed installs rather than through PATH or a project venv (#2140). A reader
- * of latency.log could otherwise not tell the two apart, and the whole point of
- * the fix is that the managed directories now answer where PATH used to miss.
- *
- * BOTH managed rungs are asked, in the order `createVenvFinder` walks them
- * (#2140 review F1). The first version asked only about the release directory,
- * so every npm-shim hit — knip, jscpd, madge, pyright, biome, htmlhint,
- * stylelint — logged an evidence-free row indistinguishable from a PATH hit,
- * while the doc claimed the opposite. Each rung is asked of THE function that
- * produced its own paths (`managedNodeToolCandidates`, `findManagedToolBinary`)
- * and settled by string identity, never by a path-prefix predicate over a
- * directory: a second opinion about which paths are managed is exactly the
- * parallel-list drift `sourceTagForToolId` exists to avoid, and it would answer
- * differently for case or separator variants.
+ * Add managed-binary evidence from the exact rung that resolved the command
+ * (#2140, #2660). Re-checking the installer here repeated the resolution and
+ * could disagree with the answer the probe actually launched.
  *
  * `binary` present IS the managed hit; `source` names the family whenever the
  * command is a registry id (`sourceTagForToolId` reads the registry's own
  * `installStrategy`). A managed shim whose COMMAND is not itself a registry id
  * — `markdownlint-cli2`, installed under registry id `markdownlint` — carries
- * `binary` alone rather than a guessed family. `binary` is a BASENAME, never
- * the absolute path — same rule as every other evidence field (#1568 review).
+ * `binary` alone rather than a guessed family. Venv and PATH answers have no
+ * managed-binary evidence. `binary` is a BASENAME, never an absolute path
+ * (#1568 review).
  */
-async function describeManagedResolution(
+function describeManagedResolution(
 	tool: string,
-	resolved: string,
-): Promise<ProbeEvidence> {
-	const managed =
-		managedNodeToolCandidates(tool).includes(resolved) ||
-		(await findManagedToolBinary(tool)) === resolved;
-	if (!managed) return {};
+	resolution: VenvResolution,
+): ProbeEvidence {
+	if (
+		resolution.rung !== "managed-dir" &&
+		resolution.rung !== "managed-release"
+	) {
+		return {};
+	}
 	const source = sourceTagForToolId(tool);
 	return {
-		binary: path.basename(resolved),
+		binary: path.basename(resolution.path),
 		...(source !== undefined && { source }),
 	};
 }
@@ -956,7 +1154,12 @@ export function createAvailabilityChecker(
 	let checkerGeneration = availabilityGeneration.current();
 	let checkerFlightGeneration = 0;
 
-	const findCommand = createVenvFinder(command, windowsExt, versionArgs);
+	const findCommand = createVenvFinder(
+		command,
+		windowsExt,
+		versionArgs,
+		options.allowProjectLocal !== false,
+	);
 
 	function ensureCurrentGeneration(): void {
 		if (checkerGeneration === availabilityGeneration.current()) return;
@@ -1141,7 +1344,8 @@ export function createAvailabilityChecker(
 			// `durationMs` would instead charge the probe budget for work that
 			// budget does not govern, so the two spans are reported side by side.
 			const resolveStartedAt = Date.now();
-			const cmd = await findCommand(resolvedCwd);
+			const resolution = await findCommand(resolvedCwd);
+			const cmd = resolution.path;
 			const resolveMs = Date.now() - resolveStartedAt;
 			// #1995: a command cooling down after a RUNTIME timeout (lint or
 			// autofix lane blew its real budget) must not re-probe on every
@@ -1209,7 +1413,7 @@ export function createAvailabilityChecker(
 					classifiedBy: probeJoined ? "joined" : "probe",
 					evidence: {
 						...describeProbeEvidence(result),
-						...(await describeManagedResolution(command, cmd)),
+						...describeManagedResolution(command, resolution),
 						resolveMs,
 					},
 				});
@@ -1522,10 +1726,13 @@ export function resolveNodeToolCommand(
 	toolName: string,
 	windowsExt = ".cmd",
 ): string {
-	const isWin = process.platform === "win32";
-	const binName = isWin ? `${toolName}${windowsExt}` : toolName;
-	const local = path.join(cwd, "node_modules", ".bin", binName);
-	if (fs.existsSync(local)) return local;
+	// THE shared construction seam (#4268 HIGH-1): this used to build
+	// `<cwd>/node_modules/.bin/<tool>` itself and return it under ANY trust
+	// state, so every runner reaching it executed the project's shim. Routing
+	// through the trust-gated lookup means an untrusted project falls through to
+	// the bare name (a global/PATH binary), never the project's own.
+	const local = localBinPath(findLocalBinAt(toolName, cwd, { windowsExt }));
+	if (local) return local;
 	return toolName;
 }
 
@@ -1550,10 +1757,12 @@ export function resolveVendorToolCommand(
 	windowsExt = ".bat",
 ): string | null {
 	return (
-		findLocalBinUpwards(toolName, cwd, {
-			windowsExt,
-			binDirs: VENDOR_BIN_DIRS,
-		}) ?? null
+		localBinPath(
+			findLocalBinUpwards(toolName, cwd, {
+				windowsExt,
+				binDirs: VENDOR_BIN_DIRS,
+			}),
+		) ?? null
 	);
 }
 
@@ -1824,9 +2033,15 @@ async function probeAstGrepCommandAsync(
 	let check: Awaited<ReturnType<typeof safeSpawnAsync>>;
 	let hostStallMs: number;
 	try {
-		check = await probeToolAsync(cmd, [...argsPrefix, "--version"], {
-			timeout: 5000,
-		});
+		check =
+			cmd === "npx"
+				? await safeSpawnAsync(cmd, [...argsPrefix, "--version"], {
+						...getIsolatedNpxSpawnOptions(),
+						timeout: 5000,
+					})
+				: await probeToolAsync(cmd, [...argsPrefix, "--version"], {
+						timeout: 5000,
+					});
 	} finally {
 		hostStallMs = sampler.stop();
 		sgSweepHostStallMs += hostStallMs;
@@ -1905,12 +2120,20 @@ function buildSgLocalBins(): SgLocalBinCandidate[] {
 			binaryCandidates,
 			_thisDir,
 			ownInstallWalkOptions,
-		).map((binPath) => ({ path: binPath, source: "own-install" as const })),
+		).flatMap((binPath): SgLocalBinCandidate[] =>
+			typeof binPath === "string"
+				? [{ path: binPath, source: "own-install" as const }]
+				: [],
+		),
 		...findLocalBinsUpwards(
 			binaryCandidates,
 			process.cwd(),
 			projectWalkOptions,
-		).map((binPath) => ({ path: binPath, source: "project" as const })),
+		).flatMap((binPath): SgLocalBinCandidate[] =>
+			typeof binPath === "string"
+				? [{ path: binPath, source: "project" as const }]
+				: [],
+		),
 	];
 	for (const candidate of binaryCandidates) {
 		const managedBin = path.join(
@@ -1985,10 +2208,19 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 			}
 		}
 
-		// 3. npx --no (cache-only, no silent download).
-		if (await probeAstGrepCommandAsync("npx", ["--no", "--", "ast-grep"])) {
+		// 3. npx --no (cache-only, no silent download). Name the package explicitly
+		// because the executable name alone resolves the unrelated ast-grep package.
+		if (
+			await probeAstGrepCommandAsync("npx", [
+				"--no",
+				"--package",
+				"@ast-grep/cli",
+				"--",
+				"ast-grep",
+			])
+		) {
 			sgCmd = "npx";
-			sgCmdArgs = ["--no", "--", "ast-grep"];
+			sgCmdArgs = ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"];
 			noteSgAvailable(startedAt, { source: "npx" });
 			return true;
 		}
@@ -2126,7 +2358,9 @@ export function getSgCommand(): { cmd: string; args: string[] } {
 	ensureCurrentSgGeneration();
 	return {
 		cmd: sgCmd ?? "npx",
-		args: sgCmdArgs.length ? sgCmdArgs : ["--no", "--", "ast-grep"],
+		args: sgCmdArgs.length
+			? sgCmdArgs
+			: ["--no", "--package", "@ast-grep/cli", "--", "ast-grep"],
 	};
 }
 
@@ -2149,12 +2383,10 @@ export async function resolveLocalFirstAsync(
 	cwd: string,
 	windowsExt = ".cmd",
 ): Promise<{ cmd: string; args: string[] }> {
-	const isWin = process.platform === "win32";
-	const binName = isWin ? `${toolName}${windowsExt}` : toolName;
-
-	// 1. Local node_modules/.bin (project-installed)
-	const local = path.join(cwd, "node_modules", ".bin", binName);
-	if (fs.existsSync(local)) return { cmd: local, args: [] };
+	// 1. Local node_modules/.bin (project-installed) — through the trust-gated
+	//    shared lookup, never a private join (#4268 HIGH-1).
+	const local = localBinPath(findLocalBinAt(toolName, cwd, { windowsExt }));
+	if (local) return { cmd: local, args: [] };
 
 	// 2. Global bin dir of ANY installed manager (npm/pnpm/yarn/bun) — direct
 	//    file lookup, so it finds tools installed via `pnpm add -g` / `bun add -g`

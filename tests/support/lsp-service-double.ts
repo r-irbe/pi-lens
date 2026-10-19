@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { LSPService } from "../../clients/lsp/index.js";
+import type { LSPService } from "../../clients/lsp/capabilities.js";
 
 /**
  * Shared `LSPService` test double — #2582.
@@ -64,6 +64,7 @@ export function makeLspServiceDouble(
 		getOperationSupport: vi.fn(() => undefined),
 		isDocumentOpen: vi.fn(() => false),
 		notifyExternalFileChange: vi.fn(async () => undefined),
+		announceCreatedFiles: vi.fn(() => undefined),
 		getBrokenStatus: vi.fn(() => undefined),
 	};
 

@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * module_report / read_symbol MCP smoke (#245, #256).
  *

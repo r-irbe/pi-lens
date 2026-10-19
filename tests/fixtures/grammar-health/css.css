@@ -1,0 +1,24 @@
+@import url("base.css");
+
+:root {
+  --gap: 8px;
+  --accent: #3366ff;
+}
+
+@media (min-width: 600px) and (prefers-color-scheme: dark) {
+  .card > .title:not(.hidden)::before {
+    content: "\2022";
+    color: var(--accent);
+  }
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: calc(var(--gap) * 2);
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

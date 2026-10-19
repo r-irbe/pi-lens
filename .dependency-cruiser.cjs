@@ -10,6 +10,13 @@ const eagerClientPattern = `^(?:\\./)?(?:${eagerClients
 	)
 	.join("|")})$`;
 
+// #2504: leaves import no clients/ module except another leaf, so a
+// heavyweight importer reaching one never drags an owner's graph along.
+// #4344 r2 adds bounded-cache (it imports nothing) so the
+// workspace-diagnostics-session leaf can hold a bounded map.
+const clientLeaves =
+	"(ledger-bounds|spawn-output-cap|map-with-concurrency|deferred-lsp-work|lsp/workspace-diagnostics-session|bounded-cache)";
+
 module.exports = {
 	forbidden: [
 		{
@@ -21,21 +28,29 @@ module.exports = {
 				path: "^(?:\\./)?clients/",
 				circular: true,
 				dependencyTypesNot: ["dynamic-import"],
+				// A dynamic import anywhere in the cycle breaks the static
+				// initialization loop; `dependencyTypesNot` above sees only the
+				// cycle's first edge (#4314: lsp-lazy's literal import).
+				viaOnly: { dependencyTypesNot: ["dynamic-import"] },
 			},
 		},
 		{
 			name: "declared-client-leaf",
 			severity: "error",
-			comment: "Declared leaf modules must not import another clients/ module.",
+			comment:
+				"Declared leaf modules must not import a clients/ module other than another declared leaf.",
 			from: {
 				// #2504 adds the two leaves it introduced. Both exist precisely so
 				// a heavyweight importer (runtime-turn, lsp/index) can reach a
 				// small shared primitive without dragging that primitive's owner's
 				// import graph along — a claim each module's own doc comment makes
 				// and which only this rule can actually hold.
-				path: "^(?:\\./)?clients/(ledger-bounds|spawn-output-cap|map-with-concurrency|deferred-lsp-work|lsp/workspace-diagnostics-session)\\.js$",
+				path: `^(?:\\./)?clients/${clientLeaves}\\.js$`,
 			},
-			to: { path: "^(?:\\./)?clients/" },
+			to: {
+				path: "^(?:\\./)?clients/",
+				pathNot: `^(?:\\./)?clients/${clientLeaves}\\.js$`,
+			},
 		},
 		{
 			name: "session-start-eager-allowlist-config-dependency-cruiser-eager-allowlist-json",

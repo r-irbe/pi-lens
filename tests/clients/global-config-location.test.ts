@@ -352,6 +352,23 @@ describe("degraded global config reads are retained and reported (#3251 review H
 		expect(group?.latestReasons[0]?.reason).toContain("(Error)");
 	});
 
+	it("keeps the fixed probe diagnostic with a 200-character path (#3704/#3696)", () => {
+		const home = path.join(makeTempHome(), `home-${"x".repeat(180)}`);
+		fs.mkdirSync(home, { recursive: true });
+		adoptHomeEnv(home);
+		fs.writeFileSync(path.join(home, ".pi-lens"), "not a directory");
+		resetGlobalConfigLocationCache();
+
+		loadPiLensGlobalConfig();
+		const reason = getDegradationSummary().find(
+			(group) => group.kind === "config-location-probe-failed",
+		)?.latestReasons[0]?.reason;
+		expect(reason).toContain("(Error)");
+		expect(reason).toContain("PILENS_CFG_0001");
+		expect(reason).not.toContain(home);
+		expect(reason?.endsWith("PILENS_CFG_0001")).toBe(true);
+	});
+
 	it("an agent-dir probe failure retains the agent identity rather than falling to the canonical default", () => {
 		const home = makeTempHome();
 		adoptHomeEnv(home);

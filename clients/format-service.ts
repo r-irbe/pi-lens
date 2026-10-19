@@ -23,6 +23,7 @@ import type {
 import { loadFormatters } from "./formatters-lazy.js";
 import { bounded } from "./deadline-utils.js";
 import type { LedgerHookKey } from "./hook-budgets.js";
+import type { FileMutationHold } from "./file-mutation-queue.js";
 
 // --- Configuration ---
 
@@ -40,6 +41,11 @@ export interface FormatOptions {
 	signal?: AbortSignal;
 	budgetMs?: number;
 	hook?: LedgerHookKey;
+	/**
+	 * #3558: pi's mutation queue for the file, entered by each formatter once
+	 * its command is resolved (see `formatters.formatFile`).
+	 */
+	writeHold?: FileMutationHold;
 }
 
 export interface FormatSummary {
@@ -54,6 +60,14 @@ export interface FormatSummary {
 	}>;
 	anyChanged: boolean;
 	allSucceeded: boolean;
+	/**
+	 * #3506: settles once every formatter a bound gave up on has settled. The
+	 * bound returns while the in-place child runs on and writes later, so a
+	 * caller holding the file's mutation queue keeps it until then. #3858:
+	 * present only when a bound gave up on one, so its presence is how a caller
+	 * knows a late write is coming (it syncs that write to the LSP).
+	 */
+	abandoned?: Promise<void>;
 }
 
 // --- Format Service ---
@@ -63,7 +77,10 @@ export class FormatService {
 	private enabled: boolean;
 
 	constructor(sessionID: string, enabled: boolean = true) {
-		this.fileTime = new FileTime(sessionID);
+		// Its own table: a `FileTime` is keyed by session id, and the read
+		// guard's is the session's. Sharing it let every stamp here vouch for
+		// bytes the agent never saw (#3525).
+		this.fileTime = new FileTime(`${sessionID}:format`);
 		this.enabled = enabled;
 	}
 
@@ -118,6 +135,7 @@ export class FormatService {
 		}
 
 		// Run formatters with limited concurrency
+		const abandoned: Promise<unknown>[] = [];
 		const results = await this.runFormattersWithConcurrency(
 			absolutePath,
 			formatters,
@@ -125,6 +143,8 @@ export class FormatService {
 			options.signal,
 			options.budgetMs,
 			options.hook,
+			abandoned,
+			options.writeHold,
 		);
 
 		// Record new file state after formatting
@@ -155,6 +175,9 @@ export class FormatService {
 			})),
 			anyChanged,
 			allSucceeded,
+			...(abandoned.length === 0
+				? {}
+				: { abandoned: Promise.allSettled(abandoned).then(() => {}) }),
 		};
 	}
 
@@ -168,6 +191,8 @@ export class FormatService {
 		signal?: AbortSignal,
 		budgetMs = 30_000,
 		hook: LedgerHookKey = "tool_result_edit",
+		abandoned: Promise<unknown>[] = [],
+		writeHold?: FileMutationHold,
 	): Promise<FormatterResult[]> {
 		const results: FormatterResult[] = [];
 		const startedAt = Date.now();
@@ -187,23 +212,28 @@ export class FormatService {
 			// This keeps one total formatter budget per file instead of re-arming a
 			// 30s timer for every formatter.
 			try {
-				const result = await bounded(
-					loadFormatters().then(({ formatFile }) =>
-						formatFile(filePath, formatter),
-					),
-					{
-						ms: remainingMs,
-						signal,
-						hook,
-						label: "formatter-aggregate",
-					},
+				const run: Promise<FormatterResult> = loadFormatters().then(
+					({ formatFile }) =>
+						formatFile(
+							filePath,
+							formatter,
+							writeHold && (() => writeHold.enter(run)),
+						),
 				);
+				const result = await bounded(run, {
+					ms: remainingMs,
+					signal,
+					hook,
+					label: "formatter-aggregate",
+				});
 				if (result) results.push(result);
 				else if (signal?.aborted) {
 					// Caller cancellation is intentional. Do not turn Escape into a
 					// formatter failure or requeue record.
+					abandoned.push(run);
 					break;
 				} else {
+					abandoned.push(run);
 					results.push({
 						success: false,
 						changed: false,

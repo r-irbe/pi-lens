@@ -17,7 +17,14 @@
  * Throwing here aborts the run, so stale output can never silently pass.
  */
 
-import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	type Dirent,
+	existsSync,
+	readFileSync,
+	readdirSync,
+	statSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { testSourceFiles } from "./module-instance-scan.js";
@@ -161,6 +168,62 @@ export function runFreshnessChecks(root: string): void {
 	}
 }
 
+/** Warn, but never abort, when the shared node_modules was not installed from
+ * this package-lock.json (#3694). The stamp is written by `prepare` after npm
+ * has populated node_modules (scripts/stamp-package-lock.mjs).
+ *
+ * - stamp differs from the lock's hash: the install is stale.
+ * - stamp MISSING: the install predates the stamp, or `prepare` never ran.
+ *   Silent except where that is normal: CI installs with
+ *   `npm ci --ignore-scripts`, so a missing stamp there is not a finding.
+ * - lock unreadable: nothing to compare; silent. */
+export function nodeModulesLockWarning(
+	root: string,
+	env: NodeJS.ProcessEnv = process.env,
+): string | null {
+	const nodeModules = resolve(join(root, "node_modules"));
+	let lockHash: string;
+	try {
+		lockHash = createHash("sha256")
+			.update(readFileSync(join(root, "package-lock.json")))
+			.digest("hex");
+	} catch {
+		return null;
+	}
+	let stamp: string;
+	try {
+		stamp = readFileSync(
+			join(nodeModules, ".pi-lens-package-lock-sha256"),
+			"utf8",
+		).trim();
+	} catch {
+		if (env.CI === "true") return null;
+		return `⚠️ node_modules has no install stamp; run \`npm ci\` (resolved node_modules: ${nodeModules})`;
+	}
+	if (stamp === lockHash) return null;
+	return `⚠️ node_modules may be stale: package-lock.json does not match the install stamp; run \`npm ci\` (resolved node_modules: ${nodeModules})`;
+}
+
+/** Run-scoped, not module-scoped: vitest evaluates a globalSetup module once
+ * PER PROJECT (measured: two projects printed the warning twice with a
+ * module-level flag), but every project's setup runs in the one main process,
+ * so a `globalThis` symbol is the once-per-run latch. */
+const LOCK_WARNING_LATCH = Symbol.for("pi-lens.node-modules-lock-warning");
+
+/** Once per RUN: every vitest project that lists `sharedGlobalSetup` calls
+ * `setup()`, and seven do, so an unguarded warning printed seven times. */
+export function reportNodeModulesLock(
+	root: string,
+	warn: (message: string) => void = console.warn,
+	latch: Record<symbol, unknown> = globalThis as Record<symbol, unknown>,
+): void {
+	if (latch[LOCK_WARNING_LATCH]) return;
+	latch[LOCK_WARNING_LATCH] = true;
+	const warning = nodeModulesLockWarning(root);
+	if (warning) warn(warning);
+}
+
 export default function setup(): void {
+	reportNodeModulesLock(repoRoot);
 	runFreshnessChecks(repoRoot);
 }

@@ -1,0 +1,82 @@
+# Fixture for tests/scripts/dispatch-safety.test.ts: one dispatchable workflow
+# whose jobs are the guard shapes #4076 review r2 (D2) found the CLI misreading.
+# Every job holds `issues: write`; only the `if:` differs.
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  guarded:
+    if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  schedule-only:
+    if: github.event_name == 'schedule'
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  master-only:
+    if: github.ref == 'refs/heads/master'
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  always-or-guard:
+    if: always() || (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  input-or-guard:
+    if: inputs.force || (github.event_name == 'schedule' || github.ref == 'refs/heads/master')
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  negated-guard:
+    if: "!(github.event_name == 'schedule' || github.ref == 'refs/heads/master')"
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  format-wrapped:
+    if: "format('{0}', github.event_name == 'schedule' || github.ref == 'refs/heads/master')"
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  compared-to-false:
+    if: "(github.event_name == 'schedule' || github.ref == 'refs/heads/master') == false"
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  schedule-or-input:
+    if: github.event_name == 'schedule' || inputs.force
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  step-guard-only:
+    permissions:
+      issues: write
+    steps:
+      - if: github.event_name == 'schedule' || github.ref == 'refs/heads/master'
+        run: node scripts/upsert-tracking-issue.mjs
+  no-guard:
+    permissions:
+      issues: write
+    steps:
+      - run: node scripts/upsert-tracking-issue.mjs
+  read-only:
+    permissions:
+      contents: read
+    steps:
+      - run: node scripts/smoke.mjs

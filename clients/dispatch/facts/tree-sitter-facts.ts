@@ -31,6 +31,8 @@ export const withFactTree = withTreeSitterRoot;
 export async function extractFactsFromTree(
 	ctx: DispatchContext,
 	store: FactStore,
+	/** The provider's id: its own wasm-trap identity (#3678 F4). */
+	caller: string,
 	defaults: Record<string, unknown[]>,
 	extract: (root: TsNode, content: string) => Record<string, unknown[]>,
 	coverageFact?: string,
@@ -55,8 +57,11 @@ export async function extractFactsFromTree(
 		"file.content",
 	);
 	if (content == null) return writeAll(defaults, false);
-	const parsed = await withFactTree(ctx.filePath, content, (root) =>
-		extract(root, content),
+	const parsed = await withFactTree(
+		ctx.filePath,
+		content,
+		(root) => extract(root, content),
+		caller,
 	);
 	writeAll(parsed.parsed ? parsed.value : defaults, parsed.parsed);
 }

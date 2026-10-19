@@ -1,11 +1,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as v8 from "node:v8";
+import * as vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock, makeCtx, makeStaleCtx } from "./support/pi-mock.js";
-import { removeTempDirSync } from "./clients/test-utils.js";
+import {
+	drainResidentJscpdScans,
+	removeTempDirSync,
+} from "./clients/test-utils.js";
 import { makeLspServiceDouble } from "./support/lsp-service-double.js";
 import {
 	aliveServerHolder,
@@ -97,7 +102,7 @@ function createMockPi(overrides: Record<string, boolean> = {}) {
 // `exportState` is production-faithful: the same `version` field
 // `clients/read-guard.ts` writes, read off the real module so a version bump
 // cannot silently make the double lie. Nothing else was added — a probe that
-// made `importState`/`hasKnownPath`/`forgetPath`/`recordSymbolRead` throw left
+// made `hasKnownPath`/`forgetPath`/`recordSymbolRead` throw left
 // the file green at 61 passed, so no path here reaches them, and a future path
 // that does now crashes LOUDLY rather than silently (that is this PR).
 vi.mock("../clients/read-guard.js", async (importOriginal) => {
@@ -110,6 +115,7 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 	class MockReadGuard {
 		isNewFile = () => false;
 		checkEdit = () => ({ action: "allow" });
+		contentMatchesLastRead = () => undefined;
 		recordRead = () => {};
 		recordWritten = () => {};
 		noteCreatedFile = () => {};
@@ -120,6 +126,17 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 			version: actual.READ_GUARD_STATE_VERSION,
 			reads: [],
 		});
+		// #3521: every primary session_start imports the branch's reads.
+		importBranch = () => ({ imported: 0, dropped: 0 });
+		// #3612: a /reload hands the guard's authorship to the reloaded one;
+		// since #3603 every start that keeps a conversation adopts it through
+		// the branch filter, so the double answers with the import tally.
+		exportAuthorship = () => ({ written: [], entries: [] });
+		importAuthorship = () => ({ imported: 0, dropped: 0 });
+		// #4185: agent_settled's backstop and tool_execution_end release read
+		// captures; this double holds none.
+		dropProvisionalReads = () => 0;
+		dropProvisionalReadByCall = () => false;
 		getSummary = () => ({
 			totalEdits: 0,
 			totalBlocks: 0,
@@ -136,10 +153,21 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 	};
 });
 
+// #3506 (PR #3561) made index.ts register a lazy `import()` of the host SDK
+// for pi's per-file mutation queue, and a case here that drives a pi-lens
+// write resolves it. The real package costs ~110 MB of RSS in this fork and
+// put the file over the #3058 per-worker peak-RSS budget. No case here is
+// about the queue (tests/index-3506-file-mutation-queue-wiring.test.ts drives
+// the real one), so a pass-through stands in. `SessionManager` is left out on
+// purpose: without it the lookup reports "unverified", not a second copy.
+vi.mock("@earendil-works/pi-coding-agent", () => ({
+	withFileMutationQueue: <T>(_filePath: string, fn: () => Promise<T>) => fn(),
+}));
+
 // Cases install their own doubles for these modules with vi.doMock;
 // resetModules does not clear the mock registry, so drop them after each case
 // in every describe below (#2883).
-afterEach(() => {
+afterEach(async () => {
 	vi.doUnmock("../clients/bootstrap.js");
 	vi.doUnmock("../clients/bus-events-logger.js");
 	vi.doUnmock("../clients/cache-observability.js");
@@ -152,6 +180,53 @@ afterEach(() => {
 	vi.doUnmock("../clients/quiet-window.js");
 	vi.doUnmock("../clients/runtime-agent-end.js");
 	vi.doUnmock("../clients/runtime-turn.js");
+	vi.doUnmock("../clients/session-scope.js");
+	// #4133: a jscpd scan started by the real bootstrap is fire-and-forget; wait
+	// for it before this test's fixture roots and the worker's tmp root are
+	// removed, so a kill cannot strand its report directory. Runs after every
+	// `vi.doUnmock` above, so the real module answers the peek.
+	await drainResidentJscpdScans();
+});
+
+/**
+ * #3565: collect the previous cases' extension graphs before the next case
+ * builds its own. Every case cold-imports `index.js` after
+ * `vi.resetModules()`, leaving 35-140 MB of old-generation garbage, and V8
+ * only runs a full collection when its own heuristics decide to. The file's
+ * peak therefore depended on when that happened: 1,873-2,065 MB across CI
+ * runs of the same code, against the 2,048 MB per-worker budget (#3058),
+ * while the live heap after a collection stayed near 500 MB. One collection
+ * per case measured 882-916 MB peaks locally; the 65 collections summed to
+ * 13.7 s in the one run that timed them.
+ *
+ * The collector is exposed the way `word-index-posting-memory.test.ts`
+ * exposes it: `setFlagsFromString` for this fork only, and the flag is turned
+ * back off at once. `tests/config/worker-budget.test.ts` pins every worker's
+ * `execArgv`, so `--expose-gc` is not added there. It throws when the
+ * collector cannot be exposed; skipping silently would let the peak drift
+ * back to the budget unnoticed.
+ */
+function resolveForcedCollector(): () => void {
+	const ambient = (globalThis as { gc?: () => void }).gc;
+	if (typeof ambient === "function") return ambient;
+	v8.setFlagsFromString("--expose-gc");
+	try {
+		const collect = vm.runInNewContext("gc") as unknown;
+		if (typeof collect !== "function") {
+			throw new Error(
+				"could not expose gc(); #3565's per-case collection cannot run",
+			);
+		}
+		return collect as () => void;
+	} finally {
+		v8.setFlagsFromString("--no-expose-gc");
+	}
+}
+
+const forceCollect = resolveForcedCollector();
+
+afterEach(() => {
+	forceCollect();
 });
 
 describe("index.ts integration", () => {
@@ -320,7 +395,8 @@ describe("index.ts integration", () => {
 				sessionFile,
 				mode: "rpc",
 			});
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			const resumeEvent = makeSessionStartEvent({ reason: "resume" });
+			await sessionStart?.(resumeEvent, ctx);
 			const firstMutationCount = activeToolSetCalls.length;
 			expect(firstMutationCount).toBe(1);
 			expect([...activeTools]).not.toEqual(
@@ -333,14 +409,15 @@ describe("index.ts integration", () => {
 				]),
 			);
 
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
+			await sessionStart?.(resumeEvent, ctx);
 			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
 
-			// A duplicate must still restore if the host's live posture drifted.
+			// A duplicate is an idempotent host event, even if live posture drifted;
+			// the next genuinely new start owns restoration.
 			activeTools.add("ast_grep_search");
-			await sessionStart?.(makeSessionStartEvent({ reason: "resume" }), ctx);
-			expect(activeToolSetCalls).toHaveLength(firstMutationCount + 1);
-			expect(activeTools).not.toContain("ast_grep_search");
+			await sessionStart?.(resumeEvent, ctx);
+			expect(activeToolSetCalls).toHaveLength(firstMutationCount);
+			expect(activeTools).toContain("ast_grep_search");
 
 			await latency.flushLatencyLog();
 			const rows = fs
@@ -357,7 +434,7 @@ describe("index.ts integration", () => {
 				);
 			expect(
 				rows.filter((row) => row.phase === "session_start_runtime_reset"),
-			).toHaveLength(2);
+			).toHaveLength(1);
 			expect(
 				rows.filter(
 					(row) => row.phase === "session_start_duplicate_suppressed",
@@ -372,6 +449,105 @@ describe("index.ts integration", () => {
 					}),
 				}),
 			);
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"drops interleaved new and fork duplicates at entry while preserving distinct starts (#2891)",
+		async () => {
+			const previousHome = process.env.PI_LENS_HOME;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_HOME = tmpDir;
+			process.env.PI_LENS_TEST_MODE = "0";
+			vi.doUnmock("../clients/runtime-session.js");
+			vi.doUnmock("../clients/latency-logger.js");
+			const { default: registerExtension } = await import("../index.js");
+			const latency = await import("../clients/latency-logger.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			const sessionStart = handlers.session_start?.[0];
+			expect(sessionStart).toBeTypeOf("function");
+
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "duplicate-session",
+				sessionFile: path.join(tmpDir, "duplicate.jsonl"),
+				mode: "rpc",
+			});
+			for (const [reason, previousSessionFile] of [
+				["new", "/sessions/old-new.jsonl"],
+				["fork", "/sessions/old-fork.jsonl"],
+			] as const) {
+				const event = makeSessionStartEvent({ reason, previousSessionFile });
+				const first = sessionStart?.(event, ctx);
+				const second = sessionStart?.(event, ctx);
+				await Promise.all([first, second]);
+			}
+
+			// A different reason is a new host event, even with the same session id.
+			const reloadCtx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "same-session-different-event",
+				sessionFile: path.join(tmpDir, "reload.jsonl"),
+				mode: "rpc",
+			});
+			await sessionStart?.(
+				makeSessionStartEvent({ reason: "startup" }),
+				reloadCtx,
+			);
+			await sessionStart?.(
+				makeSessionStartEvent({ reason: "reload" }),
+				reloadCtx,
+			);
+
+			await latency.flushLatencyLog();
+			const rows = fs
+				.readFileSync(latency.getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							metadata?: Record<string, unknown>;
+						},
+				);
+			const transitions = rows.filter(
+				(row) =>
+					row.phase === "session_scope_transition" &&
+					row.metadata?.transition === "start",
+			);
+			for (const reason of ["new", "fork"])
+				expect(
+					transitions.filter((row) => row.metadata?.reason === reason),
+				).toHaveLength(1);
+			for (const reason of ["new", "fork"])
+				expect(
+					rows.filter(
+						(row) =>
+							row.phase === "session_handoff_adopt" &&
+							row.metadata?.reason === reason,
+					),
+				).toHaveLength(1);
+			const duplicateRows = rows.filter(
+				(row) =>
+					row.phase === "degradation_ledger" &&
+					row.metadata?.kind === "session-start-duplicate",
+			);
+			// One bounded record is emitted for each duplicate host event; the
+			// ledger resets at each genuinely new session_start reason.
+			expect(duplicateRows).toHaveLength(2);
+			expect(
+				transitions.filter(
+					(row) => row.metadata?.sessionId === "same-session-different-event",
+				),
+			).toHaveLength(2);
+
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
 			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
@@ -401,14 +577,9 @@ describe("index.ts integration", () => {
 				sessionFile: undefined,
 				mode: "rpc",
 			});
-			await sessionStart?.(
-				makeSessionStartEvent({ reason: "fork" }),
-				noSessionCtx,
-			);
-			await sessionStart?.(
-				makeSessionStartEvent({ reason: "fork" }),
-				noSessionCtx,
-			);
+			const noSessionEvent = makeSessionStartEvent({ reason: "fork" });
+			await sessionStart?.(noSessionEvent, noSessionCtx);
+			await sessionStart?.(noSessionEvent, noSessionCtx);
 
 			const fileCtx = makeCtx({
 				cwd: tmpDir,
@@ -416,8 +587,9 @@ describe("index.ts integration", () => {
 				sessionFile: path.join(tmpDir, "fallback.jsonl"),
 				mode: "rpc",
 			});
-			await sessionStart?.(makeSessionStartEvent({ reason: "fork" }), fileCtx);
-			await sessionStart?.(makeSessionStartEvent({ reason: "fork" }), fileCtx);
+			const fileEvent = makeSessionStartEvent({ reason: "fork" });
+			await sessionStart?.(fileEvent, fileCtx);
+			await sessionStart?.(fileEvent, fileCtx);
 
 			await latency.flushLatencyLog();
 			const rows = fs
@@ -432,6 +604,80 @@ describe("index.ts integration", () => {
 					(row) => row.phase === "session_start_duplicate_suppressed",
 				),
 			).toHaveLength(2);
+			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
+			else process.env.PI_LENS_HOME = previousHome;
+			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
+			else process.env.PI_LENS_TEST_MODE = previousTestMode;
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
+		"dedupes the same RPC start across a fresh extension factory (#2891)",
+		async () => {
+			const previousHome = process.env.PI_LENS_HOME;
+			const previousTestMode = process.env.PI_LENS_TEST_MODE;
+			process.env.PI_LENS_HOME = tmpDir;
+			process.env.PI_LENS_TEST_MODE = "0";
+			vi.doUnmock("../clients/runtime-session.js");
+			vi.doUnmock("../clients/latency-logger.js");
+
+			const firstGraph = await import("../index.js");
+			const first = createMockPi();
+			firstGraph.default(first.pi as any);
+			const firstStart = first.handlers.session_start?.[0];
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "factory-rerun-session",
+				sessionFile: path.join(tmpDir, "factory-rerun.jsonl"),
+				mode: "rpc",
+			});
+			const event = makeSessionStartEvent({
+				reason: "new",
+				previousSessionFile: "/sessions/factory-rerun-parent.jsonl",
+			});
+			await firstStart?.(event, ctx);
+
+			// pi's replacement can re-run the factory before the duplicate host
+			// emission. A closure-local reservation is fresh here and admits it.
+			vi.resetModules();
+			const secondGraph = await import("../index.js");
+			const second = createMockPi();
+			secondGraph.default(second.pi as any);
+			const secondStart = second.handlers.session_start?.[0];
+			await secondStart?.(event, ctx);
+			const differentPredecessor = makeSessionStartEvent({
+				reason: "new",
+				previousSessionFile: "/sessions/another-parent.jsonl",
+			});
+			await secondStart?.(differentPredecessor, ctx);
+			await secondStart?.(differentPredecessor, ctx);
+			await second.handlers.session_shutdown?.[0]?.({ reason: "reload" }, ctx);
+			// session_shutdown does not release an event-object admission: a later
+			// delivery of the same RPC object is still the same host event.
+			await secondStart?.(differentPredecessor, ctx);
+
+			const latency = await import("../clients/latency-logger.js");
+			await latency.flushLatencyLog();
+			const rows = fs
+				.readFileSync(latency.getLatencyLogPath(), "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							phase?: string;
+							metadata?: { transition?: string };
+						},
+				);
+			expect(
+				rows.filter(
+					(row) =>
+						row.phase === "session_scope_transition" &&
+						row.metadata?.transition === "start",
+				),
+			).toHaveLength(2);
+
 			if (previousHome === undefined) delete process.env.PI_LENS_HOME;
 			else process.env.PI_LENS_HOME = previousHome;
 			if (previousTestMode === undefined) delete process.env.PI_LENS_TEST_MODE;
@@ -547,7 +793,13 @@ describe("index.ts integration", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const { mock, pi, handlers } = createMockPi();
 			registerExtension(pi as any);
-			const ctx = makeCtx({ cwd: tmpDir, sessionId: "pi-reload-dead-weight" });
+			// A session file: the mock names it as the replacement's at shutdown
+			// (#3612), and a file switch is what ends a telemetry set.
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "pi-reload-dead-weight",
+				sessionFile: path.join(tmpDir, "pi-reload-dead-weight.jsonl"),
+			});
 
 			await handlers.session_start?.[0]?.({}, ctx);
 			const activation = mock.getTool("pi_lens_activate_tools") as {
@@ -560,6 +812,7 @@ describe("index.ts integration", () => {
 				undefined,
 				ctx,
 			);
+			// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 			await mock.simulateSessionShutdownAndRebuild(
 				reason as "reload" | "resume" | "fork",
 				ctx,
@@ -773,7 +1026,11 @@ describe("index.ts integration", () => {
 			const { default: registerExtension } = await import("../index.js");
 			const { mock, pi, handlers } = createMockPi();
 			registerExtension(pi as any);
-			const ctx = makeCtx({ cwd: tmpDir, sessionId: "pi-new-replacement" });
+			const ctx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "pi-new-replacement",
+				sessionFile: path.join(tmpDir, "pi-new-replacement.jsonl"),
+			});
 
 			await handlers.session_start?.[0]?.({}, ctx);
 			const activation = mock.getTool("pi_lens_activate_tools") as {
@@ -790,6 +1047,7 @@ describe("index.ts integration", () => {
 				{ toolName: "ast_grep_search", input: { pattern: "const $A = $B" } },
 				ctx,
 			);
+			// pi-mock bound: this lifecycle assertion does not re-run the factory or reproduce host ordering.
 			await mock.simulateSessionShutdownAndRebuild("new", ctx);
 
 			const rowsAt = () =>
@@ -852,7 +1110,7 @@ describe("index.ts integration", () => {
 		"session_shutdown uses fast LSP reset so teardown does not wait on graceful shutdown",
 		async () => {
 			const resetLSPService = vi.fn();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -886,7 +1144,7 @@ describe("index.ts integration", () => {
 			const resetLSPService = vi.fn(() => {
 				order.push("reset_lsp_service");
 			});
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -910,9 +1168,56 @@ describe("index.ts integration", () => {
 	);
 
 	it(
+		"session_shutdown retires the session's scope even when a teardown step throws (#3611 r2)",
+		async () => {
+			// The recurrence: the retire ran last and unguarded, so a throw from
+			// any teardown step above it left the scope live. After a /reload that
+			// re-evaluated the entry, nothing else ever ends the old scope.
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
+				getLSPService: () => makeLspServiceDouble(),
+				resetLSPService: vi.fn(),
+			}));
+			vi.doMock("../clients/debug-handles.js", () => ({
+				dumpActiveHandles: () => {
+					throw new Error("teardown step failed");
+				},
+			}));
+			const retireScope = vi.fn();
+			vi.doMock("../clients/session-scope.js", async (importActual) => {
+				const actual =
+					await importActual<typeof import("../clients/session-scope.js")>();
+				retireScope.mockImplementation(actual.retireScope);
+				return { ...actual, retireScope };
+			});
+
+			const { default: registerExtension } = await import("../index.js");
+			const { pi, handlers } = createMockPi();
+			registerExtension(pi as any);
+			await handlers.session_start?.[0]?.(
+				{},
+				{ cwd: tmpDir, ui: { notify: vi.fn() } },
+			);
+
+			expect(() =>
+				handlers.session_shutdown?.[0]?.({ reason: "quit" }, { cwd: tmpDir }),
+			).toThrow("teardown step failed");
+
+			// The last retire is the shutdown's (the start's resetForSession
+			// retired the coordinator's construction scope first).
+			expect(retireScope).toHaveBeenLastCalledWith(expect.anything(), "quit");
+			const [scope] = retireScope.mock.calls.at(-1) as [
+				{ isLive(): boolean; retiredBy(): string | undefined },
+			];
+			expect(scope.isLive()).toBe(false);
+			expect(scope.retiredBy()).toBe("quit");
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
 		"session_shutdown emits the bus-event session-end rollup (S2d gap 5, #1432 review)",
 		async () => {
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1332,7 +1637,7 @@ describe("index.ts integration", () => {
 			// agent_settled itself queues is already in flight, so the dump must
 			// fire after runQuietWindow is invoked, not before.
 			const order: string[] = [];
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1367,7 +1672,7 @@ describe("index.ts integration", () => {
 
 	describe("#1654 deferred-mutation drain runs at agent_settled, not agent_end", () => {
 		function mockDrainDeps(handleAgentEndMock: ReturnType<typeof vi.fn>) {
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));
@@ -1556,7 +1861,7 @@ describe("index.ts integration", () => {
 			// event in flight; without the wrapped reset the footer would keep showing a
 			// stale "LSP Active" until the next turn. Assert the timer firing repaints it.
 			const { resetLSPService, service } = aliveServerHolder();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: service,
 				resetLSPService,
 			}));
@@ -1631,7 +1936,7 @@ describe("index.ts integration", () => {
 	});
 
 	it(
-		"context handler injects guidance immediately before the final user prompt",
+		"context handler appends guidance to the active user prompt (#3693)",
 		async () => {
 			const context = await loadContextHandler();
 
@@ -1643,9 +1948,7 @@ describe("index.ts integration", () => {
 			);
 
 			// A realistic multi-turn transcript: assistant + prior user turns precede
-			// the current user prompt. (With a single-message transcript the old
-			// prepend and the new before-final placement coincide, so a multi-message
-			// transcript is required to actually exercise the #1016 change.)
+			// the current user prompt.
 			const firstUser = { role: "user", content: "Start the task" };
 			const assistant = { role: "assistant", content: "On it." };
 			const finalUser = { role: "user", content: "Fix the bug" };
@@ -1656,38 +1959,31 @@ describe("index.ts integration", () => {
 				{ cwd: tmpDir },
 			)) as { messages: Array<{ role: string; content: unknown }> };
 
-			// Full expected ordering: prior turns, then injected block, then the final
-			// user prompt — [firstUser, assistant, <injected>, finalUser].
-			expect(result).toEqual({
-				messages: [firstUser, assistant, injectedMatcher, finalUser],
-			});
-
-			// (1) #1016 index-0 stability: messages[0] is untouched. This is the
-			// property that FAILS on the old prepend code (injected findings landed at
-			// index 0), and it is the actual prompt-cache win.
+			// Full expected ordering: prior turns, then updated final user prompt
+			// with guidance appended — [firstUser, assistant, updatedFinalUser].
+			expect(result.messages).toHaveLength(3);
 			expect(result.messages[0]).toEqual(firstUser);
+			expect(result.messages[1]).toEqual(assistant);
 
-			// (2) Final message unchanged: same role + content as the incoming prompt.
-			const last = result.messages[result.messages.length - 1];
-			expect(last).toEqual(finalUser);
+			const last = result.messages[2];
 			expect(last.role).toBe("user");
-
-			// (3) Injected block sits at length - 2, immediately before the final msg.
-			expect(result.messages[result.messages.length - 2]).toEqual(
-				injectedMatcher,
+			expect(last.content).toContain(
+				"Fix the bug\n\n[pi-lens automated context — not a user request]",
 			);
+			expect(last.content).toContain("Use pi-lens tools when useful.");
 
-			// (5) Non-empty input preserved (fe0ed5da): every existing message survives.
-			expect(result.messages).toHaveLength(existing.length + 1);
-			for (const msg of existing) {
-				expect(result.messages).toContainEqual(msg);
-			}
+			// Original user message is not mutated in place (#3693 constraint 1)
+			expect(finalUser.content).toBe("Fix the bug");
+			expect(last).not.toBe(finalUser);
+
+			// Non-empty input preserved (fe0ed5da)
+			expect(result.messages.length).toBeGreaterThan(0);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
 
 	it(
-		"context injection keeps the prior-conversation prefix byte-identical across turns (#1016 cache win)",
+		"context injection keeps the prior-conversation prefix byte-identical across turns (#1016 & #3693 cache win)",
 		async () => {
 			const firstUser = { role: "user", content: "Start the task" };
 			const assistant = { role: "assistant", content: "On it." };
@@ -1724,21 +2020,24 @@ describe("index.ts integration", () => {
 				{ cwd: tmpDir },
 			)) as { messages: Array<{ role: string; content: unknown }> };
 
-			// The prior conversation prefix (everything up to but excluding the
-			// injection point at length - 2) is identical between the two turns — this
-			// is exactly what a prefix-caching provider reuses.
-			const prefixA = resultA.messages.slice(0, resultA.messages.length - 2);
-			const prefixB = resultB.messages.slice(0, resultB.messages.length - 2);
-			expect(prefixA).toEqual(prefixB);
+			// The prior conversation prefix (everything up to the trailing user prompt)
+			// is identical between the two turns — this is what prefix-caching providers reuse.
+			const prefixA = resultA.messages.slice(0, -1);
+			const prefixB = resultB.messages.slice(0, -1);
+			// Assert that turn 2's prefix equals turn 1's prefix byte-for-byte:
+			expect(prefixB).toEqual(prefixA);
 			expect(prefixA).toEqual([firstUser, assistant]);
 
-			// They diverge only at the injection slot.
-			expect(resultA.messages[resultA.messages.length - 2]).not.toEqual(
-				resultB.messages[resultB.messages.length - 2],
+			// The trailing message starts with the same user prompt text across turns
+			const lastA = resultA.messages[resultA.messages.length - 1];
+			const lastB = resultB.messages[resultB.messages.length - 1];
+			expect((lastA.content as string).startsWith("Fix the bug\n\n")).toBe(
+				true,
 			);
-			// ...and reconverge on the trailing user prompt.
-			expect(resultA.messages[resultA.messages.length - 1]).toEqual(finalUser);
-			expect(resultB.messages[resultB.messages.length - 1]).toEqual(finalUser);
+			expect((lastB.content as string).startsWith("Fix the bug\n\n")).toBe(
+				true,
+			);
+			expect(lastA.content).not.toEqual(lastB.content);
 		},
 		INTEGRATION_TIMEOUT_MS,
 	);
@@ -1863,6 +2162,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -1951,6 +2253,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit,
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead() {
 						return false;
@@ -1965,6 +2268,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2059,6 +2365,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit,
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead() {
 						return false;
@@ -2073,6 +2380,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2182,6 +2492,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" as const }),
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted = markLspReadWarmStarted;
@@ -2194,6 +2505,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2230,7 +2544,7 @@ describe("index.ts integration", () => {
 					},
 				}));
 			});
-			vi.doMock("../clients/lsp/index.js", async () => ({
+			vi.doMock("../clients/lsp/capabilities.js", async () => ({
 				getLSPService: () => makeLspServiceDouble({ touchFile: touchFileMock }),
 				resetLSPService: () => {},
 			}));
@@ -2286,6 +2600,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" as const }),
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted() {}
@@ -2298,6 +2613,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2334,7 +2652,7 @@ describe("index.ts integration", () => {
 					},
 				}));
 			});
-			vi.doMock("../clients/lsp/index.js", async () => ({
+			vi.doMock("../clients/lsp/capabilities.js", async () => ({
 				getLSPService: () => makeLspServiceDouble({ touchFile: touchFileMock }),
 				resetLSPService: () => {},
 			}));
@@ -2385,6 +2703,7 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" as const }),
+						contentMatchesLastRead: () => undefined,
 					};
 					shouldWarmLspOnRead = shouldWarmLspOnRead;
 					markLspReadWarmStarted() {}
@@ -2397,6 +2716,9 @@ describe("index.ts integration", () => {
 						return 1;
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					setTelemetryIdentity() {}
 					telemetrySessionId = "test-session";
@@ -2433,7 +2755,7 @@ describe("index.ts integration", () => {
 					},
 				}));
 			});
-			vi.doMock("../clients/lsp/index.js", async () => ({
+			vi.doMock("../clients/lsp/capabilities.js", async () => ({
 				getLSPService: () => makeLspServiceDouble({ touchFile: touchFileMock }),
 				resetLSPService: () => {},
 			}));
@@ -2472,6 +2794,9 @@ describe("index.ts integration", () => {
 						return [[path.join(tmpDir, "src", "boom.ts"), 3]];
 					}
 					beginTurn() {}
+					turnKey() {
+						return 0;
+					}
 					resetForSession() {}
 					complexityBaselines = new Map();
 					projectRulesScan = { hasCustomRules: false, rules: [] };
@@ -2483,11 +2808,12 @@ describe("index.ts integration", () => {
 						noteCreatedFile: () => {},
 						recordWritten: () => {},
 						checkEdit: () => ({ action: "allow" }),
+						contentMatchesLastRead: () => undefined,
 						recordRead: () => {},
 					};
 				},
 			}));
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () =>
 					makeLspServiceDouble({
 						getAliveClientCount: () => 1,
@@ -2700,7 +3026,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		vi.doUnmock("../clients/runtime-coordinator.js");
 		vi.doUnmock("../clients/installer/index.js");
 		vi.doUnmock("../clients/runtime-session.js");
-		vi.doUnmock("../clients/lsp/index.js");
+		vi.doUnmock("../clients/lsp/capabilities.js");
 		quietTasks = [];
 		handleTurnEndHook = undefined;
 		_resetProcessSingletonsForTests();
@@ -3099,6 +3425,53 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	);
 
 	it(
+		"hands each activation's turn_end its own session scope, which a secondary's shutdown retires",
+		async () => {
+			// Recurrence prevented (#4154; review of #4153, F2): turn_end parked a
+			// late dead-code scan on `runtime.sessionScope`, the primary's, for every
+			// activation on the process-singleton runtime, so a concurrent
+			// subagent's turn took the primary's settled scan. The late-scan cell
+			// lives on the scope this activation passes.
+			mockSuiteDeps();
+			const seen = new Map<string, { scope: any; coordinator: any }>();
+			handleTurnEndHook = (deps: any) => {
+				seen.set(deps.sessionId, {
+					scope: deps.sessionScope,
+					coordinator: deps.runtime.sessionScope,
+				});
+			};
+			const { default: registerExtension } = await import("../index.js");
+			const primary = createMockPi();
+			registerExtension(primary.pi as any);
+			const secondary = createMockPi();
+			registerExtension(secondary.pi as any);
+			const primaryCtx = makeCtx({ cwd: tmpDir, sessionId: "primary-scope" });
+			const secondaryCtx = makeCtx({
+				cwd: tmpDir,
+				sessionId: "secondary-scope",
+			});
+
+			await primary.trigger("session_start", {}, primaryCtx);
+			await secondary.trigger("session_start", {}, secondaryCtx);
+			await primary.trigger("turn_end", {}, primaryCtx);
+			await secondary.trigger("turn_end", {}, secondaryCtx);
+
+			const own = seen.get("primary-scope");
+			const sub = seen.get("secondary-scope");
+			expect(own?.scope).toBeDefined();
+			expect(own?.scope).toBe(own?.coordinator);
+			expect(sub?.scope).toBeDefined();
+			expect(sub?.scope).not.toBe(sub?.coordinator);
+			expect(sub?.scope.isLive()).toBe(true);
+
+			await secondary.trigger("session_shutdown", {}, secondaryCtx);
+			expect(sub?.scope.isLive()).toBe(false);
+			expect(own?.scope.isLive()).toBe(true);
+		},
+		INTEGRATION_TIMEOUT_MS,
+	);
+
+	it(
 		"emits nothing at turn_end; exactly one entry at agent_settled, surviving an intervening turn_start",
 		async () => {
 			vi.doMock("../clients/pipeline.js", () => ({
@@ -3457,7 +3830,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				clearCachePrefixSession,
 			}));
 			const resetLSPService = vi.fn();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -3533,7 +3906,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				logCacheUsage,
 			}));
 			const resetLSPService = vi.fn();
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService,
 			}));
@@ -3701,7 +4074,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 				>()),
 				incrementDegradationCount: r6Mocks.incrementDegradationCount,
 			}));
-			vi.doMock("../clients/lsp/index.js", () => ({
+			vi.doMock("../clients/lsp/capabilities.js", () => ({
 				getLSPService: () => makeLspServiceDouble(),
 				resetLSPService: vi.fn(),
 			}));

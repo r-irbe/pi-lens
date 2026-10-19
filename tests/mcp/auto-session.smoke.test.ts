@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * Auto session_start visibility + self-heal smoke (#544).
  *

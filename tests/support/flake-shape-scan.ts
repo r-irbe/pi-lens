@@ -3,7 +3,7 @@
  *
  * Three deflake PRs in two days (#2531 alone fixed three shared-slot races)
  * and nothing counted the contention surface, so the set only grew. This
- * module owns the four detectors the ratchet (`tests/clients/flake-shape-
+ * module owns the seven detectors the ratchet (`tests/clients/flake-shape-
  * ratchet.test.ts`) runs over `tests/**\/*.test.ts` and — since #2563 — over
  * every non-test helper under `tests/support/**\/*.ts` (the time detectors
  * only; the spawn detector stays test-file-only, see
@@ -29,6 +29,14 @@
  *    (`tests/clients/runtime-session.test.ts`'s own recorded flake, real
  *    polling racing a real `testTimeout` budget). Reuses detector 3's exact
  *    fake/real-timers file-order tracking.
+ * 5. {@link scanNeverSettlingWait} — a never-settling promise (#2885).
+ * 6. {@link scanInProcessMock} — a `vi.mock`/`vi.doMock` of a module outside
+ *    {@link PROCESS_BOUNDARY_MODULES} (#4362), test files only.
+ * 7. {@link scanServiceDouble} — a hand-rolled double of a
+ *    {@link SERVICE_SURFACES} service (#4362), test files only.
+ *
+ * Detectors 6 and 7 pin identity: each hit names its module or service, and
+ * the ratchet keys it `<file>::<identity>` ({@link hitKey}).
  *
  * Built on `sweep-kit.ts` ({@link stripSource}, {@link listSourceFiles},
  * {@link relativePosix}) rather than a private walker — #2487's kit already
@@ -58,12 +66,38 @@
  *   still cannot resolve arbitrary aliases, so aliases remain conservative
  *   false positives. Quoted and commented helper names are excluded by
  *   `codeMatches`.
+ * - Detector 6 reads the callee through `isViMockCall`, which needs the
+ *   object to be the identifier `vi`: an alias (`const v = vi`,
+ *   `import { vi as v }`, `(vi).mock`, `vi!.mock`, `(vi as any).mock`) is
+ *   not seen (#4383 review F4; none in the tree today). `vi.spyOn` on a
+ *   module namespace and `vi.mock` in `tests/support/` (the global setup
+ *   mocks two modules) are out of scope.
+ * - Detector 7 reads one object literal at a time. A double split across
+ *   literals (`const s = { ...a, getStatus }` where `a` holds the other
+ *   members), built with `Object.assign`, written as a class
+ *   (`class FakeService implements LSPService`), assembled by a helper in
+ *   another module, or patched in later (`s.touchFile = vi.fn()`, which
+ *   `lsp-double-gate.ts` owns) is not seen (#4383 review F2).
+ * - Detector 7 needs one shared member whose value is a function or a call
+ *   result, so an all-identifier double (`{ touchFile: mockTouch, hasLSP:
+ *   mockHas, getStatus: mockStatus }`) is not seen (#4383 review F3). None
+ *   exists today: dropping the rule adds only capability data records.
+ * - Detector 7 covers the two #4344 G5 surfaces only (`SERVICE_SURFACES`).
+ *   Hand-rolled doubles of other in-process services (the siblings of
+ *   `makeRunnerCtx` and `makeRealRunnerEnv`) are unmeasured; widening is one
+ *   registry row plus its baseline rows.
+ * All of these are false negatives, the safe direction for a ratchet.
  */
 
+import * as fs from "node:fs";
+import { builtinModules } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Lang, parse } from "@ast-grep/napi";
 
+import { bareIdentifier } from "./lsp-double-gate.js";
+import { unwrapParens } from "./spawn-cwd-scan.js";
+import { isViMockCall, unquote } from "./vi-mock-export-gate.js";
 import {
 	createCallSiteScanner,
 	codeMatches,
@@ -144,6 +178,12 @@ export interface FlakeHit {
 	text: string;
 	/** Which sub-shape matched, for messages. */
 	reason: string;
+	/**
+	 * What the hit is, when the baseline must pin identity and not only a
+	 * count (#4362): the mocked module, or the doubled service. The ratchet
+	 * then keys the hit as `<file>::<identity>`.
+	 */
+	identity?: string;
 }
 
 export const DETECTOR_NAMES = [
@@ -152,6 +192,8 @@ export const DETECTOR_NAMES = [
 	"raw-timer-wait",
 	"ungoverned-wait-for",
 	"never-settling-wait",
+	"in-process-mock",
+	"service-double",
 ] as const;
 
 export type DetectorName = (typeof DETECTOR_NAMES)[number];
@@ -662,6 +704,381 @@ export function scanNeverSettlingWait(
 	return hits;
 }
 
+// ── 6. In-process module mock (#4362) ───────────────────────────────────────
+
+/**
+ * Modules a test may `vi.mock` without an admission: the process and host
+ * boundaries (AGENTS.md "Test requirements": mock only external binaries,
+ * network, host SDK seams and clocks). Keys are {@link mockTarget}'s
+ * normalized form. Every other target is an in-process module, and a new one
+ * needs a `// flake-shape: in-process-mock — <reason>` admission.
+ */
+export const PROCESS_BOUNDARY_MODULES: Readonly<Record<string, string>> = {
+	"@earendil-works/pi-coding-agent":
+		"the pi host SDK: the extension's host boundary, not pi-lens code",
+	"clients/safe-spawn":
+		"pi-lens's single child-process seam; a mock stands in for the spawned binary",
+	"node:child_process": "spawns a real child process",
+	"node:fs": "the host filesystem API",
+	"node:fs/promises": "the host filesystem API",
+	"node:https": "the network: installer downloads and release lookups",
+	"node:os": "host facts (home directory, platform, CPU count) from the OS",
+	"node:perf_hooks":
+		"the host runtime's clock and event-loop monitor (the Bun-compat case)",
+	pidusage: "reads the OS process table for another process's resource usage",
+};
+
+/** Placeholder target for a specifier the AST cannot read as a literal. */
+export const NON_LITERAL_MOCK_TARGET = "<non-literal>";
+
+/**
+ * One spelling-free name per mocked module: a `node:` builtin keeps its
+ * prefix (a bare `fs` gains it), a relative specifier resolves against the
+ * test file to a repo-relative posix path with no script extension, and a
+ * package name stays as written. `file` is the `tests/`-relative key the
+ * ratchet scans under, so `../../clients/x.js` from `tests/clients/a/`,
+ * `../clients/x.ts` and `../clients/x` from `tests/` all name `clients/x`
+ * (the same identity rule as `tests/config/project-trust-seam-ratchet.test.ts`).
+ */
+export function mockTarget(file: string, specifier: string): string {
+	if (specifier.startsWith("node:")) return specifier;
+	if (builtinModules.includes(specifier)) return `node:${specifier}`;
+	if (specifier.startsWith(".")) {
+		const absolute = path.resolve(
+			path.dirname(path.join(TESTS_ROOT, file)),
+			specifier,
+		);
+		return relativePosix(repoRoot, absolute).replace(/\.[cm]?[jt]s$/, "");
+	}
+	return specifier;
+}
+
+/**
+ * The module a `vi.mock`/`vi.doMock` call names: a string, a template with no
+ * substitution, or vitest's typed `import("…")` form. Anything else (a
+ * variable, a computed template) is unreadable and returns `undefined`, which
+ * the detector counts as in-process: unknown fails closed.
+ */
+function mockSpecifier(arg: SgNode | undefined): string | undefined {
+	if (!arg) return undefined;
+	const node = unwrapParens(arg);
+	if (node.kind() === "string") return unquote(node.text());
+	if (node.kind() === "template_string") {
+		return node
+			.children()
+			.some((child) => child.kind() === "template_substitution")
+			? undefined
+			: unquote(node.text());
+	}
+	if (
+		node.kind() === "call_expression" &&
+		node.field("function")?.kind() === "import"
+	) {
+		return mockSpecifier(node.field("arguments")?.namedChildren()[0]);
+	}
+	return undefined;
+}
+
+// `vi.mock`, `vi.doMock`, `vi["mock"]`: every spelling keeps `vi` followed by
+// `.` or `[` once comments and strings are blanked, so this lexical check only
+// skips the parse for a file with no `vi` member access at all.
+const MOCK_AST_TRIGGER = /\bvi\s*[.[]/;
+
+/**
+ * One hit per distinct in-process module a test file mocks with `vi.mock` or
+ * `vi.doMock` (#4362), with the module as the hit's identity, so the
+ * baseline pins WHICH modules each file mocks, not only how many: swapping
+ * one mocked module for another is a new entry, not a free pass (shape 36).
+ *
+ * Calls are read from the TypeScript AST (`isViMockCall`, the structural
+ * check the vi.mock export gate owns), so a comment or string quoting
+ * `vi.mock(` is not a call and never counts or excuses.
+ */
+export function scanInProcessMock(
+	file: string,
+	source: string,
+	context?: ScanContext,
+): FlakeHit[] {
+	const scan = context ?? scanContext(source);
+	if (!MOCK_AST_TRIGGER.test(scan.stripped)) return [];
+	const lines = source.split("\n");
+	const hits = new Map<string, FlakeHit>();
+	for (const call of syntaxRoot(scan).findAll({
+		rule: { kind: "call_expression" },
+	})) {
+		if (!isViMockCall(call.field("function"), ["mock", "doMock"])) continue;
+		const specifier = mockSpecifier(
+			call.field("arguments")?.namedChildren()[0],
+		);
+		const target =
+			specifier === undefined
+				? NON_LITERAL_MOCK_TARGET
+				: mockTarget(file, specifier);
+		if (Object.hasOwn(PROCESS_BOUNDARY_MODULES, target)) continue;
+		if (hits.has(target)) continue;
+		const line = call.range().start.line;
+		hits.set(target, {
+			line: line + 1,
+			text: lines[line]?.trim() ?? "",
+			reason: `in-process vi.mock of ${target}`,
+			identity: target,
+		});
+	}
+	return [...hits.values()].sort((a, b) => a.line - b.line);
+}
+
+// ── 7. Hand-rolled service double (#4362) ───────────────────────────────────
+
+/**
+ * An in-process service whose hand-rolled doubles the ratchet counts. The
+ * member vocabulary is read from the production declaration, never copied,
+ * so a method added to the service widens the detector in the same commit.
+ * `factories` are the shared double factories: an object passed to one, or
+ * spreading one's result, is seeded from it and is not hand-rolled.
+ *
+ * #4344 round 3 (G5) is the recurrence: one method added to `LSPClientInfo`
+ * and `LSPService` had to be added by hand to doubles in 40 test files (34
+ * client, 6 service).
+ */
+export interface ServiceSurface {
+	name: string;
+	/** Repo-relative production file that declares `name`. */
+	file: string;
+	factories: readonly string[];
+}
+
+export const SERVICE_SURFACES: readonly ServiceSurface[] = [
+	{ name: "LSPClientInfo", file: "clients/lsp/client.ts", factories: [] },
+	{
+		name: "LSPService",
+		file: "clients/lsp/index.ts",
+		factories: ["makeLspServiceDouble"],
+	},
+];
+
+/**
+ * Shared member names an object needs before it reads as a double of a
+ * surface. Measured on the 2026-10-14 tree: at 3 every hit is an LSP client
+ * or service stand-in; at 2 diagnostic rows (`serverId`, `root`) and unrelated
+ * records join.
+ */
+export const SERVICE_DOUBLE_MIN_MEMBERS = 3;
+
+const surfaceMemberCache = new Map<string, ReadonlySet<string>>();
+
+// The tree-sitter TypeScript grammar cannot parse an inline type import
+// (`Promise<import("./client.js").LSPDiagnostic[]>`): its error recovery
+// closed `LSPService` 2,300 lines early and dropped `hasLSP` and `getStatus`.
+// Blanking the `import("…").` prefix to spaces leaves the type name, keeps
+// every offset, and parses both surfaces with no ERROR node.
+const INLINE_TYPE_IMPORT = /\bimport\(\s*(["'])[^"'\n]*\1\s*\)\./g;
+
+/**
+ * The public instance members `name` declares in `source`: a class's
+ * methods, accessors and fields minus `constructor`, `static`, `private`,
+ * `protected` and `#private`; an interface's properties and method
+ * signatures. Throws when the declaration is missing or does not parse
+ * cleanly, so a renamed surface or a grammar gap reds instead of silently
+ * matching fewer members. `where` names the source in those errors.
+ */
+export function declaredMembers(
+	source: string,
+	name: string,
+	where: string,
+): Set<string> {
+	const blanked = source.replace(INLINE_TYPE_IMPORT, (match) =>
+		" ".repeat(match.length),
+	);
+	const declaration = parse(Lang.TypeScript, blanked)
+		.root()
+		.findAll({
+			rule: {
+				any: [{ kind: "class_declaration" }, { kind: "interface_declaration" }],
+			},
+		})
+		.find((node) => node.field("name")?.text() === name);
+	const body = declaration?.field("body");
+	if (!declaration || !body) {
+		throw new Error(`service surface ${name} is not declared in ${where}`);
+	}
+	const broken = declaration.find({ rule: { kind: "ERROR" } });
+	if (broken) {
+		throw new Error(
+			`service surface ${name} does not parse cleanly at ` +
+				`${where}:${broken.range().start.line + 1}; its member list would be partial. ` +
+				"Find the construct on that line the tree-sitter grammar cannot read: " +
+				"if it is a type form like the inline type import, blank it the way " +
+				"INLINE_TYPE_IMPORT does (same length, offsets kept); otherwise restate " +
+				"it in the production file (a named type alias usually parses).",
+		);
+	}
+	const members = new Set<string>();
+	for (const member of body.children()) {
+		if (
+			![
+				"method_definition",
+				"public_field_definition",
+				"property_signature",
+				"method_signature",
+			].includes(String(member.kind()))
+		)
+			continue;
+		const hidden = member
+			.children()
+			.some(
+				(child) =>
+					child.kind() === "static" ||
+					(child.kind() === "accessibility_modifier" &&
+						child.text() !== "public"),
+			);
+		const memberName = member.field("name");
+		if (hidden || memberName?.kind() !== "property_identifier") continue;
+		if (memberName.text() !== "constructor") members.add(memberName.text());
+	}
+	return members;
+}
+
+/** {@link declaredMembers} for a registered surface, read once per run. */
+export function surfaceMembers(surface: ServiceSurface): ReadonlySet<string> {
+	const cacheKey = `${surface.file}#${surface.name}`;
+	let members = surfaceMemberCache.get(cacheKey);
+	if (!members) {
+		members = declaredMembers(
+			fs.readFileSync(path.join(repoRoot, surface.file), "utf8"),
+			surface.name,
+			surface.file,
+		);
+		surfaceMemberCache.set(cacheKey, members);
+	}
+	return members;
+}
+
+// A value that is code to call: a method, a function, or a call result such
+// as `vi.fn()` or `vi.fn().mockResolvedValue(x)`. A shorthand or identifier
+// value is unknown and a literal is data.
+const CALLABLE_VALUE_KINDS = new Set([
+	"arrow_function",
+	"function_expression",
+	"call_expression",
+]);
+
+/**
+ * Own keys of an object literal (pairs, shorthands and methods), each with
+ * whether its value is callable. A double is called by the code under test;
+ * an object whose shared keys all hold data (`toMatchObject({ hover: true })`)
+ * is a record that happens to reuse the names.
+ */
+function objectKeys(object: SgNode): Map<string, boolean> {
+	const keys = new Map<string, boolean>();
+	for (const child of object.children()) {
+		const kind = child.kind();
+		if (kind === "shorthand_property_identifier") keys.set(child.text(), false);
+		if (kind !== "pair" && kind !== "method_definition") continue;
+		const key = child.field(kind === "pair" ? "key" : "name");
+		const name =
+			key?.kind() === "property_identifier"
+				? key.text()
+				: key?.kind() === "string"
+					? unquote(key.text())
+					: undefined;
+		if (name === undefined) continue;
+		const value = kind === "pair" ? child.field("value") : undefined;
+		keys.set(
+			name,
+			kind === "method_definition" ||
+				(value !== null &&
+					value !== undefined &&
+					CALLABLE_VALUE_KINDS.has(String(unwrapParens(value).kind()))),
+		);
+	}
+	return keys;
+}
+
+function calledName(call: SgNode | null | undefined): string | undefined {
+	if (call?.kind() !== "call_expression") return undefined;
+	return bareIdentifier(call.field("function") as SgNode);
+}
+
+/** The object is an argument of, or spreads the result of, a factory call. */
+function factorySeeded(
+	object: SgNode,
+	factories: ReadonlySet<string>,
+): boolean {
+	if (factories.size === 0) return false;
+	const parent = object.parent();
+	if (parent?.kind() === "arguments") {
+		const name = calledName(parent.parent());
+		if (name !== undefined && factories.has(name)) return true;
+	}
+	return object.children().some((child) => {
+		if (child.kind() !== "spread_element") return false;
+		const name = calledName(unwrapParens(child.namedChildren()[0] as SgNode));
+		return name !== undefined && factories.has(name);
+	});
+}
+
+/**
+ * One hit per object literal that carries at least
+ * {@link SERVICE_DOUBLE_MIN_MEMBERS} members of one {@link SERVICE_SURFACES}
+ * entry, at least one of them callable-valued, and is not seeded from a
+ * registered factory (#4362). A factory's overrides are seeded whichever
+ * surface their keys resemble: `makeLspServiceDouble({ getDiagnostics, … })`
+ * shares names with `LSPClientInfo` too. The hit's identity is the surface,
+ * so the baseline pins how many hand-rolled doubles of each service a file
+ * holds. An object matching two surfaces counts once, for the one it shares
+ * more members with (registry order breaks a tie).
+ */
+export function scanServiceDouble(
+	_file: string,
+	source: string,
+	context?: ScanContext,
+): FlakeHit[] {
+	const scan = context ?? scanContext(source);
+	const vocabularies = SERVICE_SURFACES.map((surface) => ({
+		surface,
+		members: surfaceMembers(surface),
+	}));
+	const factories = new Set(
+		SERVICE_SURFACES.flatMap((surface) => surface.factories),
+	);
+	// Lexical pre-check over comment-blanked text (quoted keys are real keys,
+	// so strings stay): skip the parse unless some surface could reach the
+	// threshold at all.
+	const words = new Set(
+		stripSource(source, { strings: "keep" }).match(/[A-Za-z_$][\w$]*/g) ?? [],
+	);
+	const reachable = vocabularies.filter(
+		({ members }) =>
+			[...members].filter((member) => words.has(member)).length >=
+			SERVICE_DOUBLE_MIN_MEMBERS,
+	);
+	if (reachable.length === 0) return [];
+	const lines = source.split("\n");
+	const hits: FlakeHit[] = [];
+	for (const object of syntaxRoot(scan).findAll({ rule: { kind: "object" } })) {
+		const keys = objectKeys(object);
+		if (keys.size < SERVICE_DOUBLE_MIN_MEMBERS) continue;
+		if (factorySeeded(object, factories)) continue;
+		let best: { name: string; shared: number } | undefined;
+		for (const { surface, members } of reachable) {
+			const shared = [...keys].filter(([key]) => members.has(key));
+			if (shared.length < SERVICE_DOUBLE_MIN_MEMBERS) continue;
+			if (!shared.some(([, callable]) => callable)) continue;
+			if (!best || shared.length > best.shared)
+				best = { name: surface.name, shared: shared.length };
+		}
+		if (!best) continue;
+		const line = object.range().start.line;
+		hits.push({
+			line: line + 1,
+			text: lines[line]?.trim() ?? "",
+			reason: `hand-rolled ${best.name} double (${best.shared} members)`,
+			identity: best.name,
+		});
+	}
+	return hits;
+}
+
 export const DETECTORS: Record<
 	DetectorName,
 	(file: string, source: string, context?: ScanContext) => FlakeHit[]
@@ -671,7 +1088,19 @@ export const DETECTORS: Record<
 	"raw-timer-wait": scanRawTimerWait,
 	"ungoverned-wait-for": scanUngovernedWaitFor,
 	"never-settling-wait": scanNeverSettlingWait,
+	"in-process-mock": scanInProcessMock,
+	"service-double": scanServiceDouble,
 };
+
+/**
+ * The mock detectors (#4362). They need no serialized lane (a mock adds no
+ * contention), so their admission is the header and the
+ * `ADMITTED_AFTER_BASELINE` entry alone, and they scan `.test.ts` files only.
+ */
+export const MOCK_DETECTORS: ReadonlySet<DetectorName> = new Set([
+	"in-process-mock",
+	"service-double",
+]);
 
 /**
  * Detectors run over the #2563 support population (non-test
@@ -689,51 +1118,97 @@ const SUPPORT_POPULATION_DETECTORS: readonly DetectorName[] = [
 	"never-settling-wait",
 ];
 
-let countsCache: Record<DetectorName, Record<string, number>> | undefined;
+/** Separates a file from a hit's identity in a ratchet key (#4362). */
+export const IDENTITY_SEPARATOR = "::";
+
+/**
+ * The ratchet key one hit counts under: the file, or `<file>::<identity>`
+ * when the detector pins identity (#4362).
+ */
+export function hitKey(file: string, hit: FlakeHit): string {
+	return hit.identity === undefined
+		? file
+		: `${file}${IDENTITY_SEPARATOR}${hit.identity}`;
+}
+
+let countsPromise:
+	| Promise<Record<DetectorName, Record<string, number>>>
+	| undefined;
+
+/**
+ * One macrotask turn. `@ast-grep/napi` releases a dropped tree's native
+ * memory from a finalizer that only runs once the event loop turns, so a
+ * synchronous pass over the ~1,400-file population holds every transient
+ * tree it parsed until the case ends (#3565; the same `setImmediate` turn
+ * `vi-mock-export-sweep.test.ts` and `project-trust-seam-ratchet.test.ts`
+ * already take). #4292 grew the population past the per-worker budget and
+ * this file peaked at 2,049 MB against 2,048 MB; one turn per file brings
+ * it back under the budget with byte-identical counts.
+ */
+function yieldToNapiFinalizer(): Promise<void> {
+	return new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function buildCounts(): Promise<
+	Record<DetectorName, Record<string, number>>
+> {
+	const counts = Object.fromEntries(
+		DETECTOR_NAMES.map((name) => [name, {}]),
+	) as Record<DetectorName, Record<string, number>>;
+	const scanFile = (
+		absolute: string,
+		detectors: readonly DetectorName[],
+	): void => {
+		const file = testsRelative(absolute);
+		if (SCAN_INFRASTRUCTURE.has(file)) return;
+		// readWalkedFile: a path that vanished between the walk and the read
+		// is out of the population, not a finding (#3082).
+		const source = readWalkedFile(absolute);
+		if (source === undefined) return;
+		const context = scanContext(source);
+		for (const name of detectors) {
+			for (const hit of DETECTORS[name](file, source, context)) {
+				const key = hitKey(file, hit);
+				counts[name][key] = (counts[name][key] ?? 0) + 1;
+			}
+		}
+	};
+	for (const absolute of testSourceFiles()) {
+		scanFile(absolute, DETECTOR_NAMES);
+		await yieldToNapiFinalizer();
+	}
+	// #2563: the support population — non-test helpers under tests/support/.
+	for (const absolute of supportHelperFiles()) {
+		scanFile(absolute, SUPPORT_POPULATION_DETECTORS);
+		await yieldToNapiFinalizer();
+	}
+	return counts;
+}
 
 /**
  * file → hit count, for every `tests/**\/*.test.ts` file and every non-test
  * `tests/support/**\/*.ts` helper (#2563) the detector flags.
+ *
+ * Async so the per-file event-loop turn ({@link yieldToNapiFinalizer}) can
+ * release each parsed tree's native memory while the population is walked;
+ * the counts are unchanged, only the peak RSS. The first call builds the
+ * shared promise, every later call awaits it.
  */
-export function countsByDetector(
+export async function countsByDetector(
 	detector: DetectorName,
-): Record<string, number> {
-	if (countsCache === undefined) {
-		const counts = Object.fromEntries(
-			DETECTOR_NAMES.map((name) => [name, {}]),
-		) as Record<DetectorName, Record<string, number>>;
-		const scanFile = (
-			absolute: string,
-			detectors: readonly DetectorName[],
-		): void => {
-			const file = testsRelative(absolute);
-			if (SCAN_INFRASTRUCTURE.has(file)) return;
-			// readWalkedFile: a path that vanished between the walk and the read
-			// is out of the population, not a finding (#3082).
-			const source = readWalkedFile(absolute);
-			if (source === undefined) return;
-			const context = scanContext(source);
-			for (const name of detectors) {
-				const hits = DETECTORS[name](file, source, context);
-				if (hits.length > 0) counts[name][file] = hits.length;
-			}
-		};
-		for (const absolute of testSourceFiles()) {
-			scanFile(absolute, DETECTOR_NAMES);
-		}
-		// #2563: the support population — non-test helpers under tests/support/.
-		for (const absolute of supportHelperFiles()) {
-			scanFile(absolute, SUPPORT_POPULATION_DETECTORS);
-		}
-		countsCache = counts;
-	}
-	return countsCache[detector];
+): Promise<Record<string, number>> {
+	countsPromise ??= buildCounts();
+	return (await countsPromise)[detector];
 }
 
 // ── Admission gate ──────────────────────────────────────────────────────────
 
-const ADMISSION_HEADER =
-	/^[ \t]*\/\/[ \t]*flake-shape:[ \t]*([\w-]+)[ \t]*—[ \t]*(.+)$/gm;
+function admissionHeaderPattern(detector = "[\\w-]+"): RegExp {
+	return new RegExp(
+		`^[ \\t]*\\/\\/[ \\t]*flake-shape:[ \\t]*(${detector})[ \\t]*—[ \\t]*(.+)$`,
+		"gm",
+	);
+}
 
 export interface AdmissionHeader {
 	detector: string;
@@ -744,12 +1219,20 @@ export interface AdmissionHeader {
  * The file's `// flake-shape: <detector> — <reason>` header, if present.
  * Admission of a NEW ratchet entry (a file not in the frozen baseline, or an
  * allowlisted file whose count rose) requires this header naming which
- * detector the entry is admitted under and why a mock is not faithful, AND
- * the file's membership in `vitest.config.ts`'s `wallClockBudgetInclude`
- * project (so it runs in the fully serialized lane) — see
- * `ADMITTED_AFTER_BASELINE` in `tests/clients/flake-shape-ratchet.test.ts`.
+ * detector the entry is admitted under and why a mock is not faithful, AND,
+ * for a timing or spawn detector, the file's membership in
+ * `vitest.config.ts`'s `wallClockBudgetInclude` project (so it runs in the
+ * fully serialized lane) — see `ADMITTED_AFTER_BASELINE` in
+ * `tests/clients/flake-shape-ratchet.test.ts`.
+ *
+ * With `detector`, returns the first header naming that detector, so a file
+ * admitted under two detectors (a real spawn and an in-process mock) carries
+ * one header for each (#4362). Without it, returns the file's first header.
  */
-export function admissionHeader(source: string): AdmissionHeader | undefined {
-	const match = firstCommentMatch(source, ADMISSION_HEADER);
+export function admissionHeader(
+	source: string,
+	detector?: DetectorName,
+): AdmissionHeader | undefined {
+	const match = firstCommentMatch(source, admissionHeaderPattern(detector));
 	return match ? { detector: match[1], reason: match[2].trim() } : undefined;
 }

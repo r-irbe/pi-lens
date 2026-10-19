@@ -1,0 +1,740 @@
+{
+ "note": "PR #4084 head 18271874a, captured 2026-10-07 (#4090 round 2). Runs: the cancelled CI run 37636737624 and its newer CI run 37637101565 as it stood mid-flight (status forced to in_progress). Check-runs of both suites started at or before 2026-10-07T14:36:00Z.",
+ "sha": "18271874a70d8b8e93f98547655895f0632a5237",
+ "workflowRuns": [
+  {
+   "id": 37637101565,
+   "name": "CI",
+   "event": "pull_request",
+   "workflow_id": 256729906,
+   "run_number": 9426,
+   "run_attempt": 1,
+   "status": "in_progress",
+   "conclusion": null,
+   "created_at": "2026-10-07T14:29:20Z",
+   "run_started_at": "2026-10-07T14:29:20Z",
+   "check_suite_id": 101957801991,
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237"
+  },
+  {
+   "id": 37636737624,
+   "name": "CI",
+   "event": "pull_request",
+   "workflow_id": 256729906,
+   "run_number": 9424,
+   "run_attempt": 1,
+   "status": "completed",
+   "conclusion": "cancelled",
+   "created_at": "2026-10-07T14:26:43Z",
+   "run_started_at": "2026-10-07T14:26:43Z",
+   "check_suite_id": 101956758794,
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237"
+  }
+ ],
+ "checkRuns": [
+  {
+   "id": 112848846680,
+   "name": "TLA+ models",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:35:05Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848846680",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848846680"
+  },
+  {
+   "id": 112848560287,
+   "name": "TLA+ models (shard 2/4)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:42Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560287",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560287"
+  },
+  {
+   "id": 112848560252,
+   "name": "TLA+ models (shard 4/4)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:39Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560252",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560252"
+  },
+  {
+   "id": 112848560176,
+   "name": "TLA+ models (shard 1/4)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560176",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560176"
+  },
+  {
+   "id": 112848560118,
+   "name": "TLA+ models (shard 3/4)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:49Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560118",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112848560118"
+  },
+  {
+   "id": 112847550397,
+   "name": "Unit tests (shard 2/5)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:40Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550397",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550397"
+  },
+  {
+   "id": 112847550286,
+   "name": "Changelog fragment (fast-fail)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:31Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550286",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550286"
+  },
+  {
+   "id": 112847550257,
+   "name": "Unit tests (shard 1/5)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:26Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550257",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550257"
+  },
+  {
+   "id": 112847550255,
+   "name": "Targeted tests (advisory)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:26Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550255",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550255"
+  },
+  {
+   "id": 112847550232,
+   "name": "Production install build (--omit=dev, from source)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:21Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550232",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550232"
+  },
+  {
+   "id": 112847550218,
+   "name": "Dependency boundaries",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:50Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550218",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550218"
+  },
+  {
+   "id": 112847550193,
+   "name": "Changed files (advisory)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:13Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550193",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550193"
+  },
+  {
+   "id": 112847550175,
+   "name": "Strict install (cold npm cache) (fast-fail)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:34:24Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550175",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550175"
+  },
+  {
+   "id": 112847550115,
+   "name": "Unit tests (shard 4/5)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:22Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550115",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550115"
+  },
+  {
+   "id": 112847550102,
+   "name": "Install test (macos-latest)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:11Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550102",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550102"
+  },
+  {
+   "id": 112847550093,
+   "name": "Unit tests (shard 5/5)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:35Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550093",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550093"
+  },
+  {
+   "id": 112847550092,
+   "name": "Install test (ubuntu-latest)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:47Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550092",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550092"
+  },
+  {
+   "id": 112847550079,
+   "name": "Unit tests (shard 3/5)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:33:21Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550079",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550079"
+  },
+  {
+   "id": 112847550025,
+   "name": "Install test (windows-latest)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:32:24Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550025",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847550025"
+  },
+  {
+   "id": 112847549501,
+   "name": "Lint & type-check",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:32:44Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101957801991
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847549501",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37637101565/job/112847549501"
+  },
+  {
+   "id": 112847519903,
+   "name": "CodeQL (${{ matrix.language }}) (advisory)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:32:17Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112847519903",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112847519903"
+  },
+  {
+   "id": 112847519389,
+   "name": "Unit tests Windows (advisory)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:32:17Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112847519389",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112847519389"
+  },
+  {
+   "id": 112847512393,
+   "name": "Heavy advisory gate (advisory)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:32:16Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112847512393",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112847512393"
+  },
+  {
+   "id": 112846855828,
+   "name": "Unit tests",
+   "status": "completed",
+   "conclusion": "failure",
+   "started_at": "2026-10-07T14:32:10Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112846855828",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112846855828"
+  },
+  {
+   "id": 112846138032,
+   "name": "TLA+ models",
+   "status": "completed",
+   "conclusion": "failure",
+   "started_at": "2026-10-07T14:31:02Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112846138032",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112846138032"
+  },
+  {
+   "id": 112845435192,
+   "name": "TLA+ models (shard 4/4)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:27:59Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845435192",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845435192"
+  },
+  {
+   "id": 112845435161,
+   "name": "TLA+ models (shard 2/4)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:27:59Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845435161",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845435161"
+  },
+  {
+   "id": 112845435089,
+   "name": "TLA+ models (shard 1/4)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:27:59Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845435089",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845435089"
+  },
+  {
+   "id": 112845434994,
+   "name": "TLA+ models (shard 3/4)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:27:59Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845434994",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112845434994"
+  },
+  {
+   "id": 112844834307,
+   "name": "Unit tests (shard 3/5)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:26:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834307",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834307"
+  },
+  {
+   "id": 112844834278,
+   "name": "Targeted tests (advisory)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:26:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834278",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834278"
+  },
+  {
+   "id": 112844834049,
+   "name": "Unit tests (shard 5/5)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:29:22Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834049",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834049"
+  },
+  {
+   "id": 112844834008,
+   "name": "Unit tests (shard 1/5)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:28:48Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834008",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844834008"
+  },
+  {
+   "id": 112844833965,
+   "name": "Unit tests (shard 4/5)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:29:12Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833965",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833965"
+  },
+  {
+   "id": 112844833821,
+   "name": "Strict install (cold npm cache) (fast-fail)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:26:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833821",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833821"
+  },
+  {
+   "id": 112844833727,
+   "name": "Production install build (--omit=dev, from source)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:26:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833727",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833727"
+  },
+  {
+   "id": 112844833721,
+   "name": "Unit tests (shard 2/5)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:28:23Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833721",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833721"
+  },
+  {
+   "id": 112844833703,
+   "name": "Install test (windows-latest)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:27:10Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833703",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833703"
+  },
+  {
+   "id": 112844833654,
+   "name": "Install test (macos-latest)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:27:05Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833654",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833654"
+  },
+  {
+   "id": 112844833583,
+   "name": "Install test (ubuntu-latest)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:26:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833583",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833583"
+  },
+  {
+   "id": 112844833572,
+   "name": "Dependency boundaries",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:28:17Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833572",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833572"
+  },
+  {
+   "id": 112844833520,
+   "name": "Lint & type-check",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "started_at": "2026-10-07T14:26:45Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833520",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833520"
+  },
+  {
+   "id": 112844833298,
+   "name": "Changelog fragment (fast-fail)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:28:16Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833298",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833298"
+  },
+  {
+   "id": 112844833003,
+   "name": "Changed files (advisory)",
+   "status": "completed",
+   "conclusion": "success",
+   "started_at": "2026-10-07T14:27:41Z",
+   "head_sha": "18271874a70d8b8e93f98547655895f0632a5237",
+   "check_suite": {
+    "id": 101956758794
+   },
+   "app": {
+    "slug": "github-actions"
+   },
+   "html_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833003",
+   "details_url": "https://github.com/apmantza/pi-lens/actions/runs/37636737624/job/112844833003"
+  }
+ ]
+}

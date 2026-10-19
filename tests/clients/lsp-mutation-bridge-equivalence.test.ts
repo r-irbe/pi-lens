@@ -23,7 +23,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
 	type LspMutationContext,
@@ -213,13 +213,133 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 	});
 
 	it("stamp the read-guard as written on both branches", () => {
-		// Both mark the file as already covered by this session's own write, so
-		// an immediate re-edit is allowed with no real Read — the same OUTCOME
+		// Both mark the changed range as covered by this session's own write, so
+		// an immediate re-edit inside it is allowed with no real Read — the same OUTCOME
 		// reached via each branch's own real production mechanism (direct:
 		// `context.readGuard` set explicitly; bridge fallback: the bridge's
 		// internal `deps.getRuntime().readGuard.recordWritten`).
-		expect(runtimeDirect.readGuard.checkEdit(fileDirect).action).toBe("allow");
-		expect(runtimeBridge.readGuard.checkEdit(fileBridge).action).toBe("allow");
+		expect(runtimeDirect.readGuard.checkEdit(fileDirect, [1, 1]).action).toBe(
+			"block",
+		);
+		expect(runtimeBridge.readGuard.checkEdit(fileBridge, [1, 1]).action).toBe(
+			"block",
+		);
+		expect(
+			runtimeDirect.readGuard.checkEdit(fileDirect, [
+				EDIT_LINE_1BASED,
+				EDIT_LINE_1BASED,
+			]).action,
+		).toBe("allow");
+		expect(
+			runtimeBridge.readGuard.checkEdit(fileBridge, [
+				EDIT_LINE_1BASED,
+				EDIT_LINE_1BASED,
+			]).action,
+		).toBe("allow");
+	});
+
+	// #4187 R2-4: the server computed the bytes and nothing checked the file
+	// before the edit, so on both branches the edit ends an authorship
+	// another writer broke instead of re-baselining it. Recurrence: the
+	// direct branch's own `recordWritten` advanced it, so a zero-read edit of
+	// the other writer's line passed there while the bridge branch refused it.
+	it("end an authorship another writer broke on both branches (#4131)", () => {
+		const fileA_Direct = writeFixture(dirDirect, "authored.ts");
+		const fileA_Bridge = writeFixture(dirBridge, "authored.ts");
+		for (const [runtime, filePath] of [
+			[runtimeDirect, fileA_Direct],
+			[runtimeBridge, fileA_Bridge],
+		] as const) {
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4131-bash",
+			});
+			const lines = [...FIXTURE_LINES];
+			lines[1] = "const b = 'EXTERNAL';";
+			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+			runtime.readGuard.retireChangedAuthorship(filePath);
+			lines[EDIT_LINE_1BASED - 1] = "hello lsp;";
+			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+		}
+		recordLspMutation(
+			{
+				cwd: dirDirect,
+				correlationId: "equiv-direct-4131",
+				tool: "lsp_navigation:executeCommand",
+				source: "lsp-execute-command",
+				runtime: runtimeDirect as never,
+				cacheManager: cacheManagerDirect,
+				readGuard: runtimeDirect.readGuard,
+				emitSummary: false,
+			},
+			{ results: resultsFor(fileA_Direct) },
+		);
+		recordLspMutation(
+			{
+				cwd: dirBridge,
+				correlationId: "equiv-bridge-4131",
+				tool: "lsp_navigation:executeCommand",
+				source: "lsp-execute-command",
+				emitSummary: false,
+			},
+			{ results: resultsFor(fileA_Bridge) },
+		);
+		for (const [runtime, filePath] of [
+			[runtimeDirect, fileA_Direct],
+			[runtimeBridge, fileA_Bridge],
+		] as const) {
+			const verdict = runtime.readGuard.checkEdit(filePath, [2, 2]);
+			expect(verdict.action).toBe("block");
+			expect(verdict.reason).toContain("File modified since your write");
+		}
+	});
+
+	it("keeps authorship for an owned write on both branches (#4187 R4)", () => {
+		for (const [runtime, filePath, dir] of [
+			[runtimeDirect, fileDirect, dirDirect],
+			[runtimeBridge, fileBridge, dirBridge],
+		] as const) {
+			runtime.readGuard.recordWritten(filePath, {
+				stampFileTime: false,
+				toolCallId: "call-4187-owned-lsp",
+			});
+			const lines = [...FIXTURE_LINES];
+			lines[EDIT_LINE_1BASED - 1] = "owned lsp;";
+			fs.writeFileSync(filePath, `${lines.join("\n")}\n`, "utf-8");
+			// The license `handleToolCall` records for the call before the write
+			// (`retireInProcessToolAuthorship` → `noteCheckedPaths`); the
+			// tool_call → license chain itself is pinned by
+			// tests/clients/runtime-tool-call.test.ts (#4187 R4-1).
+			runtime.readGuard.noteCheckedPaths("call-4187-owned-lsp", [filePath]);
+			const context: LspMutationContext =
+				dir === dirDirect
+					? {
+							cwd: dir,
+							correlationId: "owned-direct",
+							toolCallId: "call-4187-owned-lsp",
+							tool: "lsp_navigation:executeCommand",
+							source: "lsp-execute-command",
+							runtime: runtime as never,
+							cacheManager: cacheManagerDirect,
+							readGuard: runtime.readGuard,
+							emitSummary: false,
+						}
+					: {
+							cwd: dir,
+							correlationId: "owned-bridge",
+							toolCallId: "call-4187-owned-lsp",
+							tool: "lsp_navigation:executeCommand",
+							source: "lsp-execute-command",
+							emitSummary: false,
+						};
+			recordLspMutation(context, { results: resultsFor(filePath) });
+			expect(
+				runtime.readGuard.checkEdit(filePath, [
+					EDIT_LINE_1BASED,
+					EDIT_LINE_1BASED,
+				]).action,
+			).toBe("allow");
+		}
 	});
 
 	// #2450 fix round 3 (minor): `beforeEach` above only ever exercises
@@ -315,5 +435,74 @@ describe("bookkeepLspMutation — direct path and bridge fallback are equivalent
 				emitSummary: false,
 			};
 		}
+	});
+
+	// #3763 r2 (F2): an LSP edit that lands after its caller's session was
+	// replaced drops only that session's state (the read-guard stamp, the
+	// turn-state entry) and keeps the facts about the bytes (the receipt and
+	// the file's seq), on both branches: the direct one in
+	// `bookkeepLspMutation`, the fallback through the bridge's lineage fence.
+	// The recurrence: a dead-session fence that skipped the whole file.
+	it("keep the receipt and drop the turn state on both branches once the session is replaced", () => {
+		const record = (
+			dir: string,
+			runtime: RuntimeCoordinator,
+			context: Omit<LspMutationContext, "session">,
+		) => {
+			const filePath = writeFixture(dir, "dead.ts");
+			// Aged, so only an explicit read-guard credit can allow an edit.
+			const longAgo = new Date("2000-01-01T00:00:00Z");
+			fs.utimesSync(filePath, longAgo, longAgo);
+			const session = runtime.captureSessionGeneration();
+			runtime.resetForSession();
+			recordLspMutation(
+				{ ...context, session },
+				{ results: resultsFor(filePath) },
+			);
+			return filePath;
+		};
+		const stamp = vi.fn();
+		const direct = record(dirDirect, runtimeDirect, {
+			cwd: dirDirect,
+			correlationId: "equiv-dead-direct",
+			tool: "lsp_navigation:rename",
+			source: "lsp-rename",
+			runtime: runtimeDirect as never,
+			cacheManager: cacheManagerDirect,
+			readGuard: { recordWritten: stamp },
+			emitSummary: false,
+		});
+		const bridge = record(dirBridge, runtimeBridge, {
+			cwd: dirBridge,
+			correlationId: "equiv-dead-bridge",
+			tool: "lsp_navigation:rename",
+			source: "lsp-rename",
+			emitSummary: false,
+		});
+		const facts = (
+			dir: string,
+			filePath: string,
+			runtime: RuntimeCoordinator,
+			cacheManager: CacheManager,
+		) => ({
+			receipt: readChangesSince(dir, 0).some(
+				(change) => change.filePath === filePath,
+			),
+			fileSeq: runtime.getFileSeq(filePath),
+			inTurnState: Object.keys(
+				cacheManager.readTurnState(dir).files ?? {},
+			).some((key) => key.endsWith("dead.ts")),
+			// The live session's read guard: the bridge stamps it through its
+			// live getter, so only the lineage keeps the dead edit out.
+			verdict: runtime.readGuard.checkEdit(filePath, [1, 1]).action,
+		});
+		expect([
+			facts(dirDirect, direct, runtimeDirect, cacheManagerDirect),
+			facts(dirBridge, bridge, runtimeBridge, cacheManagerBridge),
+		]).toEqual([
+			{ receipt: true, fileSeq: 1, inTurnState: false, verdict: "block" },
+			{ receipt: true, fileSeq: 1, inTurnState: false, verdict: "block" },
+		]);
+		expect(stamp).not.toHaveBeenCalled();
 	});
 });

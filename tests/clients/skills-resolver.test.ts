@@ -53,11 +53,11 @@ import {
  * (investigated on #2587).
  *
  * `resolveSkillPaths` IS the function the real `resources_discover` handler
- * calls (`index.ts` now does `skillPaths: resolveSkillPaths(import.meta.url)`
- * verbatim) — these tests drive it directly with synthetic `file://` URLs
- * built over real temp directories (real `fs` calls, no mocked filesystem
- * except the one EACCES injection below), rather than a hand-fed
- * reimplementation of the check.
+ * calls (`index.ts` now does `void resolveSkillPaths(import.meta.url)` for the
+ * health record only — it contributes no path, #1416) — these tests drive it
+ * directly with synthetic `file://` URLs built over real temp directories
+ * (real `fs` calls, no mocked filesystem except the one EACCES injection
+ * below), rather than a hand-fed reimplementation of the check.
  *
  * Review round 2, F1: the layout table (A–H) below is checked against pi's
  * REAL loader (`loadSkillsFromDirInternal` / `collectSkillEntries`, verified

@@ -45,24 +45,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-	classifyCleanBehavior,
-	classifyFirstPublish,
 	COMPARABLE_FIRST_PUBLISH,
 	DRIFT_SUMMARY_PATH,
+	MEASURED_CLEAN_BEHAVIORS,
+	buildMatrixObservations,
 	createPublishTraceDrainer,
 	findCleanSignalDrift,
 	strategyKeyForLang,
+	targetLangForFixture,
 } from "./lib/clean-signal.mjs";
 import {
 	bootstrapFixtureWorkspace,
 	withScratchHome,
 } from "./lib/lsp-fixture-workspace.mjs";
-import {
-	mergeRows,
-	mergeSrc,
-	parseTable,
-	replaceTable,
-} from "./lib/md-matrix.mjs";
+import { createProbeFixture } from "./lib/probe-fixture.mjs";
+import { refreshCapabilityMatrix } from "./lib/md-matrix.mjs";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -97,7 +94,9 @@ const { SERVER_DIAGNOSTIC_STRATEGIES } = await imp(
 	"dist/clients/lsp/wait-policy/strategies.js",
 );
 let ensureTool;
-if (install) ({ ensureTool } = await imp("dist/clients/installer/index.js"));
+if (install) {
+	({ ensureTool } = await imp("dist/clients/installer/index.js"));
+}
 
 // #529/#541/#558 drift check: wait-policy/strategies.ts keys its table by SERVER
 // ID, which usually equals the fixture's `lang`, but a few fixtures use a
@@ -134,16 +133,10 @@ function lookupSilentOnClean(lang) {
 	return SERVER_DIAGNOSTIC_STRATEGIES[strategyKeyForLang(lang)]?.silentOnClean;
 }
 
-// Budgets (reuse the original probe's generosity — this is off the hot path).
-const CLIENT_WAIT_MS = 30000; // cold spawn + initialize
-const PROVE_LIVE_WAIT_MS = 8000; // first touch: cold analysis may be slow (match smoke-tools)
-const STEP_WAIT_MS = 2500; // per-touch publish budget (matches the old probe)
-const SETTLE_MS = 400; // let a late publish land + past the touch debounce
 // Hard per-server cap so one wedged server can't eat the nightly. Sized to cover
 // a cold spawn (CLIENT_WAIT_MS) + the two probe steps + settle, with margin.
 const PER_SERVER_TIMEOUT_MS = 45000;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const src = process.env.CI ? "ci" : "dev";
 
 // ---- publish capture ------------------------------------------------------
@@ -195,33 +188,19 @@ const drainPublishTrace = createPublishTraceDrainer({
 	},
 });
 
-// A byte-changing, diagnostic-neutral edit: append a trailing comment line in the
-// file's comment syntax (falls back to a blank line). Keeps the diagnostic SET
-// unchanged so a re-publish is purely the server's clean-scan behavior.
-function commentFor(file) {
-	const ext = path.extname(file).toLowerCase();
-	if (
-		[
-			".py",
-			".rb",
-			".sh",
-			".yaml",
-			".yml",
-			".toml",
-			".tf",
-			".ex",
-			".exs",
-			".nix",
-			".ps1",
-		].includes(ext)
-	)
-		return "#";
-	if ([".lua", ".sql", ".hs"].includes(ext)) return "--";
-	if ([".clj", ".ml", ".mli"].includes(ext)) return ";;"; // best-effort; ocaml uses (* *) but a trailing line is harmless bytes
-	return "//"; // js/ts/go/rust/c/cpp/java/kotlin/php/dart/zig/vue/svelte/prisma…
-}
-
 const lsp = getLSPService();
+const probeFixture = createProbeFixture({
+	lsp,
+	repoRoot,
+	install,
+	ensureTool,
+	initLSPConfig,
+	getServersForFileWithConfig,
+	bootstrapFixtureWorkspace,
+	drainPublishTrace,
+	pubLogSize,
+	sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+});
 const fixtures = langs.length
 	? LSP_FIXTURES.filter((f) => langs.includes(f.lang))
 	: LSP_FIXTURES;
@@ -264,104 +243,6 @@ for (const fx of fixtures) {
 	console.error(
 		`[${fx.lang}] mode=${row.mode} clean-behavior=${row.behavior}${row.tierLabel ? ` (tier ${row.tierLabel})` : ""} — ${row.detail}`,
 	);
-}
-
-async function probeFixture(fx, dst, row) {
-	// `dst` is pre-created by the caller (mkdtemp'd BEFORE `withTimeout` starts
-	// the race, so its `finally` can always clean it up, even if bootstrapping
-	// itself times out) — pass it straight through as `workspace`.
-	const { absFile } = await bootstrapFixtureWorkspace(fx, {
-		initLSPConfig,
-		repoRoot,
-		workspace: dst,
-	});
-	row.serverId = getServersForFileWithConfig(absFile).find(
-		(server) => server.role !== "auxiliary",
-	)?.id;
-	if (install && ensureTool) {
-		for (const t of fx.tools ?? []) await ensureTool(t).catch(() => undefined);
-	}
-	if (!lsp.supportsLSP(absFile)) {
-		row.mode = "no-lsp";
-		row.detail = "no LSP server registered for this file";
-		return;
-	}
-
-	const auxIds = fx.auxiliaryServerIds ?? [];
-	const useAux = auxIds.length > 0;
-	const touch = (content, diagWaitMs) =>
-		lsp.touchFile(absFile, content, {
-			diagnostics: "document",
-			collectDiagnostics: true,
-			clientScope: useAux ? "with-auxiliary" : "primary",
-			...(useAux ? { auxiliaryServerIds: auxIds } : {}),
-			maxClientWaitMs: CLIENT_WAIT_MS,
-			maxDiagnosticsWaitMs: diagWaitMs,
-			source: "clean-probe",
-		});
-
-	const dirtyContent = fs.readFileSync(absFile, "utf8");
-
-	// PHASE-AWARE capture: one sink per phase, switched between touches (a
-	// publish can land during touchFile, the settle window, or the capability
-	// read, so the sink stays live across each phase's whole span):
-	//   dirty phase — the first touch: cold spawn + initialize + first analysis
-	//     (generous budget + settle, so a slow cold publish is both captured AND
-	//     attributed to the dirty phase, not leaked into the next one);
-	//   clean-transition phase — a byte-changing, diagnostic-neutral edit (the
-	//     clean→clean analog): bytes differ so the file re-opens (the touch-notify
-	//     debounce doesn't dedupe it) and the server re-scans, while the
-	//     diagnostic SET is unchanged. Publish here (and whether it carries a
-	//     version) is the discriminator.
-	const dirtyPubs = [];
-	const cleanPubs = [];
-	let dirtyResult;
-	let support;
-	try {
-		drainPublishTrace.reset(pubLogSize());
-		dirtyResult = await touch(dirtyContent, PROVE_LIVE_WAIT_MS);
-		await sleep(SETTLE_MS);
-		support = await lsp.getWorkspaceDiagnosticsSupport(absFile);
-		await sleep(SETTLE_MS);
-		// Phase boundary: every publish written so far is the dirty touch's.
-		drainPublishTrace(dirtyPubs, row.serverId);
-
-		fs.writeFileSync(
-			absFile,
-			`${dirtyContent}\n${commentFor(fx.file)} clean-probe edit\n`,
-		);
-		await sleep(SETTLE_MS);
-		await touch(fs.readFileSync(absFile, "utf8"), STEP_WAIT_MS);
-		await sleep(SETTLE_MS);
-	} finally {
-		drainPublishTrace(cleanPubs, row.serverId);
-	}
-
-	row.mode = support?.mode ?? "unknown";
-	if (row.mode === "pull") {
-		row.behavior = "n/a (pull)";
-		row.tier = 1;
-		row.tierLabel = "1";
-		row.detail = "pull-mode: authoritative clean via textDocument/diagnostic";
-		return;
-	}
-
-	const obs = {
-		dirtyPublishes: dirtyPubs.length,
-		dirtyVersioned: dirtyPubs.filter((p) => p.versioned).length,
-		cleanTransitionPublishes: cleanPubs.length,
-		cleanTransitionVersioned: cleanPubs.filter((p) => p.versioned).length,
-	};
-	const dirtyDiagCount = Array.isArray(dirtyResult) ? dirtyResult.length : 0;
-	const verdict = classifyCleanBehavior(obs);
-	// #3310: the first-publish class comes from the dirty phase's publish ORDER,
-	// which this trace already holds — no extra touch, no extra server time.
-	const firstPublishVerdict = classifyFirstPublish(dirtyPubs);
-	row.firstPublish = firstPublishVerdict.firstPublish;
-	row.behavior = verdict.behavior;
-	row.tier = verdict.tier;
-	row.tierLabel = verdict.tierLabel;
-	row.detail = `dirtyPubs=${obs.dirtyPublishes}(v:${obs.dirtyVersioned}) cleanPubs=${obs.cleanTransitionPublishes}(v:${obs.cleanTransitionVersioned}) dirtyDiags=${dirtyDiagCount} first-publish=${row.firstPublish} — ${verdict.reason}; ${firstPublishVerdict.reason}`;
 }
 
 function withTimeout(promise, ms, row) {
@@ -506,32 +387,28 @@ try {
 } catch {}
 process.exit(0);
 
-// Resolve a `clean: true` fixture (e.g. typescript-clean) onto its base lang's
-// row (typescript), winning over the dirty fixture's diagnostic-neutral-edit
-// approximation for the same base lang — the ONE resolution rule shared by the
-// console drift report and the matrix merge, so they never disagree. Only rows
-// with a comparable classification are kept (mirrors `measurable` below).
+// Resolve a `clean: true` fixture onto its base lang's row (clean fixture wins)
+// and keep only rows with at least one comparable axis. Shared by the console
+// drift report and the matrix refresh, so they never disagree (#3310). The
+// matrix writer itself stays dependency-free; this classification lives here.
 function resolveTargetLangRows(measuredRows) {
-	// #3310: the two axes are independently measurable — a server can produce a
-	// classifiable first-publish class while its clean-behavior comes back
-	// `unknown` (and vice versa). A row is in the population when EITHER axis
-	// says something; each column below is written only when its OWN axis is
-	// comparable, so an unmeasured axis never blanks a prior good value.
 	const measurable = measuredRows.filter(
 		(r) =>
-			r.behavior === "publishes-versioned" ||
-			r.behavior === "publishes-unversioned" ||
-			r.behavior === "silent" ||
+			MEASURED_CLEAN_BEHAVIORS.has(r.behavior) ||
 			COMPARABLE_FIRST_PUBLISH.has(r.firstPublish),
 	);
 	const byTargetLang = new Map();
 	for (const r of measurable) {
-		const targetLang = r.cleanFixture ? r.lang.replace(/-clean$/, "") : r.lang;
+		const targetLang = targetLangForFixture(r.lang, r.cleanFixture);
 		const prev = byTargetLang.get(targetLang);
 		if (prev && prev.cleanFixture && !r.cleanFixture) continue; // clean fixture wins
 		byTargetLang.set(targetLang, { ...r, lang: targetLang, targetLang });
 	}
 	return [...byTargetLang.values()];
+}
+
+function nameList(langs) {
+	return langs.length ? langs.join(", ") : "none";
 }
 
 function updateMatrix(measuredRows) {
@@ -543,73 +420,44 @@ function updateMatrix(measuredRows) {
 		return;
 	}
 	const text = fs.readFileSync(docPath, "utf8");
-	const marker = "| lang | server |";
-	const tbl = parseTable(text, marker);
-	if (!tbl) {
-		console.error("matrix update skipped: capability table not found in doc");
-		return;
-	}
-	// Only classifications we're confident in are authoritative — resolveTargetLangRows
-	// already filters to rows with at least one comparable axis (#3310) and applies
-	// the clean-fixture-wins rule (a `clean: true` fixture like typescript-clean writes
-	// to its BASE lang's row (typescript): a genuinely clean file is the authoritative
-	// clean→clean observation, and typescript measurably re-publishes while dirty but
-	// goes silent once clean — the clean-file behavior is the one #458 (and the
-	// production budget-wait) cares about). `unknown`/`n/a (pull)`/`no-lsp` are NOT
-	// written — don't clobber a prior dev-measured value with a CI non-result.
-	const keyIdx = tbl.header.indexOf("lang");
-	const srcIdx = tbl.header.indexOf("src");
-	const existingByLang = new Map(tbl.rows.map((c) => [c[keyIdx], c]));
+	// #529/#541/#558 drift footnote: same targetLangRows the table merge below
+	// uses (clean fixture wins), so the footnote and the row it's about agree.
+	// NEVER a CI gate — this only rewrites a footnote section in the doc. #558:
+	// native-ts7 rows are compared too, against an explicit `false` expectation
+	// (see the drift-check comment above), not classic's marker.
 	const targetLangRows = resolveTargetLangRows(measuredRows);
-	const measured = targetLangRows.map((r) => {
-		const prior = existingByLang.get(r.targetLang);
-		const behaviorComparable =
-			r.behavior === "publishes-versioned" ||
-			r.behavior === "publishes-unversioned" ||
-			r.behavior === "silent";
-		return {
-			lang: r.targetLang,
-			...(behaviorComparable
+	let out = writeDriftFootnote(
+		text,
+		findCleanSignalDrift(targetLangRows, lookupSilentOnClean),
+	);
+	// #3401: the table merge, the `first-publish` expiry, and the
+	// clean-behavior/tier hysteresis all live in the shared refresh entry so
+	// they can be driven with recorded run inputs in tests (no LSP spawn).
+	const result = refreshCapabilityMatrix(
+		out,
+		buildMatrixObservations(targetLangRows),
+		{
+			src,
+			// A subset run (`probe-clean-signal.mjs typescript`) says nothing about
+			// the langs it did not probe: their expiry clock and tier holds stand.
+			...(langs.length
 				? {
-						"clean-behavior": r.behavior,
-						tier: r.tierLabel || String(r.tier),
+						probedLangs: fixtures.map((f) =>
+							targetLangForFixture(f.lang, f.clean),
+						),
 					}
 				: {}),
-			// #3310: only a CLASSIFIABLE first-publish observation is written, so an
-			// `empty-only`/`unknown` run never blanks a prior measured class (the
-			// same merge-guard rule the clean-behavior column follows, #390).
-			...(COMPARABLE_FIRST_PUBLISH.has(r.firstPublish)
-				? { "first-publish": r.firstPublish }
-				: {}),
-			src: mergeSrc(prior ? prior[srcIdx] : "", src),
-		};
-	});
-	const merged = mergeRows(
-		tbl.rows,
-		tbl.header,
-		measured,
-		"lang",
-		["clean-behavior", "first-publish", "tier", "src"],
-		{ updateOnly: true },
+		},
 	);
-	let out = replaceTable(text, marker, tbl.header, tbl.sep, merged);
-	if (!out) out = text;
-
-	// #529/#541/#558 drift footnote: same targetLangRows the table merge above
-	// just used (clean fixture wins), so the footnote and the row it's about
-	// agree. NEVER a CI gate — this only rewrites a footnote section in the doc.
-	// #558: native-ts7 rows are compared too, against an explicit `false`
-	// expectation (see the drift-check comment above), not classic's marker.
-	const footnoteWarnings = findCleanSignalDrift(
-		targetLangRows,
-		lookupSilentOnClean,
-	);
-	out = writeDriftFootnote(out, footnoteWarnings);
-
+	if (result.reason) {
+		console.error(`matrix update skipped: ${result.reason}`);
+		return;
+	}
+	out = result.text;
 	if (out !== text) {
 		fs.writeFileSync(docPath, out);
 		console.error(
-			`Updated docs/lsp-capability-matrix.md clean-behavior column (${measured.length} servers classified, ${tbl.rows.length} rows preserved).`,
+			`Updated docs/lsp-capability-matrix.md (committed: ${nameList(result.committedLangs)}; pending: ${nameList(result.pendingLangs)}; expired: ${nameList(result.expiredLangs)}).`,
 		);
 	} else {
 		console.error("matrix clean-behavior column: no changes.");

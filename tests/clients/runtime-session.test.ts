@@ -26,7 +26,10 @@ import {
 	loadPiLensProjectConfig,
 	type PiLensProjectConfig,
 } from "../../clients/project-lens-config.js";
-import { handleSessionStart } from "../../clients/runtime-session.js";
+import {
+	handleSessionStart,
+	STARTUP_TASK_DEFER_MS,
+} from "../../clients/runtime-session.js";
 import { _resetSlowFsForTests } from "../../clients/slow-fs.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import {
@@ -59,8 +62,10 @@ function findDeadPid(): number {
 // afterEach cleanup would then race). supportsLSP:false short-circuits the warm
 // before it opens any file.
 const mockTouchFile = vi.fn(async () => undefined);
-vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/lsp/index.js")>()),
+vi.mock("../../clients/lsp/capabilities.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../clients/lsp/capabilities.js")
+	>()),
 	getLSPService: vi.fn(() =>
 		makeLspServiceDouble({
 			supportsLSP: () => false,
@@ -357,6 +362,76 @@ it(
 					),
 				{ timeout: HEAVY_IO_TIMEOUT_MS },
 			);
+		} finally {
+			await env.cleanup();
+		}
+	},
+	TEST_BUDGET_MS,
+);
+
+// #4352: the defer table is keyed by runTask names. A key that matches no task
+// ("ast-grep exports" for "ast-grep-exports") defers nothing, so the export scan
+// started on the next tick and froze the TUI on cold boot. One setImmediate turn
+// shows the difference: every next-tick scan has fired by then, while the 5400
+// ms defer has not elapsed. The eventual run is covered by the ast-grep export
+// path test above.
+it(
+	"defers ast-grep-exports by its taskDeferMs entry, not on the next tick (#4352)",
+	async () => {
+		const { env, astGrepEnsure, dbg } = await runSessionStart(
+			"full",
+			(tmpDir) =>
+				createTempFile(
+					tmpDir,
+					"package.json",
+					JSON.stringify({ type: "module" }),
+				),
+		);
+		try {
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("session_start task ast-grep-exports: start"),
+			);
+			expect(astGrepEnsure).not.toHaveBeenCalled();
+		} finally {
+			await env.cleanup();
+		}
+	},
+	TEST_BUDGET_MS,
+);
+
+// #4352 round 2: a defer-table key whose task was removed ("project index")
+// defers nothing and never runs. Every key must be a task session_start schedules,
+// and each key keeps its staggered delay. The real seam is the scheduled debug
+// line, which full-mode session_start emits for every task it starts.
+it(
+	"schedules every defer-table key with its staggered delay (#4352)",
+	async () => {
+		const { env, dbg } = await runSessionStart("full", (tmpDir) =>
+			createTempFile(
+				tmpDir,
+				"package.json",
+				JSON.stringify({ type: "module" }),
+			),
+		);
+		try {
+			await new Promise((resolve) => setImmediate(resolve));
+			const scheduled = new Map<string, number>();
+			for (const [msg] of dbg.mock.calls) {
+				const match =
+					/^session_start task (\S+): scheduled deferMs=(\d+)$/.exec(
+						String(msg),
+					);
+				if (match) scheduled.set(match[1], Number(match[2]));
+			}
+			for (const key of Object.keys(STARTUP_TASK_DEFER_MS)) {
+				expect(scheduled.has(key), `defer key ${key} is never scheduled`).toBe(
+					true,
+				);
+			}
+			expect(scheduled.get("call-graph")).toBe(5000);
+			expect(scheduled.get("codebase-model")).toBe(5200);
+			expect(scheduled.get("ast-grep-exports")).toBe(5400);
 		} finally {
 			await env.cleanup();
 		}
@@ -684,6 +759,43 @@ describe("fixture-loaded startup precedence", () => {
 			expect(rows[0]?.count).toBe(1);
 			expect(rows[0]?.latestReasons[0]?.subject).toMatch(/^[0-9a-f]{8}$/);
 			expect(rows[0]?.latestReasons[0]?.reason).not.toContain("/");
+		} finally {
+			await result.env.cleanup();
+		}
+	});
+
+	// Recurrence (#1129 F9 and F3, review of d873c8d74): marking a tmp checkout
+	// ephemeral was silent, and nothing reaped a dead process's data dir.
+	it("records a tmp checkout's ephemeral data dir once and sweeps a dead process's dir at session start", async () => {
+		// 2147483646 is above every platform's pid ceiling, so kill(pid, 0)
+		// answers ESRCH: a dead owner without signalling anything.
+		let deadDir = "";
+		const result = await runSessionStart("quick", (tmpDir) => {
+			fs.mkdirSync(path.join(tmpDir, ".git", "objects"), { recursive: true });
+			fs.writeFileSync(
+				path.join(tmpDir, ".git", "HEAD"),
+				"ref: refs/heads/main\n",
+			);
+			const ephemeralBase = path.dirname(
+				path.dirname(getProjectDataDir(tmpDir)),
+			);
+			deadDir = path.join(ephemeralBase, "2147483646-deadbeef");
+			fs.mkdirSync(path.join(deadDir, "slug-0123abcd"), { recursive: true });
+			_resetProjectDataDirMemoForTests();
+		});
+		try {
+			const rows = getDegradationSummary().filter(
+				(entry) => entry.kind === "data-dir-ephemeral",
+			);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]?.count).toBe(1);
+			expect(rows[0]?.latestReasons[0]?.subject).toMatch(/^[0-9a-f]{8}$/);
+			expect(rows[0]?.latestReasons[0]?.reason).not.toContain("/");
+			await waitForCondition(
+				() => fs.existsSync(deadDir),
+				(exists) => !exists,
+				{ timeoutMs: 2000 },
+			);
 		} finally {
 			await result.env.cleanup();
 		}

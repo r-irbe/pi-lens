@@ -227,6 +227,18 @@ function adoptCanonicalCasing(held: string, canonical: string): string {
  * Always converts backslashes to forward slashes for consistent Map keys.
  */
 export function normalizeFilePath(filePath: string): string {
+	if (process.platform === "win32") {
+		// Relative values and the empty sentinel are not filesystem identities.
+		// In particular, win32.resolve() would silently anchor them to the
+		// process cwd, which makes a path-only key depend on the runner's drive
+		// (#2490). Keep this guard inside the Windows arm so POSIX relative
+		// inputs still receive their realpath/casing treatment.
+		if (filePath === "") return "";
+		if (!isFullyQualifiedWin32(filePath)) {
+			return win32.normalize(filePath).replace(/\\/g, "/");
+		}
+	}
+
 	// Convert backslashes to forward slashes first
 	const normalized = filePath.replace(/\\/g, "/");
 
@@ -462,10 +474,27 @@ export function toProjectRelativePath(
 ): string {
 	const p = isWindowsPath(filePath) ? win32 : path;
 	if (!p.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
-	const relative = p.relative(p.resolve(projectRoot), filePath);
-	return relative && !relative.startsWith("..") && !p.isAbsolute(relative)
-		? relative.replace(/\\/g, "/")
-		: filePath.replace(/\\/g, "/");
+	const inside = (root: string, file: string): string | undefined => {
+		const relative = p.relative(p.resolve(root), file);
+		return relative &&
+			relative !== ".." &&
+			!relative.startsWith(`..${p.sep}`) &&
+			!p.isAbsolute(relative)
+			? relative.replace(/\\/g, "/")
+			: undefined;
+	};
+	const direct = inside(projectRoot, filePath);
+	if (direct !== undefined) return direct;
+	// #4101: a canonical key (`normalizeMapKey`: realpath on win32, so 8.3 names,
+	// junctions and subst drives are expanded) set against a root the caller
+	// spelled differently. Canonicalize both sides before giving up; a file
+	// that really is outside the root stays outside.
+	const canonical = inside(
+		normalizeFilePath(projectRoot),
+		normalizeFilePath(filePath),
+	);
+	if (canonical !== undefined) return canonical;
+	return filePath.replace(/\\/g, "/");
 }
 
 /**
@@ -623,20 +652,64 @@ export interface FindNearestMarkerRootOptions {
 	markerPredicate?: (markerPath: string) => boolean;
 }
 
+export type GitMarkerResult =
+	| { kind: "valid" | "absent" }
+	| { kind: "unavailable"; cause: unknown };
+
+export type MarkerRootResult =
+	| { kind: "found"; root: string }
+	| { kind: "not-found"; reason: "home-ceiling" | "root" | "depth-limit" }
+	| { kind: "unavailable"; markerPath: string; cause: unknown };
+
+/** Detailed ownership walks require a probe that can distinguish I/O failure. */
+export interface FindNearestMarkerRootDetailedOptions {
+	homeDir?: string;
+	markerPredicate: (markerPath: string) => GitMarkerResult;
+}
+
 /**
  * Accept only a real Git repository marker: a directory with HEAD, or a
  * worktree/submodule marker file whose first line starts with `gitdir:`.
+ * Ownership callers request details: absence may permit climbing, but a read
+ * error must not invent an enclosing owner. Legacy callers retain a boolean.
  */
-export function isRealGitMarker(markerPath: string): boolean {
+export function isRealGitMarker(
+	markerPath: string,
+	details: true,
+): GitMarkerResult;
+export function isRealGitMarker(markerPath: string): boolean;
+export function isRealGitMarker(
+	markerPath: string,
+	details?: true,
+): boolean | GitMarkerResult {
+	// Array callbacks supply an index here; only the documented true opts in.
+	const detailed = details === true;
 	try {
 		const marker = statSync(markerPath);
-		if (marker.isDirectory()) return existsSync(path.join(markerPath, "HEAD"));
-		if (!marker.isFile()) return false;
-		return readFileSync(markerPath, "utf8")
-			.split(/\r?\n/, 1)[0]
-			.startsWith("gitdir:");
-	} catch {
-		return false;
+		let valid = false;
+		if (marker.isDirectory()) {
+			// existsSync hides EACCES as false. HEAD is part of ownership evidence,
+			// so detailed callers need its failure just as much as the marker's.
+			statSync(path.join(markerPath, "HEAD"));
+			valid = true;
+		} else if (marker.isFile()) {
+			valid = readFileSync(markerPath, "utf8")
+				.split(/\r?\n/, 1)[0]
+				.startsWith("gitdir:");
+		}
+		if (!detailed) return valid;
+		return { kind: valid ? "valid" : "absent" };
+	} catch (cause) {
+		if (!detailed) return false;
+		if (
+			typeof cause === "object" &&
+			cause !== null &&
+			"code" in cause &&
+			(cause.code === "ENOENT" || cause.code === "ENOTDIR")
+		) {
+			return { kind: "absent" };
+		}
+		return { kind: "unavailable", cause };
 	}
 }
 
@@ -687,6 +760,40 @@ export function findNearestMarkerRoot(
 		current = parent;
 	}
 	return null;
+}
+
+/**
+ * Ownership walk for callers that must tell "no marker here" from "could not
+ * tell" (refs #3644, #3691). Same climb as `findNearestMarkerRoot` (home
+ * ceiling, 64-step cap) but the predicate returns a `GitMarkerResult`, so an I/O
+ * failure stops the walk as `unavailable` instead of becoming "absent" and
+ * letting an enclosing root be mistaken for the owner. It takes no
+ * `boundaries`, so `"boundary"` is not a reason it can return. Kept separate
+ * from the legacy walker so the legacy callers' `existsSync` precheck and
+ * boolean predicate contract cannot drift with it.
+ */
+export function findNearestMarkerRootDetailed(
+	startDir: string,
+	markers: readonly string[],
+	options: FindNearestMarkerRootDetailedOptions,
+): MarkerRootResult {
+	const homeDir = path.resolve(options.homeDir ?? os.homedir());
+	let current = path.resolve(startDir);
+	for (let depth = 0; depth < 64; depth++) {
+		if (isAtOrAboveHomeDir(current, homeDir))
+			return { kind: "not-found", reason: "home-ceiling" };
+		for (const marker of markers) {
+			const markerPath = path.join(current, marker);
+			const checked = options.markerPredicate(markerPath);
+			if (checked.kind === "unavailable")
+				return { kind: "unavailable", markerPath, cause: checked.cause };
+			if (checked.kind === "valid") return { kind: "found", root: current };
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return { kind: "not-found", reason: "root" };
+		current = parent;
+	}
+	return { kind: "not-found", reason: "depth-limit" };
 }
 
 /**
@@ -784,14 +891,32 @@ export function isUnderDir(child: string, parent: string): boolean {
 	return normChild === normParent || normChild.startsWith(parentPrefix);
 }
 
+/** True when a path is outside the session's project root. */
+export function isOutsideProjectRoot(
+	filePath: string,
+	projectRoot: string,
+): boolean {
+	return !isUnderDir(filePath, projectRoot);
+}
+
 const VENDOR_DIR_NAMES = new Set([
 	"node_modules",
 	"vendor",
 	"vendors",
 	"third_party",
 	"third-party",
+	".venv",
+	"site-packages",
+	"bower_components",
 	".lake",
 ]);
+
+/** True when any path segment names an installed or vendored dependency tree. */
+export function isVendorPath(filePath: string): boolean {
+	return normalizeFilePath(filePath)
+		.split("/")
+		.some((segment) => VENDOR_DIR_NAMES.has(segment.toLowerCase()));
+}
 
 /**
  * Returns true when a file should be treated as external/vendor and excluded
@@ -805,13 +930,8 @@ export function isExternalOrVendorFile(
 	filePath: string,
 	projectRoot: string,
 ): boolean {
-	if (!isUnderDir(filePath, projectRoot)) return true;
-	const normalized = normalizeFilePath(filePath);
-	const rootNorm = normalizeFilePath(projectRoot);
-	const rel = normalized.startsWith(rootNorm + "/")
-		? normalized.slice(rootNorm.length + 1)
-		: normalized;
-	return rel.split("/").some((seg) => VENDOR_DIR_NAMES.has(seg));
+	if (isOutsideProjectRoot(filePath, projectRoot)) return true;
+	return isVendorPath(filePath);
 }
 
 /**
@@ -1114,6 +1234,8 @@ function compileWorkspaceMemberPattern(
 	return steps;
 }
 
+const WORKSPACE_GLOB_MEMO_CELL_CAP = 2_000_000;
+
 /**
  * Does the whole of `subject` match the whole of `steps`?
  *
@@ -1134,12 +1256,19 @@ function compileWorkspaceMemberPattern(
  * `(?:.+/)?` groups, which denote the same language as one and cost the same
  * table.
  */
+
 function matchesWorkspaceMemberSteps(
 	steps: readonly WorkspaceGlobStep[],
 	subject: string,
+	onCap?: () => void,
 ): boolean {
 	const stepCount = steps.length;
 	const width = subject.length + 1;
+	// 2,000,000 cells is above real ~8e5-cell globs and below the issue's ~1.6e7-cell row.
+	if ((stepCount + 1) * width > WORKSPACE_GLOB_MEMO_CELL_CAP) {
+		onCap?.();
+		return false;
+	}
 	// One byte per (step, position) cell; `1` means "the rest matches from here".
 	const table = new Uint8Array((stepCount + 1) * width);
 	for (let p = subject.length; p >= 0; p -= 1) {
@@ -1241,6 +1370,7 @@ export function matchesWorkspaceMemberPattern(
 	pattern: string,
 	relativePath: string,
 	dialect: WorkspaceMemberGlobDialect,
+	onCap?: () => void,
 ): boolean {
 	const normalized = dialect.normalizePattern(pattern);
 	if (
@@ -1251,7 +1381,8 @@ export function matchesWorkspaceMemberPattern(
 	}
 	const steps = compileWorkspaceMemberPattern(normalized, dialect);
 	return (
-		steps !== undefined && matchesWorkspaceMemberSteps(steps, relativePath)
+		steps !== undefined &&
+		matchesWorkspaceMemberSteps(steps, relativePath, onCap)
 	);
 }
 

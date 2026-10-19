@@ -103,9 +103,16 @@ describe("oxlint advisory rule-count floor guard (#2700 review round 2, F2)", ()
 					XDG_DATA_HOME: resolve(REPO_ROOT, ".probe-home/xdg"),
 				},
 				timeout: 30_000,
+				// Node refuses to spawn a `.cmd` shim without a shell (CVE-2024-27980),
+				// so a bare `npm.cmd` spawn on Windows returned `status: null` with no
+				// output (#4019).
+				shell: process.platform === "win32",
 			},
 		);
-		expect(advisory.status, advisory.stdout + advisory.stderr).toBe(0);
+		expect(
+			advisory.status,
+			`${advisory.error ?? ""}${advisory.stdout}${advisory.stderr}`,
+		).toBe(0);
 		expect(Number(count(advisory.stdout))).toBeGreaterThanOrEqual(100);
 		expect(count(JSON.stringify({ rules: { a: "deny", b: "warn" } }))).toBe(
 			"2",

@@ -162,6 +162,9 @@ export interface ReviewGraphLogEntry {
 	/** Additive, bounded lifecycle metadata; never contains source contents/paths. */
 	observability?: ReviewGraphOperationalMetadata;
 	reason?: string;
+	/** `build_failed` only (#3605): a web-tree-sitter abort or trap, or a
+	 * real build failure. */
+	failureClass?: "wasm-abort" | "wasm-trap" | "error";
 	durationMs?: number;
 	nodes?: number;
 	edges?: number;

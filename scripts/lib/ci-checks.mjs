@@ -2,16 +2,14 @@
  * scripts/lib/ci-checks.mjs (#2539 round 2, F2): the ONE required-checks name
  * list and the ONE fail-closed "latest check-run per name" resolver, shared
  * by every consumer that reads GitHub check-runs for this repo's two gating
- * checks -- merge-train-warden.mjs (GraphQL rollup: `startedAt`, UPPERCASE
- * `status`/`conclusion`), merge-train-lane.mjs (via the warden today, moved
- * to import this module directly in this round), and ci-verdict.mjs (REST
- * `commits/<sha>/check-runs`: `started_at`, lowercase `status`/`conclusion`).
+ * checks -- ci-verdict.mjs (REST `commits/<sha>/check-runs`: `started_at`,
+ * lowercase `status`/`conclusion`). The retired merge lane and the retired
+ * merge-train warden (#4105) no longer consume this module.
  *
  * Before this round, ci-verdict.mjs hand-rolled its own `latestRunNamed`
  * with an `id`-as-tiebreak policy that is NOT fail-closed (a superseded
- * SUCCESS with the higher id could win a tie over an unresolved duplicate),
- * while merge-train-warden.mjs already carried the correct policy. Two
- * required-check name lists and two different tie policies for the same
+ * SUCCESS with the higher id could win a tie over an unresolved duplicate).
+ * Two required-check name lists and two different tie policies for the same
  * real-world duplicate-check-run shape (a rerun, or the classify-ci-failure
  * auto-rerun, #2103) is the single-source-of-truth defect this module fixes.
  */
@@ -21,38 +19,57 @@ export const REQUIRED_CHECKS = ["Unit tests", "Lint & type-check"];
 export const CI_JOB_NAMES = Object.freeze({
 	CHANGELOG_FRAGMENT: "Changelog fragment (fast-fail)",
 	LINT_AND_TYPECHECK: "Lint & type-check",
-	KNIP: "knip (advisory)",
+	KNIP: "knip",
 	UNIT_TESTS: "Unit tests",
 });
+
+// #3753: the suite runs as `Unit tests (shard k/N)` matrix jobs (ci.yml job
+// `test`) behind ONE aggregate check-run named exactly `Unit tests`. The
+// aggregate is what the ruleset requires; a consumer that keys on "the Unit
+// tests job" (ci-verdict's infra-rerun hold, the failure classifier's log
+// read) must also recognize the shard rows, because the failing test output
+// and any kill signature live in the shard's log, not the aggregate's.
+const UNIT_TESTS_SHARD_PREFIX = `${CI_JOB_NAMES.UNIT_TESTS} (shard `;
+
+export function isUnitTestsJobName(name) {
+	const text = String(name ?? "");
+	return (
+		text === CI_JOB_NAMES.UNIT_TESTS || text.startsWith(UNIT_TESTS_SHARD_PREFIX)
+	);
+}
+
+export function isUnitTestsShardJobName(name) {
+	return String(name ?? "").startsWith(UNIT_TESTS_SHARD_PREFIX);
+}
 
 // How this repository ACTUALLY marks a check advisory: the workflow job name
 // ends in "(advisory)". Probed 2026-08-26 against the live rollups of every
 // open PR -- `PR body (advisory)`, `Vale prose lint (advisory)`,
 // `OSV scan (advisory)`. Originally lived only
-// in merge-train-lane.mjs; moved here in #2609 so ci-verdict.mjs (a second
+// in the former merge lane; moved here in #2609 so ci-verdict.mjs (a second
 // consumer of the exact same policy) imports the ONE list instead of
 // hand-rolling its own -- AGENTS.md shape 38's own warning ("the cheapest
 // evasion is adding a real gate to the advisory list") is a defect risk
 // multiplied by every duplicate copy of this set, not just the original.
-// merge-train-lane.mjs re-exports these three names unchanged for its
-// existing importers.
 const ADVISORY_SUFFIX = "(advisory)";
 export const ADVISORY_CHECKS = new Set([
 	// Third-party SonarCloud GitHub App check-run (posted via the SonarCloud
 	// integration, not a workflow job in .github/workflows) -- has no
 	// "(advisory)" suffix to self-identify by, so it needs an explicit entry.
 	"SonarCloud Code Analysis",
-	// GitHub's own code-scanning summary check (default CodeQL setup -- there
-	// is no committed codeql.yml; the per-language "Analyze (<lang>)" jobs it
-	// spawns are a DIFFERENT, unrelated set of check-run names this list does
-	// NOT cover, and they gate like any other non-advisory check).
+	// GitHub's own code-scanning summary check. Since #3801 CodeQL runs as a
+	// committed advanced setup: ci.yml's PR-time `CodeQL (<lang>) (advisory)` and
+	// codeql.yml's `CodeQL baseline (<lang>) (advisory)` are classified by the
+	// suffix, not by an entry here. The legacy default-setup `Analyze (<lang>)`
+	// rows, which a PR head older than the switch still carries, are a
+	// DIFFERENT set of names this list does NOT cover; they keep gating because
+	// an alert on such a head is a real result.
 	"CodeQL",
 	// #2706 tooling jobs have explicit advisory entries as well as the suffix.
 	"jscpd (advisory)",
 	"yamllint (advisory)",
 	"typos (advisory)",
 	"taplo (advisory)",
-	"mutation (advisory)",
 	"complexity (advisory)",
 	"Targeted tests (advisory)",
 	// Stale verdict labels are bookkeeping only. Their cleanup asserts no
@@ -67,6 +84,43 @@ export const ADVISORY_CHECKS = new Set([
 	"greeting",
 ]);
 
+// #3801: the heavy ADVISORY jobs ci.yml starts only after every required check
+// passed (`heavy-gate`, which `needs:` them). Until then GitHub has no
+// check-run for them at all, so a reader cannot tell "deferred" from "never
+// existed". ci-verdict lists each of these, with its real state, while the
+// verdict is pending AND after it turns success. They stay advisory (suffix match above); this list never
+// makes one gate. tests/config/heavy-advisory-gate-workflow.test.ts derives the
+// same set from ci.yml, so a job added behind the gate cannot be missing here.
+//
+// Their state is read off the gate's own check-run (`HEAVY_GATE_CHECK`): absent
+// or running means PENDING, concluded success means the jobs are about to be
+// queued, and skipped or red means NOT RUN with the reason. A head is of the
+// gated shape when either ci.yml job below has a check-run.
+export const HEAVY_GATE_CHECK = "Heavy advisory gate (advisory)";
+export const CHANGES_CHECK = "Changed files (advisory)";
+export const DEFERRED_ADVISORY_CHECKS = Object.freeze([
+	"Unit tests Windows (advisory)",
+	// #3801: ci.yml's PR-time CodeQL matrix (one check-run per language).
+	"CodeQL (actions) (advisory)",
+	"CodeQL (javascript-typescript) (advisory)",
+]);
+
+// #4090: the events whose workflow runs are NOT a commit's PR/push CI. A
+// scheduled run attaches its check-runs to master's head and a dispatched run
+// to the dispatched branch's head, so without this a nightly lane or a
+// label-triage job turns a PR or master red. A run of any other (or unknown)
+// event keeps today's gating.
+const NON_PR_CI_EVENTS = new Set([
+	"schedule",
+	"workflow_dispatch",
+	"repository_dispatch",
+	"workflow_run",
+]);
+
+export function isNonPrCiEvent(event) {
+	return NON_PR_CI_EVENTS.has(String(event ?? ""));
+}
+
 export function isAdvisoryCheck(name) {
 	return (
 		ADVISORY_CHECKS.has(name) || String(name ?? "").endsWith(ADVISORY_SUFFIX)
@@ -74,7 +128,7 @@ export function isAdvisoryCheck(name) {
 }
 
 // A non-advisory check in any of these states blocks a merge (#2185's real
-// merge-train gate; moved here from merge-train-lane.mjs in #2609 for the
+// merge gate; moved here from the former merge lane in #2609 for the
 // same single-source reason as ADVISORY_CHECKS above). GraphQL's rollup
 // reports these UPPERCASE; REST's check-runs API reports them lowercase --
 // `isBlockingConclusion` below normalizes case so both payload shapes share
@@ -82,11 +136,9 @@ export function isAdvisoryCheck(name) {
 // documents: "success", "skipped", and "neutral" are exactly the completed
 // conclusions that are NOT failures, and every one of them is a real,
 // observed shape in this repo -- "skipped" is not hypothetical, it is what
-// `record-post-merge-validation`'s job-level
-// `if: ... && github.event_name == 'repository_dispatch'` reports on EVERY
-// ordinary pull_request run (probed live on PR #2588, 2026-09-06: two
-// "Record post-merge validation" rows, both "skipping"). Treating a job's
-// own conditional skip as a failure would red every PR forever (#2609).
+// a conditionally skipped workflow job reports on an ordinary pull_request
+// run. Treating a job's own conditional skip as a failure would red every PR
+// forever (#2609).
 const BLOCKING_CONCLUSIONS = new Set([
 	"FAILURE",
 	"TIMED_OUT",
@@ -102,11 +154,11 @@ export function isBlockingConclusion(conclusion) {
 
 // #2618 fix-round-2, F2: `CANCELLED` sits in `BLOCKING_CONCLUSIONS` above
 // because a check a HUMAN cancelled genuinely is not passing -- but
-// `cancel-in-progress: true` (ci.yml:15-16) cancels the PREVIOUS in-flight
-// run of a concurrency group on every new push/dispatch to the SAME ref, and
+// Event-scoped `cancel-in-progress` cancels the PREVIOUS in-flight run of a
+// concurrency group when a cancelling event targets the SAME ref, and
 // that cancelled check-run can be the ONLY row present for its name for
 // several minutes before its replacement posts (live-probed 2026-09-06 on
-// PR #2607's head: three "Record post-merge validation" check-suites on ONE
+// PR #2607's head: three check-suites for one discovered job on ONE
 // commit -- 17:21:06 cancelled, 17:25:29 skipped, 17:32:15 skipped --
 // `resolveLatestByName` correctly drops the cancelled one once a newer row
 // exists, but at 17:21-17:25 it was the newest, and only, row). Reading that

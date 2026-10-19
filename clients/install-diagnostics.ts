@@ -17,7 +17,10 @@ import { fileURLToPath } from "node:url";
 // The shared web-tree-sitter ladder imports nothing but node:fs/node:path, so
 // importing it keeps this module's "loads even when the deps that failed are
 // unreachable" property intact.
-import { resolveWebTreeSitterPackageDir } from "../scripts/lib/web-tree-sitter-dir.mjs";
+import {
+	findCoreGrammarDir,
+	resolveWebTreeSitterPackageDir,
+} from "../scripts/lib/web-tree-sitter-dir.mjs";
 
 const require = createRequire(import.meta.url);
 const ISSUES_URL = "https://github.com/apmantza/pi-lens/issues";
@@ -85,10 +88,14 @@ export interface GrammarProbeDeps {
  * cannot be pinned there.
  */
 export function grammarsInstalled(deps: GrammarProbeDeps): boolean {
-	const dir = resolveWebTreeSitterPackageDir(deps);
+	// #1185: one helper with the install selftest. The tarball's bundled
+	// `<packageRoot>/grammars` counts as installed, as does the web-tree-sitter
+	// dir the runtime fetch writes to.
 	return (
-		!!dir &&
-		fs.existsSync(path.join(dir, "grammars", "tree-sitter-typescript.wasm"))
+		findCoreGrammarDir({
+			packageRoot: deps.packageRoot(),
+			webTreeSitterDir: resolveWebTreeSitterPackageDir(deps),
+		}) !== undefined
 	);
 }
 

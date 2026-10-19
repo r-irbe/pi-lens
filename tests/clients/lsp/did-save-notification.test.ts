@@ -36,6 +36,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
 	createLSPClient,
+	handleNotifyChange,
 	handleNotifyOpen,
 	type LSPClientState,
 } from "../../../clients/lsp/client.js";
@@ -276,6 +277,82 @@ describe("textDocument/didSave on a declared save (#3405)", () => {
 		});
 	});
 
+	// #3545: the change runner dropped the save it inherited. A saved touch
+	// replaced by a change, or kept out behind one as the older read, then
+	// produced no didSave at all, unlike the open-over-open case above.
+	it("keeps the save when a change coalesces over a saved open", async () => {
+		state.saveOptions = { includeText: true };
+		const saved = handleNotifyOpen(
+			state,
+			TEST_FILE,
+			"const x = 1;\n",
+			"typescript",
+			false,
+			true,
+			true,
+		);
+		const superseding = handleNotifyChange(state, TEST_FILE, "const x = 2;\n");
+		await Promise.all([saved, superseding]);
+		expect(sentMethods(state)).toEqual([
+			"textDocument/didOpen",
+			"textDocument/didSave",
+		]);
+		expect(sentParams(state, "textDocument/didSave")).toEqual({
+			textDocument: { uri: TEST_URI },
+			text: "const x = 2;\n",
+		});
+	});
+
+	it.each([
+		["fallback didOpen", false, ["textDocument/didOpen"]],
+		["didChange", true, ["textDocument/didOpen", "textDocument/didChange"]],
+	] as const)(
+		"sends no didSave for a save a change carries when its %s never left the process",
+		async (_branch, openFirst, expected) => {
+			state.saveOptions = { includeText: false };
+			if (openFirst)
+				await handleNotifyOpen(
+					state,
+					TEST_FILE,
+					"const x = 0;\n",
+					"typescript",
+					false,
+					true,
+				);
+			vi.mocked(state.connection.sendNotification).mockRejectedValueOnce(
+				Object.assign(new Error("write after end"), {
+					code: "ERR_STREAM_WRITE_AFTER_END",
+				}),
+			);
+			const saved = handleNotifyOpen(
+				state,
+				TEST_FILE,
+				"const x = 1;\n",
+				"typescript",
+				false,
+				true,
+				true,
+			);
+			const superseding = handleNotifyChange(
+				state,
+				TEST_FILE,
+				"const x = 2;\n",
+			);
+			await Promise.all([saved, superseding]);
+			expect(sentMethods(state)).toEqual(expected);
+		},
+	);
+
+	it("sends no didSave after a change that carries no save", async () => {
+		state.saveOptions = { includeText: false };
+		await handleNotifyChange(state, TEST_FILE, "const x = 1;\n");
+		await handleNotifyChange(state, TEST_FILE, "const x = 2;\n");
+		expect(sentMethods(state)).toEqual([
+			"textDocument/didOpen",
+			"textDocument/didChange",
+		]);
+	});
+
 	it("sends no didSave when the client dies between the two notifications", async () => {
 		// The one window the caller's own entry guard cannot cover: the client is
 		// alive when the notify starts and destroyed by the time the content
@@ -428,6 +505,95 @@ describe("didSave through the real createLSPClient init path (#3405)", () => {
 			expect(recorder.methods).toContain("textDocument/didOpen");
 			expect(recorder.methods).not.toContain("textDocument/didSave");
 			expect(recorder.saves).toEqual([]);
+		} finally {
+			await client.shutdown().catch(() => {});
+			await stopLSP(proc).catch(() => {});
+		}
+	}, 15_000);
+
+	// The production consequence the issue is about, not the notification alone:
+	// a server whose WHOLE diagnose pass is save-triggered publishes ONLY from
+	// its didSave branch (`FAKE_LSP_PUBLISH_ON_SAVE`), so the diagnostics pi-lens
+	// reads are reachable exactly when the save is. Expert is that member; the
+	// fixture stands in for it because the local box has no Elixir (#3405).
+	it("reads the save-only server's diagnostics after a save touch", async () => {
+		const proc = await spawnFakeLspServer({
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				FAKE_LSP_SAVE: "true",
+				FAKE_LSP_PUBLISH_ON_SAVE: "1",
+				FAKE_LSP_ECHO_DID_SAVE: "1",
+				FAKE_LSP_NO_DIAGNOSTIC_PROVIDER: "1",
+			},
+		});
+		const client = await createLSPClient({
+			serverId: "fake-save-publish",
+			process: proc,
+			root: process.cwd(),
+		});
+		try {
+			const recorder = notifyRecorder(client);
+			const filePath = path.join(os.tmpdir(), "pi-lens-did-save-publish.ts");
+			// 6th argument `saved: true` is the post-write sync's declaration.
+			await client.notify.open(
+				filePath,
+				"const x = 1;\n",
+				"typescript",
+				undefined,
+				true,
+				true,
+			);
+			// The fixture sends the publish BEFORE this echo, and a stdio stream is
+			// FIFO, so a settled echo proves the client has already stored it.
+			await recorder.untilSave();
+			await client.waitForDiagnostics(filePath, 5000);
+			expect(client.getDiagnostics(filePath).map((d) => d.code)).toEqual([
+				"P3405",
+			]);
+		} finally {
+			await client.shutdown().catch(() => {});
+			await stopLSP(proc).catch(() => {});
+		}
+	}, 15_000);
+
+	it("reads no diagnostics from the same server when the touch is not a save", async () => {
+		const proc = await spawnFakeLspServer({
+			cwd: process.cwd(),
+			env: {
+				...process.env,
+				FAKE_LSP_SAVE: "true",
+				FAKE_LSP_PUBLISH_ON_SAVE: "1",
+				FAKE_LSP_ECHO_DID_SAVE: "1",
+				FAKE_LSP_ECHO_NOTIFY_METHODS: "1",
+				FAKE_LSP_NO_DIAGNOSTIC_PROVIDER: "1",
+			},
+		});
+		const client = await createLSPClient({
+			serverId: "fake-save-publish-none",
+			process: proc,
+			root: process.cwd(),
+		});
+		try {
+			const recorder = notifyRecorder(client);
+			const filePath = path.join(
+				os.tmpdir(),
+				"pi-lens-did-save-publish-none.ts",
+			);
+			await client.notify.open(
+				filePath,
+				"const x = 1;\n",
+				"typescript",
+				undefined,
+				true,
+				false,
+			);
+			await recorder.until("textDocument/didOpen");
+			// A reply issued after the notify proves the server drained it, so the
+			// absent publish below is evidence, not a race.
+			await client.pingLiveness?.(5000);
+			expect(recorder.methods).not.toContain("textDocument/didSave");
+			expect(client.getDiagnostics(filePath)).toEqual([]);
 		} finally {
 			await client.shutdown().catch(() => {});
 			await stopLSP(proc).catch(() => {});

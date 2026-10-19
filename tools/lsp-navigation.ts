@@ -21,12 +21,16 @@ import { isRecordableProjectPath } from "../clients/file-utils.js";
 import { compactRenderResult } from "./render-compact.js";
 import {
 	applyWorkspaceEdit,
+	refuseStaleWorkspaceEdit,
 	summarizeWorkspaceEdit,
+	workspaceEditTextPaths,
 } from "../clients/lsp/edits.js";
+import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxiliary-lsp.js";
+import { hashDiagnosticContent } from "../clients/lsp/diagnostic-binding.js";
 import {
 	getLSPService,
 	type LSPWorkspaceScopeAttribution,
-} from "../clients/lsp/index.js";
+} from "../clients/lsp/capabilities.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
@@ -731,14 +735,18 @@ async function openFileBestEffort(
 	lspService: ReturnType<typeof getLSPService>,
 	filePath: string,
 	waitForDiagnostics = false,
-): Promise<void> {
+	// #4323: auxiliaries the operator's configuration turns off; never acquired.
+	excludeServerIds?: ReadonlySet<string>,
+): Promise<string | undefined> {
 	let fileContent: string | undefined;
 	try {
 		fileContent = nodeFs.readFileSync(filePath, "utf-8");
 	} catch {
-		return;
+		return undefined;
 	}
-	if (!fileContent) return;
+	// #3601: an empty file is still content a caller can hold the edit to; the
+	// read is returned and the touch below is skipped exactly as before.
+	if (fileContent === "") return "";
 	try {
 		// #2598: `touchFile` is defined unconditionally on the real `LSPService`
 		// (clients/lsp/index.ts), so the former `typeof … === "function"` hedge
@@ -749,10 +757,144 @@ async function openFileBestEffort(
 			diagnostics: waitForDiagnostics ? "document" : "none",
 			source: "lsp_navigation",
 			clientScope: waitForDiagnostics ? "all" : "primary",
+			...(excludeServerIds !== undefined && { excludeServerIds }),
 		});
 	} catch {
 		/* LSP server may not be ready yet — proceed anyway */
 	}
+	return fileContent;
+}
+
+/**
+ * #3601: how far before the rename request a file's mtime may sit and still
+ * count as "written after the request". Filesystem timestamps are coarse: FAT
+ * stores 2 s, HFS+ 1 s, ext4/APFS/NTFS well under 1 ms, and Linux stamps a
+ * write with a tick-coarse clock that can trail `Date.now()` by several ms. A
+ * write made just after the request can therefore carry an mtime a little
+ * before it, so 2 s (the coarsest common granularity) is the margin. The cost
+ * is a false refusal for an unopened file written within 2 s before the
+ * request; the failure it prevents is an overwrite.
+ */
+const RENAME_MTIME_MARGIN_MS = 2000;
+
+/**
+ * #3601: the content every file this rename's edit writes text to must still
+ * hold, keyed the way `applyWorkspaceEdit` keys expected content (the file's
+ * realpath). The rename's own target uses the content the pre-rename
+ * `openFileBestEffort` read and sent to the server. Any other file:
+ * - a file the language client has open: the server computed from the last
+ *   send made before the request (`requestedAtMs`, taken just before it, on the
+ *   same connection). The disk must hash to the client's last send, and that
+ *   send's bytes must not have changed at or after `requestedAtMs`: a
+ *   hook-synced write after the request makes the disk equal the last send
+ *   while the server answered from the one before it.
+ * - a file it has not opened: best effort only. The file is refused when its
+ *   mtime is at or after `requestedAtMs` minus the margin. This cannot prove
+ *   the server read the current bytes: the server answers from a copy it read
+ *   earlier, and pi-lens does not tell it about a write it did not make, so an
+ *   external write older than the margin that the server's own file watching
+ *   missed, or a write that keeps the old mtime, is applied at the server's
+ *   offsets (#3747).
+ * - a file the client first opened at or after `requestedAtMs` (#3827): the
+ *   server answered from its own copy, and that first `didOpen` stamps the
+ *   file as changed although no byte did. It takes the unopened rule only when
+ *   its mtime is older than the client's start by the margin: then the server
+ *   could only have read the bytes it holds now, and the first open adds none.
+ *   Only that first send's stamp is skipped: the disk must still hash to the
+ *   last send, and the record must still hold the first send's bytes, or the
+ *   file is refused (a write that keeps the old mtime after the first open).
+ *   A file written after the client started (a pi write whose sync lands as
+ *   that first open, say) keeps the send check and its stamp, which refuses it:
+ *   the server may hold the load-time copy, not these bytes. A client that
+ *   reports no start makes no such claim.
+ * The read that passed either check is the content the apply is then held to.
+ * A file the edit creates, or one that cannot be read, is left out of the map,
+ * matching every other `expectedContent` caller.
+ */
+function captureRenameExpectedContent(
+	lspService: ReturnType<typeof getLSPService>,
+	edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] },
+	cwd: string,
+	targetFilePath: string,
+	targetContent: string | undefined,
+	requestedAtMs: number,
+): Map<string, string> {
+	const expected = new Map<string, string>();
+	let targetRealPath: string | undefined;
+	if (targetContent !== undefined) {
+		try {
+			targetRealPath = nodeFs.realpathSync.native(targetFilePath);
+		} catch {
+			targetRealPath = undefined;
+		}
+	}
+	for (const diskPath of workspaceEditTextPaths(edit)) {
+		let realPath: string;
+		let content: string;
+		let mtimeMs: number;
+		try {
+			realPath = nodeFs.realpathSync.native(diskPath);
+			content = nodeFs.readFileSync(realPath, "utf-8");
+			// Stat AFTER the read: a write before the read is then visible in the
+			// mtime, and one after it is caught by the apply-time comparison.
+			mtimeMs = nodeFs.statSync(realPath).mtimeMs;
+		} catch {
+			continue;
+		}
+		if (targetContent !== undefined && realPath === targetRealPath) {
+			expected.set(realPath, targetContent);
+			continue;
+		}
+		const tracked = lspService.getTrackedContent(diskPath, cwd);
+		// #3827: a file this client first opened at or after the request, and
+		// that nobody wrote since the client started, was unopened when the
+		// server answered and held the bytes the disk holds: the first open adds
+		// none, so its stamp is skipped. The disk must still hold the first
+		// open's bytes, then the unopened rule below applies.
+		const firstOpenedAfterRequest =
+			tracked !== undefined && (tracked.openedAtMs ?? 0) >= requestedAtMs;
+		const quietSinceClientStart =
+			tracked?.clientStartedAtMs !== undefined &&
+			mtimeMs < tracked.clientStartedAtMs - RENAME_MTIME_MARGIN_MS;
+		const sent =
+			firstOpenedAfterRequest && quietSinceClientStart ? undefined : tracked;
+		if (sent !== undefined) {
+			if (
+				sent.hash !== hashDiagnosticContent(content) ||
+				(sent.changedAtMs ?? requestedAtMs) >= requestedAtMs
+			) {
+				refuseStaleWorkspaceEdit(
+					diskPath,
+					"it changed after the language server computed the rename from it",
+				);
+			}
+		} else if (
+			tracked !== undefined &&
+			(tracked.hash !== hashDiagnosticContent(content) ||
+				tracked.openedHash !== tracked.hash)
+		) {
+			// #3827 verify r2 F4: the exemption skips only the first open's own
+			// stamp. A disk that no longer holds the last send, or a record whose
+			// bytes changed after its first send, was written after that open
+			// although the mtime says otherwise (#3747's mtime-kept write).
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				"it changed after the language client first opened it, after the rename was requested",
+			);
+		} else if (mtimeMs >= requestedAtMs) {
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				"it was written after the rename was requested and the language server has no open copy, so it may not have read these bytes",
+			);
+		} else if (mtimeMs >= requestedAtMs - RENAME_MTIME_MARGIN_MS) {
+			refuseStaleWorkspaceEdit(
+				diskPath,
+				`it was modified within ${RENAME_MTIME_MARGIN_MS / 1000} s of the rename request; retry`,
+			);
+		}
+		expected.set(realPath, content);
+	}
+	return expected;
 }
 
 export function createLspNavigationTool(
@@ -797,7 +939,7 @@ export function createLspNavigationTool(
 		parameters: Type.Object({
 			operation: Type.String({
 				description:
-					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal (Lean 4: tactic proof state at cursor), termGoal (Lean 4: expected type at cursor), moduleImports (Lean 4: module imports list), moduleImportedBy (Lean 4: reverse module dependents list).",
+					"Operation: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal (Lean 4: proof state at cursor), termGoal (Lean 4: expected type at cursor), moduleImports (Lean 4: imports), moduleImportedBy (Lean 4: reverse dependents).",
 			}),
 			path: Type.Optional(
 				Type.String({
@@ -915,12 +1057,25 @@ export function createLspNavigationTool(
 			params: Record<string, unknown>,
 			_signal: AbortSignal,
 			_onUpdate: unknown,
-			ctx: { cwd?: string },
+			ctx: {
+				cwd?: string;
+				sessionManager?: { getSessionId?: () => string };
+			},
 		) {
+			// #3763: before the first await, so the rename's bookkeeping drops
+			// once this session is replaced (`context.session`, #3576).
+			const session = mutationDeps?.runtime?.captureSessionGeneration?.();
 			const startedAt = Date.now();
 			let supported: boolean | null = null;
 			let diagnosticsMode: "pull" | "push-only" | "unknown" = "unknown";
 			let columnResolution: SymbolColumnResolution | undefined;
+			// #3601: the content the rename's pre-flight `openFileBestEffort` read,
+			// held as the expected content for the rename's own target file.
+			let openedFileContent: string | undefined;
+			// #3601: when the rename request was last sent; a touched file whose
+			// send changed, or (unopened) whose mtime is, at or after it is refused
+			// (see the capture).
+			let renameRequestedAtMs = 0;
 			let mutationContext: LspMutationContext | undefined;
 			let requestedApply = false;
 			const workspaceScopeAttribution: LSPWorkspaceScopeAttribution = {};
@@ -1098,10 +1253,16 @@ export function createLspNavigationTool(
 					operation === "executeCommand" ? "lsp-execute-command" : "lsp-rename";
 				mutationContext = {
 					cwd,
+					sessionId: ctx.sessionManager?.getSessionId?.(),
 					correlationId: newLspMutationCorrelationId(_toolCallId),
+					// #4187 R4-1: the call whose `tool_call` licensed the paths it
+					// named; the workspace edit's other files (a rename's importers)
+					// are unlicensed, so they end an authorship instead of advancing it.
+					toolCallId: _toolCallId,
 					tool: `lsp_navigation:${operation}`,
 					source: mutationSource,
 					...mutationDeps,
+					session,
 					readGuard: getFlag("no-read-guard", cwd)
 						? undefined
 						: mutationDeps?.readGuard,
@@ -1236,8 +1397,22 @@ export function createLspNavigationTool(
 						);
 					}
 
-					await openFileBestEffort(lspService, filePath, true);
-					const diagnostics = await lspService.getDiagnostics(filePath);
+					// #4323: an explicit diagnostics read leaves an auxiliary the
+					// operator turned off unstarted, as `lsp_diagnostics` does.
+					const excludeServerIds = configDisabledAuxiliaryLspServerIds((name) =>
+						getFlag(name, ctx.cwd),
+					);
+					await openFileBestEffort(
+						lspService,
+						filePath,
+						true,
+						excludeServerIds,
+					);
+					const diagnostics = await lspService.getDiagnostics(
+						filePath,
+						undefined,
+						excludeServerIds,
+					);
 					const result = [
 						{
 							filePath,
@@ -1278,7 +1453,11 @@ export function createLspNavigationTool(
 					);
 				}
 
-				const allDiagnostics = await lspService.getAllDiagnostics();
+				// #4323: the snapshot starts no server, but an auxiliary the
+				// operator turned off may still be running; leave its rows out.
+				const allDiagnostics = await lspService.getAllDiagnostics(
+					configDisabledAuxiliaryLspServerIds((name) => getFlag(name, ctx.cwd)),
+				);
 				const result = Array.from(allDiagnostics.entries()).map(
 					([trackedFile, { diags }]) => ({
 						filePath: trackedFile,
@@ -1383,7 +1562,7 @@ export function createLspNavigationTool(
 					);
 				}
 
-				await openFileBestEffort(lspService, filePath);
+				openedFileContent = await openFileBestEffort(lspService, filePath);
 			}
 
 			// Convert 1-based editor coords to 0-based LSP coords.
@@ -1537,6 +1716,7 @@ export function createLspNavigationTool(
 								"__BADINPUT__ newName parameter required for rename",
 							);
 						}
+						renameRequestedAtMs = Date.now();
 						const edit = await lspService.rename(
 							filePath,
 							lspLine,
@@ -1553,6 +1733,18 @@ export function createLspNavigationTool(
 						}
 						const applied = await applyWorkspaceEdit(edit, ctx.cwd || ".", {
 							mutationContext,
+							// #3601: the server computed this edit from the bytes each touched
+							// file held when it answered. A file that changed in between is
+							// refused inside pi's queue, before any write, so the edit never
+							// lands on text it was not computed for.
+							expectedContent: captureRenameExpectedContent(
+								lspService,
+								edit,
+								ctx.cwd || ".",
+								filePath,
+								openedFileContent,
+								renameRequestedAtMs,
+							),
 						});
 						for (const touchedFile of applied.files) {
 							try {
@@ -1763,7 +1955,11 @@ export function createLspNavigationTool(
 						"moduleImportedBy",
 					].includes(operation);
 				if (shouldRetryOnEmpty) {
-					await openFileBestEffort(lspService, filePath, true);
+					openedFileContent = await openFileBestEffort(
+						lspService,
+						filePath,
+						true,
+					);
 					result = await runOperation();
 				}
 

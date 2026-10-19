@@ -23,6 +23,7 @@ import {
 } from "../../clients/mutation-attribution.js";
 import {
 	_observedMutationStateForTests,
+	_setObservedTimeBoundsForTests,
 	_setObservedTurnBudgetForTests,
 	armObservedMutation,
 	deriveObservedEditRanges,
@@ -291,6 +292,39 @@ describe("#2430 item 4 — bounds are visible, never silent", () => {
 				(entry) => entry.kind === "observed-mutation-budget",
 			);
 			expect(group?.latestReasons[0]?.subject).toBe("patch_file");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("parks a spent turn's budget across other turns, at most eight of them (#3613 F2)", async () => {
+		// The recurrences: a switch to another session's turn reset the spend
+		// (no bound when two sessions interleave), or the parked spends grew
+		// with every turn the process ever saw.
+		const env = setupTestEnvironment("pi-lens-3613-parked-");
+		try {
+			const filePath = path.join(env.tmpDir, "parked.ts");
+			fs.writeFileSync(filePath, SOURCE);
+			const armsAt = async (turnIndex: number, toolCallId: string) =>
+				(
+					await armObservedMutation(
+						armArgs(filePath, env.tmpDir, { turnIndex, toolCallId }),
+					)
+				).armed;
+			_setObservedTurnBudgetForTests(1, OBSERVED_TURN_BUDGET_MS + 1);
+			for (let turn = 2; turn <= 9; turn += 1)
+				_setObservedTurnBudgetForTests(turn, 0);
+			// Turns 1..8 are parked (eight) and turn 9 holds the slot.
+			const keptSpent = await armsAt(1, "call-parked-kept");
+			_setObservedTurnBudgetForTests(1, OBSERVED_TURN_BUDGET_MS + 1);
+			for (let turn = 2; turn <= 10; turn += 1)
+				_setObservedTurnBudgetForTests(turn, 0);
+			// Turn 1 is the oldest of nine parked: it is dropped.
+
+			expect({
+				keptSpent,
+				afterEviction: await armsAt(1, "call-parked-evicted"),
+			}).toEqual({ keptSpent: false, afterEviction: true });
 		} finally {
 			env.cleanup();
 		}
@@ -835,6 +869,7 @@ describe("#2449 review round 2 — the observation universe is the target path",
 		// off for the rest of the session — de-attributing a real codemod on
 		// evidence the net never collected (catalog shape 10).
 		const env = setupTestEnvironment("pi-lens-2449-dircap-");
+		_setObservedTimeBoundsForTests({ captureMs: 30_000, settleMs: 30_000 });
 		try {
 			const dir = path.join(env.tmpDir, "wide");
 			fs.mkdirSync(dir);
@@ -882,6 +917,7 @@ describe("#2449 review round 2 — the observation universe is the target path",
 			// not spend the tool's clean-observation budget.
 			expect(shouldArmObservationForTool("wide_codemod")).toBe(true);
 		} finally {
+			_setObservedTimeBoundsForTests({});
 			env.cleanup();
 		}
 	});
@@ -1543,6 +1579,7 @@ describe("#2449 review round 4 — handled marks, bounds and budget honesty", ()
 		// a large fixture, so the split is the same on any box: the stats capture
 		// takes one read and the line-hash capture takes the other.
 		const env = setupTestEnvironment("pi-lens-2449-charge-");
+		_setObservedTimeBoundsForTests({ captureMs: 30_000 });
 		try {
 			const filePath = path.join(env.tmpDir, "charged.ts");
 			fs.writeFileSync(filePath, SOURCE);
@@ -1573,6 +1610,7 @@ describe("#2449 review round 4 — handled marks, bounds and budget honesty", ()
 				_observedMutationStateForTests().turnSpentMs,
 			).toBeGreaterThanOrEqual(wallMs - 10);
 		} finally {
+			_setObservedTimeBoundsForTests({});
 			env.cleanup();
 		}
 	});

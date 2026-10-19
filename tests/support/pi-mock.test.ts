@@ -95,3 +95,83 @@ describe("createPiMock", () => {
 		expect(ctx.notifications).toEqual([{ message: "hello", type: "info" }]);
 	});
 });
+
+/**
+ * #3855 (verify r2 V1): pi-lens keys a file-less successor by its session
+ * manager's identity. The recurrence: the mock minted a manager per ctx, where
+ * pi 1.0.4 hands a /reload or in-memory /fork successor its predecessor's
+ * object (`core/agent-session.js` `_buildRuntime` builds the runner from
+ * `this.sessionManager`; `core/extensions/runner.js` returns
+ * `runner.sessionManager`; the in-memory `fork()` passes
+ * `this.session.sessionManager`), and a rule clause (J6) was written to keep
+ * that double green.
+ */
+describe("createPiMock session-manager identity (#3855)", () => {
+	async function replace(
+		shutdown: Record<string, unknown>,
+		startReason: string,
+	) {
+		const dying = createPiMock();
+		const successor = createPiMock();
+		const before = makeCtx({ sessionId: "s1" });
+		const after = makeCtx({ sessionId: "s2", sessionFile: "/s/two.jsonl" });
+		const beforeManager = before.sessionManager;
+		await dying.emit("session_shutdown", shutdown, before);
+		await successor.emit(
+			"session_start",
+			{ type: "session_start", reason: startReason },
+			after,
+		);
+		return { beforeManager, after };
+	}
+
+	for (const shutdown of [{ reason: "reload" }, { reason: "fork" }] as const) {
+		it(`hands the ${shutdown.reason} successor its predecessor's manager, with its own id and file`, async () => {
+			const { beforeManager, after } = await replace(shutdown, shutdown.reason);
+			expect(after.sessionManager).toBe(beforeManager);
+			expect(after.sessionManager.getSessionId()).toBe("s2");
+			expect(after.sessionManager.getSessionFile()).toBe("/s/two.jsonl");
+		});
+	}
+
+	for (const [shutdown, startReason] of [
+		[{ reason: "fork", targetSessionFile: "/s/fork.jsonl" }, "fork"],
+		[{ reason: "new" }, "new"],
+		[{ reason: "resume", targetSessionFile: "/s/r.jsonl" }, "resume"],
+		[{ reason: "reload" }, "startup"],
+	] as const) {
+		it(`keeps a new manager where pi builds one (${shutdown.reason} -> ${startReason})`, async () => {
+			const { beforeManager, after } = await replace(shutdown, startReason);
+			expect(after.sessionManager).not.toBe(beforeManager);
+		});
+	}
+
+	// A hand-over a test never consumed must not reach the next test, where a
+	// first reload start would adopt a stale manager and its stale ticket.
+	it("leaves a reload hand-over unconsumed (sets up the next test)", async () => {
+		await createPiMock().emit(
+			"session_shutdown",
+			{ reason: "reload" },
+			makeCtx({ sessionId: "stale" }),
+		);
+	});
+
+	it("starts the next test with no hand-over pending", async () => {
+		const fresh = makeCtx({ sessionId: "fresh" });
+		const own = fresh.sessionManager;
+		await createPiMock().emit("session_start", { reason: "reload" }, fresh);
+		expect(fresh.sessionManager).toBe(own);
+	});
+
+	it("hands a manager over once", async () => {
+		const pi = createPiMock();
+		const before = makeCtx({ sessionId: "s1" });
+		await pi.emit("session_shutdown", { reason: "reload" }, before);
+		const first = makeCtx({ sessionId: "s1" });
+		const second = makeCtx({ sessionId: "s1" });
+		await pi.emit("session_start", { reason: "reload" }, first);
+		await pi.emit("session_start", { reason: "reload" }, second);
+		expect(first.sessionManager).toBe(before.sessionManager);
+		expect(second.sessionManager).not.toBe(before.sessionManager);
+	});
+});

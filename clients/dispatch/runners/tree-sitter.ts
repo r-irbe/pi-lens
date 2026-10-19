@@ -8,13 +8,17 @@
 import * as path from "node:path";
 import { RuleCache } from "../../cache/rule-cache.js";
 import { isRuleIgnoredForPath } from "../rule-ignores.js";
+import { ruleIgnoredForPath } from "../rule-policy.js";
 import { isTestFile } from "../../file-utils.js";
 import {
 	buildOrUpdateGraph,
 	computeImpactCascade,
 	recordEntitySnapshotDiff,
 } from "../../review-graph/service.js";
-import type { TreeSitterClient } from "../../tree-sitter-client.js";
+import {
+	classifyTreeSitterWasmError,
+	type TreeSitterClient,
+} from "../../tree-sitter-client.js";
 import {
 	getSharedTreeSitterClient,
 	isTreeSitterWasmAborted,
@@ -38,6 +42,7 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
+import { findingsResult } from "../types.js";
 
 const blastCooldownByFile = new Map<string, number>();
 const BLAST_COOLDOWN_MS = 5_000;
@@ -516,7 +521,8 @@ const treeSitterRunner: RunnerDefinition = {
 		).filter(
 			(q) =>
 				!(fileIsTest && q.skip_test_files) &&
-				!isRuleIgnoredForPath(filePath, ignoreRoot, q.ignore_paths),
+				!isRuleIgnoredForPath(filePath, ignoreRoot, q.ignore_paths) &&
+				!ruleIgnoredForPath(q.id, filePath, ignoreRoot, ctx.rulePolicy),
 		);
 
 		logTreeSitter({
@@ -528,6 +534,9 @@ const treeSitterRunner: RunnerDefinition = {
 			cacheHit,
 			metadata: { blockingOnly: !!ctx.blockingOnly },
 		});
+		if (effectiveQueries.length === 0) {
+			return { status: "succeeded", diagnostics: [], semantic: "none" };
+		}
 
 		const contentFromFacts = ctx.facts.getFileFact<string | null>(
 			filePath,
@@ -622,7 +631,7 @@ const treeSitterRunner: RunnerDefinition = {
 			const msg = err instanceof Error ? err.message : String(err);
 			// Emscripten abort() corrupts the entire module-level wasm heap.
 			// Poison the singleton so no further queries attempt to use the dead runtime.
-			if (msg.includes("Aborted") || msg.includes("abort()")) {
+			if (classifyTreeSitterWasmError(err) === "abort") {
 				markTreeSitterWasmAborted();
 				logTreeSitter({
 					phase: "query_error",
@@ -765,11 +774,10 @@ const treeSitterRunner: RunnerDefinition = {
 			effectiveQueryCount: effectiveQueries.length,
 		});
 
-		return {
+		return findingsResult(diagnostics, {
 			status: hasBlocking ? "failed" : "succeeded",
-			diagnostics,
 			semantic: hasBlocking ? "blocking" : "warning",
-		};
+		});
 	},
 };
 

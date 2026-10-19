@@ -22,16 +22,16 @@
  * 1000 ms — which is what makes this table a target rather than a
  * description.
  *
- * ## Why a table, and why it is not wired yet
+ * ## How the table is enforced
  *
- * Slice 1 of #2523 ships the enforcement PRIMITIVE (`bounded()` in
- * `clients/deadline-utils.ts`) and the guard that makes a new unbounded hook
- * await impossible to add (`tests/config/hook-await-bounds.test.ts`). It
- * deliberately changes NO hook's behavior. This table exists now so the
- * guard's exemption table can say which hook each unbounded await belongs to
- * — a claim that is checked, since every exemption's `hook` field must be a
- * key of {@link HOOK_WALL_BUDGET_MS}. Slice 2 (AC3-AC8) wires it into the
- * outer `bounded()` around each registered handler.
+ * `wrapSessionEventHandler` puts the outer `bounded()` wall around each
+ * registered handler, releasing the host when that wall expires or its
+ * signal aborts. Inner awaits are nested under that same wall; their own
+ * bounds can finish earlier, but cannot extend the time spent by the hook.
+ * The write/edit `tool_result` path is the only hook allowed to make the host
+ * wait for its work. Read-only `tool_result` and the lifecycle hooks use their
+ * declared wall, while `tool_call` is intentionally unwalled by this table.
+ * `tests/config/hook-await-bounds.test.ts` keeps new hook awaits registered.
  *
  * #1978's phase-budget watchdog is the general form of this idea ("every
  * recorded duration gets a declared budget"). When it lands it must CONSUME
@@ -57,6 +57,7 @@ export type HookBudgetKey =
 	| "tool_result_read_only"
 	| "tool_result_edit"
 	| "session_shutdown"
+	| "session_shutdown_quit"
 	| "context"
 	| "session_before_fork";
 
@@ -83,8 +84,10 @@ export const HOOK_WALL_BUDGET_MS: Readonly<Record<HookBudgetKey, number>> =
 		tool_result_read_only: 500,
 		/** The ONLY path the contract lets block the host, and only this long. */
 		tool_result_edit: 10000,
-		/** Teardown: spawning or awaiting here aborts libuv (#234). */
+		/** Replacement teardown is synchronous so its successor ordering is preserved (#3881). */
 		session_shutdown: 0,
+		/** The maintainer amendment permits quit-only sink draining before process exit (#2523). */
+		session_shutdown_quit: 500,
 		/** Synchronous message contribution; the host is blocked on the answer. */
 		context: 0,
 		/** Fork bookkeeping; the session is being replaced under it. */

@@ -52,6 +52,12 @@ import {
 import { normalizeFilePath } from "../../clients/path-utils.js";
 import { removeTempDirSync } from "./test-utils.js";
 
+// This file truncates and reads latency.log and reads sessionstart.log by byte
+// offset; a concurrent real session_start writer appends its own rows, which
+// made a neighbouring file red under the pre-#3721 shared home. The harness's
+// per-worker PI_LENS_HOME keeps those writers off this file's sink; the loggers
+// bind their paths at load, so the home is the harness's.
+
 interface ConfigResolvedMetadata {
 	sessionId: string;
 	documents: Array<{ tier: string; file: string; legacy: boolean }>;
@@ -110,10 +116,37 @@ async function configResolvedRows(): Promise<
  * byte offset rather than by clearing a machine-global file another suite may
  * be appending to.
  */
-function sessionStartOffset(): number {
+async function sessionStartOffset(): Promise<number> {
+	// Drain first (#4381): a line this test enqueued earlier and the writer has
+	// not appended yet would land after the offset and count inside the window.
+	await flushSessionStartLog();
 	return fs.existsSync(SESSIONSTART_LOG_FILE)
 		? fs.statSync(SESSIONSTART_LOG_FILE).size
 		: 0;
+}
+
+/**
+ * A stalled sessionstart writer (#4381). Every append to sessionstart.log
+ * waits for the latency sink to drain and for one more loop turn before it
+ * reaches the disk, so a test that awaits only the latency drain and then
+ * reads sessionstart.log synchronously runs while its own lines are still in
+ * flight. The bytes are real and land in the real file; only their timing is
+ * held. Returns the restore.
+ */
+function stallSessionStartAppends(): () => void {
+	const appendFile = fs.promises.appendFile.bind(fs.promises);
+	const spy = vi
+		.spyOn(fs.promises, "appendFile")
+		.mockImplementation(async (file, data, options) => {
+			if (
+				path.basename(String(file)) === path.basename(SESSIONSTART_LOG_FILE)
+			) {
+				await flushLatencyLog();
+				await new Promise<void>((resolve) => setImmediate(resolve));
+			}
+			return appendFile(file, data, options);
+		});
+	return () => spy.mockRestore();
 }
 
 async function sessionStartLinesSince(
@@ -207,7 +240,7 @@ function legacyLayout(): { home: string; projectDir: string } {
 describe("config_resolved: the session's one positive config record (#2526)", () => {
 	it("canonical-only layout: one row, redacted, recordCount 0", async () => {
 		const { home, projectDir } = canonicalOnlyLayout();
-		const offset = sessionStartOffset();
+		const offset = await sessionStartOffset();
 
 		const { loadLSPConfig, resetLSPConfigStateForTests } =
 			await import("../../clients/lsp/config.js");
@@ -268,7 +301,7 @@ describe("config_resolved: the session's one positive config record (#2526)", ()
 	 */
 	it("publishes a pending mark before the row, both carrying this session's id and root", async () => {
 		const { home, projectDir } = canonicalOnlyLayout();
-		const offset = sessionStartOffset();
+		const offset = await sessionStartOffset();
 
 		const { loadLSPConfig, resetLSPConfigStateForTests } =
 			await import("../../clients/lsp/config.js");
@@ -330,7 +363,7 @@ describe("config_resolved: the session's one positive config record (#2526)", ()
 	 */
 	it("a resolution that throws still leaves a pending mark with no row", async () => {
 		const { home, projectDir } = canonicalOnlyLayout();
-		const offset = sessionStartOffset();
+		const offset = await sessionStartOffset();
 		const boom = new Error("simulated resolution failure");
 
 		// Spy on the ALREADY-cached `config-resolve.js` instance (the same one
@@ -369,7 +402,7 @@ describe("config_resolved: the session's one positive config record (#2526)", ()
 
 	it("legacy layout: the document is flagged legacy and records are produced", async () => {
 		const { home, projectDir } = legacyLayout();
-		const offset = sessionStartOffset();
+		const offset = await sessionStartOffset();
 
 		const { loadLSPConfig, resetLSPConfigStateForTests } =
 			await import("../../clients/lsp/config.js");
@@ -603,6 +636,11 @@ describe("handleSessionStart publishes nothing about config resolution (#2526 ro
 		const globals = globalThis as { __piLensWarmupScheduled?: boolean };
 		const previousWarmup = globals.__piLensWarmupScheduled;
 		globals.__piLensWarmupScheduled = true;
+		// #4381: the load below enqueues two sessionstart lines. Holding their
+		// append past the latency drain makes the CI interleaving of master run
+		// 38515888889 deterministic: an offset taken without draining
+		// sessionstart.log first counts both lines inside its window.
+		const releaseStall = stallSessionStartAppends();
 		try {
 			const { loadLSPConfig, resetLSPConfigStateForTests } =
 				await import("../../clients/lsp/config.js");
@@ -613,7 +651,7 @@ describe("handleSessionStart publishes nothing about config resolution (#2526 ro
 			const rows = await configResolvedRows();
 			expect(rows).toHaveLength(1);
 
-			const offset = sessionStartOffset();
+			const offset = await sessionStartOffset();
 			// The REAL handler, standing in for index.ts's call after its ensure.
 			const { handleSessionStart } =
 				await import("../../clients/runtime-session.js");
@@ -631,6 +669,7 @@ describe("handleSessionStart publishes nothing about config resolution (#2526 ro
 				"handleSessionStart re-armed the claim mid-session",
 			).toHaveLength(1);
 		} finally {
+			releaseStall();
 			globals.__piLensWarmupScheduled = previousWarmup;
 			if (previousStartupMode === undefined)
 				delete process.env.PI_LENS_STARTUP_MODE;
@@ -659,7 +698,7 @@ describe("handleSessionStart publishes nothing about config resolution (#2526 ro
 		const previousWarmup = globals.__piLensWarmupScheduled;
 		globals.__piLensWarmupScheduled = true;
 		try {
-			const offset = sessionStartOffset();
+			const offset = await sessionStartOffset();
 			const { handleSessionStart } =
 				await import("../../clients/runtime-session.js");
 			const deps = makeDeps(projectDir, () => {}) as {
@@ -680,7 +719,7 @@ describe("handleSessionStart publishes nothing about config resolution (#2526 ro
 describe("MCP parity: the warm boot's config resolution records too (#2526)", () => {
 	it("ensureLspConfig — the MCP server's boot seam — writes the row", async () => {
 		const { projectDir } = canonicalOnlyLayout();
-		const offset = sessionStartOffset();
+		const offset = await sessionStartOffset();
 
 		// `mcp/server.ts`'s `ensureReady` calls exactly this, before
 		// `runSessionStart` drives `handleSessionStart`. It resolves against the

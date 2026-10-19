@@ -4,8 +4,11 @@ import * as path from "node:path";
 import {
 	realHarnessFixtureRoot,
 	validateScript,
+	withRepoBinOnPath,
+	withRealPi,
 } from "../support/real-pi-harness.js";
 
+// flake-shape: real-process-spawn — the child environment is the subject of this boundary test
 describe("real harness fixture shape", () => {
 	it("requires every scenario to provide a project directory and valid script fields", () => {
 		for (const scenario of readdirSync(realHarnessFixtureRoot)) {
@@ -35,5 +38,33 @@ describe("real harness fixture shape", () => {
 		expect(() =>
 			validateScript([[{ type: "text" }]], "broken/script.json"),
 		).toThrow(/text must be a string/);
+	});
+	it("puts the repo bin dir first on the child PATH under any key casing (#3742)", () => {
+		const head = [
+			path.resolve("node_modules", ".bin"),
+			path.dirname(process.execPath),
+		];
+		const joined = (...parts: string[]) => parts.join(path.delimiter);
+		expect(withRepoBinOnPath({ PATH: "/usr/bin" })).toEqual({
+			PATH: joined(...head, "/usr/bin"),
+		});
+		expect(withRepoBinOnPath({ Path: "C:\\Windows" })).toEqual({
+			Path: joined(...head, "C:\\Windows"),
+		});
+		expect(withRepoBinOnPath({ PATH: "" })).toEqual({ PATH: joined(...head) });
+		expect(withRepoBinOnPath({})).toEqual({ PATH: joined(...head) });
+	});
+	it("gives real pi children a TMPDIR under their removable home (#4133)", async () => {
+		await withRealPi(
+			{ fixture: "scenario-1", script: "script.json" },
+			async (pi) => {
+				expect(pi.childEnvironment().TMPDIR).toBe(
+					path.join(pi.homePath(), "tmp"),
+				);
+				expect(pi.childEnvironment().TMP).toBe(pi.childEnvironment().TMPDIR);
+				expect(pi.childEnvironment().TEMP).toBe(pi.childEnvironment().TMPDIR);
+				expect(statSync(pi.childTempDir()).isDirectory()).toBe(true);
+			},
+		);
 	});
 });

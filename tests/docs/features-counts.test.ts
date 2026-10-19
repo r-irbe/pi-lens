@@ -102,6 +102,7 @@ const AUXILIARY_SERVER_IDS = new Set(
  */
 const DOCS_LABEL_OVERRIDES: Record<string, string> = {
 	"python-jedi": "Python",
+	"docker-official": "Docker",
 	csharp: "C#",
 	omnisharp: "C#",
 	fsharp: "F#",

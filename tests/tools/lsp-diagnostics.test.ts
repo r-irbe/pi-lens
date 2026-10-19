@@ -30,10 +30,10 @@ vi.mock("../../clients/warm-attach.js", () => ({
 // the "#631 per-server scheduling" describe block below actually exercise
 // the property under test (never >1 in-flight touch per server group),
 // rather than a mock that would trivially satisfy it either way.
-vi.mock("../../clients/lsp/index.js", async () => {
+vi.mock("../../clients/lsp/capabilities.js", async () => {
 	const actual = await vi.importActual<
-		typeof import("../../clients/lsp/index.js")
-	>("../../clients/lsp/index.js");
+		typeof import("../../clients/lsp/capabilities.js")
+	>("../../clients/lsp/capabilities.js");
 	return {
 		...actual,
 		getLSPService: () => mocked.service,
@@ -59,44 +59,52 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { RUNTIME_CONFIG } from "../../clients/runtime-config.js";
 
-describe("lsp_diagnostics tool", () => {
-	beforeEach(() => {
-		mocked.cascadeTier = "waits";
-		mocked.warmAttached = false;
-		mocked.attachedDiagnostics.mockReset();
-		reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
-		mocked.service = makeLspServiceDouble({
-			getDiagnostics: vi.fn().mockImplementation(async (filePath: string) => {
-				if (filePath.endsWith("bad.ts")) {
-					return [
-						{
-							severity: 1,
-							message: "Type 'string' is not assignable to type 'number'.",
-							range: {
-								start: { line: 0, character: 16 },
-								end: { line: 0, character: 24 },
-							},
-							source: "ts",
+/**
+ * The mocked LSP service every case reads through `mocked.service`. #4397: it
+ * used to be installed only by the first describe's `beforeEach`, so the
+ * carve-out describe below ran on whatever service an earlier case left
+ * behind, and on `null` when a shuffle put it first.
+ */
+function resetServiceDouble() {
+	mocked.cascadeTier = "waits";
+	mocked.warmAttached = false;
+	mocked.attachedDiagnostics.mockReset();
+	reconcileScanDiagnosticsMock.mockReset().mockReturnValue(true);
+	mocked.service = makeLspServiceDouble({
+		getDiagnostics: vi.fn().mockImplementation(async (filePath: string) => {
+			if (filePath.endsWith("bad.ts")) {
+				return [
+					{
+						severity: 1,
+						message: "Type 'string' is not assignable to type 'number'.",
+						range: {
+							start: { line: 0, character: 16 },
+							end: { line: 0, character: 24 },
 						},
-					];
-				}
-				return [];
-			}),
-			getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
-			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
-			runWorkspaceDiagnostics: vi.fn(),
-			// #2598: `collectDiagnosticsForFile` now touches unconditionally —
-			// the real `LSPService` defines `touchFile` on every shape, so the
-			// probe that used to route this suite down an `openFile` arm is
-			// gone. `undefined` is what the real `touchFile` resolves to when
-			// it resolves NO client for the file (clients/lsp/index.ts, the
-			// `no_clients` return), and it is the state these cases want: the
-			// tool falls through to `getDiagnostics`, where their fixtures
-			// live. Cases that want the touch itself to answer install their
-			// own `touchFile` on the double.
-			touchFile: vi.fn(async () => undefined),
-		});
+						source: "ts",
+					},
+				];
+			}
+			return [];
+		}),
+		getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
+		getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+		runWorkspaceDiagnostics: vi.fn(),
+		// #2598: `collectDiagnosticsForFile` now touches unconditionally —
+		// the real `LSPService` defines `touchFile` on every shape, so the
+		// probe that used to route this suite down an `openFile` arm is
+		// gone. `undefined` is what the real `touchFile` resolves to when
+		// it resolves NO client for the file (clients/lsp/index.ts, the
+		// `no_clients` return), and it is the state these cases want: the
+		// tool falls through to `getDiagnostics`, where their fixtures
+		// live. Cases that want the touch itself to answer install their
+		// own `touchFile` on the double.
+		touchFile: vi.fn(async () => undefined),
 	});
+}
+
+describe("lsp_diagnostics tool", () => {
+	beforeEach(resetServiceDouble);
 
 	it("uses attached diagnostics for a batch without local warm-up or touches", async () => {
 		const touchFile = vi.fn();
@@ -329,6 +337,10 @@ describe("lsp_diagnostics tool", () => {
 				unsupported: 1,
 				unavailable: 1,
 			});
+			// Unsupported and unavailable files were never checked, so they are not clean.
+			expect(result.details?.cleanFiles).toBe(
+				result.details?.outcomeCounts.clean,
+			);
 			expect(result.details?.outcomes.map((entry: any) => entry.file)).toEqual(
 				files,
 			);
@@ -2476,6 +2488,8 @@ describe("lsp_diagnostics tool", () => {
  * standalone query path has to apply them itself.
  */
 describe("lsp_diagnostics per-rule ignores carve-out (#3041)", () => {
+	beforeEach(resetServiceDouble);
+
 	// The shipped catalog rule that carves out `scripts/**` (#965).
 	const RULE = "no-console-except-error";
 

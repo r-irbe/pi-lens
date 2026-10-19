@@ -1,0 +1,21 @@
+# Corpus entry: mappings, sequences, anchors, multi-line scalars.
+defaults: &defaults
+  retries: 3
+  timeout: 30s
+
+services:
+  web:
+    <<: *defaults
+    image: "nginx:1.27"
+    ports:
+      - 80
+      - "443"
+    env: { MODE: prod, DEBUG: false }
+  db:
+    <<: *defaults
+    command: >
+      postgres
+      -c max_connections=100
+notes: |
+  line one
+  line two

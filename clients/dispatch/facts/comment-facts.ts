@@ -14,16 +14,25 @@ export const commentFactProvider: FactProvider = {
 		return /\.tsx?$/.test(ctx.filePath);
 	},
 	async run(ctx, store) {
-		await extractFactsFromTree(ctx, store, { "file.comments": [] }, (root) => {
-			// Tree-sitter attaches comments as `comment` nodes wherever they occur; a
-			// pre-order walk yields them in source order (matching the old scanner pass).
-			const comments: CommentSummary[] = [];
-			walk(root, (node) => {
-				if (node.type === "comment") {
-					comments.push({ line: node.startPosition.row + 1, text: node.text });
-				}
-			});
-			return { "file.comments": comments };
-		});
+		await extractFactsFromTree(
+			ctx,
+			store,
+			commentFactProvider.id,
+			{ "file.comments": [] },
+			(root) => {
+				// Tree-sitter attaches comments as `comment` nodes wherever they occur; a
+				// pre-order walk yields them in source order (matching the old scanner pass).
+				const comments: CommentSummary[] = [];
+				walk(root, (node) => {
+					if (node.type === "comment") {
+						comments.push({
+							line: node.startPosition.row + 1,
+							text: node.text,
+						});
+					}
+				});
+				return { "file.comments": comments };
+			},
+		);
 	},
 };

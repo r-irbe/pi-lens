@@ -1,8 +1,11 @@
 /**
- * Resolves the skills directory the `resources_discover` handler (#205)
- * registers, and reports the one condition that pi previously loaded with NO
- * visible signal: `<packageRoot>/skills` is absent, unreadable, or holds no
- * skill pi's own loader would find (#2626).
+ * Resolves `<packageRoot>/skills` and reports the one condition pi previously
+ * loaded with NO visible signal: that directory is absent, unreadable, or
+ * holds no skill pi's own loader would find (#2626). The `resources_discover`
+ * handler (#205) calls this for the health record only; it no longer
+ * contributes the returned path (#1416), because pi applies the settings
+ * package filters (`packages[].skills`) only to manifest-declared resources,
+ * so a contributed directory re-added every excluded skill.
  *
  * `resolvePackagePath(import.meta.url, "skills")`-equivalent resolution
  * (`clients/package-root.ts`'s `getPackageRoot`) is correct for both the
@@ -11,9 +14,11 @@
  * when that walk lands somewhere with no `skills/` beside it: `skills/`
  * missing from an installed package, or the entry file copied out of the
  * package tree by a managed extension cache so the nearest `package.json`
- * is the cache's own. Either way `resources_discover` used to hand pi a
- * path that does not exist, `pi` registered zero skills, and nothing — no
- * extension error, no stderr line — said so (investigated on #2587).
+ * is the cache's own. Before #1416 that resolve fed
+ * `resources_discover`'s contributed path: pi registered zero skills on such a
+ * layout, and nothing — no extension error, no stderr line — said so
+ * (investigated on #2587). The path is no longer contributed, but the record
+ * below still names it.
  *
  * #2626 review round 2, F1: the FIRST version of this fix inverted the
  * acceptance criterion — it returned `[]` (no skills registered) whenever
@@ -23,9 +28,9 @@
  * criteria ask for a RECORD, never a changed return value: this module
  * returns `[skillsDir]` UNCONDITIONALLY, exactly like the pre-fix handler —
  * pi's own `loadSkills`/`collectSkillEntries` already treat a nonexistent
- * path as zero skills from that entry, gracefully, so handing it a path
- * that turns out to be empty is exactly as safe as `master`'s behavior
- * always was. The health check below is PURELY observational.
+ * path as zero skills from that entry, gracefully. The health check below is
+ * PURELY observational (#1416 then stopped the handler contributing the
+ * returned path, so no caller acts on it at all now).
  *
  * #2636 review F4: the ENOENT/EACCES classification shell below used to be
  * hand-rolled here, character-identical to the ast-grep/tree-sitter sites
@@ -64,10 +69,12 @@ function checkSkillsHealth(skillsDir: string): BundledResourceHealth {
 }
 
 /**
- * Resolve the skill path for `resources_discover`. ALWAYS returns
- * `[skillsDir]` (see the module doc for why — F1). When `skillsDir` is
- * absent, unreadable, or holds no skill pi's loader would find, records ONE
- * bounded `skills-dir-missing` degradation and a single `notifyUserDegradation`
+ * Resolve the skill path and record its health. ALWAYS returns `[skillsDir]`
+ * (see the module doc for why — F1); the `resources_discover` handler calls
+ * this for the record and deliberately contributes no path (#1416), so the
+ * return is a pure health-test surface now. When `skillsDir` is absent,
+ * unreadable, or holds no skill pi's loader would find, records ONE bounded
+ * `skills-dir-missing` degradation and a single `notifyUserDegradation`
  * warning, both naming the resolved path and the entry file's directory.
  *
  * Either way, one `skills_resolved` phase/latency record is written so an

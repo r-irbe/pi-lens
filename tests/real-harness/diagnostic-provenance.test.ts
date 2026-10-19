@@ -2,7 +2,6 @@ import {
 	existsSync,
 	readFileSync,
 	readdirSync,
-	rmSync,
 	statSync,
 	utimesSync,
 	writeFileSync,
@@ -14,6 +13,7 @@ import {
 	SCRATCH_DIR_ROOT,
 } from "../../scripts/lib/scratch-dir.mjs";
 import { createRealPiProject, withRealPi } from "../support/real-pi-harness.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 /**
  * Read the cross-session project-diagnostics snapshot both sessions share.
@@ -193,8 +193,8 @@ describe("real pi harness: diagnostic provenance", () => {
 				},
 			);
 		} finally {
-			rmSync(project, { recursive: true, force: true });
-			rmSync(home, { recursive: true, force: true });
+			removeTempDirSync(project);
+			removeTempDirSync(home);
 		}
 	}, 60_000);
 
@@ -271,8 +271,8 @@ describe("real pi harness: diagnostic provenance", () => {
 				},
 			);
 		} finally {
-			rmSync(project, { recursive: true, force: true });
-			rmSync(home, { recursive: true, force: true });
+			removeTempDirSync(project);
+			removeTempDirSync(home);
 		}
 	}, 60_000);
 
@@ -351,9 +351,9 @@ describe("real pi harness: diagnostic provenance", () => {
 				},
 			);
 		} finally {
-			rmSync(parent, { recursive: true, force: true });
-			rmSync(worktree, { recursive: true, force: true });
-			rmSync(home, { recursive: true, force: true });
+			removeTempDirSync(parent);
+			removeTempDirSync(worktree);
+			removeTempDirSync(home);
 		}
 	}, 60_000);
 });

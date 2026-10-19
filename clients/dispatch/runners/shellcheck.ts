@@ -34,12 +34,109 @@ import type {
 } from "../types.js";
 import {
 	createAvailabilityChecker,
+	coveringLaneAvailable,
 	lspPrimaryCoversFile,
 	resolveAvailableOrInstall,
 } from "./utils/runner-helpers.js";
 import { finishParsedRun } from "./utils/tool-failure.js";
 
 const shellcheck = createAvailabilityChecker("shellcheck", ".exe");
+
+/**
+ * ShellCheck's supported linter dialects, pinned per defect shape 16 to
+ * `bash-lsp/bash-language-server@server-5.8.1`
+ * `server/src/shellcheck/config.ts` (`SHELLCHECK_DIALECTS`). A dialect
+ * outside this set cannot be analyzed at all — ShellCheck refuses it
+ * outright (SC1071) and, where zsh code happens to parse under bash
+ * semantics, reports findings built on the wrong dialect. That refusal is
+ * why a dialect-resolved CLI run SKIPS client-side instead of reporting.
+ */
+const SHELLCHECK_DIALECTS: readonly string[] = [
+	"sh",
+	"bash",
+	"dash",
+	"ksh",
+	"busybox",
+] as const;
+/** Exported for the class-sweep pin (tests/config/shell-dialect-ownership-sweep); the set itself is the pinned upstream fact. */
+export const SHELLCHECK_SUPPORTED_DIALECTS = SHELLCHECK_DIALECTS;
+
+// Upstream shebang/directive parsing, pinned to
+// `bash-lsp/bash-language-server@server-5.8.1` `server/src/util/shebang.ts`
+// (defect shape 16 — test vectors generated from the real binary, not invented):
+const SHEBANG_REGEXP = /^#!(.+)/;
+// `/path/to/env [-S] <shell>` or `/path/to/<shell>`; takes the interpreter NAME.
+const SHEBANG_INTERPRETER_REGEXP =
+	/^[/](?:[^ /]+[/])*(?:env +(?:-S +)?)?([^ /]+)/;
+// The first continuous run of blank/comment lines may carry a
+// `shellcheck shell=<dialect>` directive (blanked comment lines keep the
+// region open; any code line closes it).
+const SHELLCHECK_SHELL_OR_EMPTY_REGEXP =
+	/^\s*(?:#\s*shellcheck\s+(?:\S+\s+)*shell=(\w+)|#|$)/;
+/** How many leading bytes of the file dialect resolution reads, bounded. */
+const DIALECT_SNIFF_BYTES = 4096;
+
+/** Dialect facts for a shell file, mirroring upstream `analyzeFile`'s shape. */
+export interface ShellFileDialect {
+	/** The parsed shebang interpreter name, or null. */
+	shebang: string | null;
+	/** The parsed `shellcheck shell=` directive value, or null. */
+	directive: string | null;
+	/** The resolved dialect name (defaults to bash, as upstream does). */
+	dialect: string;
+}
+
+function parseShebang(content: string): string | null {
+	const match = SHEBANG_REGEXP.exec(content);
+	if (!match || !match[1]) return null;
+	const interpreter = SHEBANG_INTERPRETER_REGEXP.exec(match[1].trim());
+	if (!interpreter || !interpreter[1]) return null;
+	return interpreter[1].trim();
+}
+
+function parseShellDirective(content: string): string | null {
+	for (const line of content.split("\n")) {
+		const match = SHELLCHECK_SHELL_OR_EMPTY_REGEXP.exec(line);
+		// A code line closes the eligible region (upstream's rule).
+		if (match === null) break;
+		if (match[1]) return match[1].trim();
+	}
+	return null;
+}
+
+/**
+ * Resolve a shell file's dialect: `shellcheck shell=` directive, then
+ * shebang, then a file extension that carries one (upstream's `parseUri`
+ * maps only `.zsh` to a name), defaulting to bash. Resolved against the
+ * file's CURRENT bytes; an unreadable file fails open with the bash default
+ * (pre-fix behavior — shape 48: the named harm of skipping would be silent
+ * coverage loss, so we lint and let the spawn disclose).
+ */
+export function resolveShellFileDialect(filePath: string): ShellFileDialect {
+	let content: string;
+	try {
+		content = fs
+			.readFileSync(filePath)
+			?.subarray(0, DIALECT_SNIFF_BYTES)
+			.toString("utf8");
+	} catch {
+		return { shebang: null, directive: null, dialect: "bash" };
+	}
+	const directive = parseShellDirective(content);
+	const shebang = parseShebang(content);
+	// Selection lower-cases the extension (`selectionReason`), so the
+	// extension arm matches case-insensitively too — a `.ZSH` file must not
+	// slip through to the bash fallback.
+	const parsed =
+		directive ??
+		shebang ??
+		(path.extname(filePath).toLowerCase() === ".zsh" ? "zsh" : null);
+	return {
+		shebang,
+		directive,
+		dialect: parsed ?? "bash",
+	};
+}
 
 function findShellcheckConfig(cwd: string): string | undefined {
 	const local = path.join(cwd, ".shellcheckrc");
@@ -152,17 +249,47 @@ const shellcheckRunner: RunnerDefinition = {
 	async run(ctx: DispatchContext): Promise<RunnerResult> {
 		const cwd = resolveRunnerCwd(ctx, "shellcheck");
 
-		// #233: bash-language-server runs shellcheck internally. When the `bash` LSP
-		// covers this file AND shellcheck is on PATH (so the LSP actually emits its
-		// findings), the warm server already produces these diagnostics — skip the
-		// redundant CLI scan. Stays active when the LSP or shellcheck is absent so
-		// shell coverage never regresses.
+		// #233, generalized (#3968): when the file's selected primary LSP
+		// declares a covers fact for THIS RUNNER's capability (the old literal
+		// `bash` server-id match could not express that), and the covering lane
+		// can actually run, the warm server already produces these diagnostics —
+		// skip the redundant CLI scan. Stays active when the covering lane is
+		// absent so shell coverage never regresses.
+		const cover = lspPrimaryCoversFile(ctx, "shellcheck");
 		if (
-			lspPrimaryCoversFile(ctx, "bash") &&
-			(await ctx.hasTool("bash-language-server")) &&
+			cover &&
+			(await coveringLaneAvailable(ctx, cover)) &&
 			(await ctx.hasTool("shellcheck"))
 		) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				skipReason: "covered-by-primary",
+				// WHO claimed (#3968 F2): declared (the row's own covers, gated
+				// on the custom row's own command) or builtin-fact.
+				claimSource: cover.claimSource,
+			};
+		}
+
+		// #3968 dialect gate — categorical, deliberately independent of covers:
+		// ShellCheck cannot analyze dialects outside SHELLCHECK_DIALECTS (it
+		// refuses them outright with SC1071, and zsh-adjacent code that happens
+		// to parse under bash semantics reports findings built on the wrong
+		// dialect — error-severity noise exactly like #3968's report). Skipping
+		// client-side here diverges from the upstream LSP lane's deliberate
+		// pass-through on shebang'd files, because THAT pass-through is the
+		// reported harm — the #1064 "let ShellCheck report it" comment protects
+		// the bash-lsp embedding, not a CLI lane with no other zsh lane to defer
+		// to. `zsh` always skips, regardless of LSP state.
+		const dialectInfo = resolveShellFileDialect(ctx.filePath);
+		if (!SHELLCHECK_DIALECTS.includes(dialectInfo.dialect)) {
+			return {
+				status: "skipped",
+				diagnostics: [],
+				semantic: "none",
+				skipReason: "dialect-unsupported",
+			};
 		}
 
 		let cmd: string | null = null;
@@ -178,14 +305,19 @@ const shellcheckRunner: RunnerDefinition = {
 		}
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
 
-		// Determine shell dialect from file extension (all map to bash for shellcheck)
-		const shellDialect = "bash";
-
 		// Build args
 		// --format json: JSON output
-		// --shell: Specify shell dialect (bash, sh, zsh, ksh, busybox)
-		// --severity: Minimum severity (we'll filter ourselves)
-		const args: string[] = ["--format", "json", "--shell", shellDialect];
+		// --shell: specify the dialect ONLY when the file carries neither a
+		// shebang nor a `shellcheck shell=` directive — ShellCheck performs its
+		// own shebang parsing when one exists (mirror of
+		// bash-language-server@server-5.8.1's lint flow, their #1064 guard
+		// against interfering with that). A shebang-less file keeps the bash
+		// fallback, exactly like upstream's own tentative detection.
+		// --severity: minimum severity (we'll filter ourselves)
+		const args: string[] = ["--format", "json"];
+		if (!dialectInfo.shebang && !dialectInfo.directive) {
+			args.push("--shell", dialectInfo.dialect);
+		}
 
 		// Check for config file
 		const configPath = findShellcheckConfig(ctx.cwd);

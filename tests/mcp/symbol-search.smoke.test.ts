@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * pilens_symbol_search MCP smoke (#348).
  *

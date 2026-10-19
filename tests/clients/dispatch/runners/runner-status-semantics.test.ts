@@ -21,12 +21,15 @@ const diagsResult = (
 	diags: unknown[],
 	extra: {
 		inconclusive?: boolean;
+		inconclusiveServerIds?: string[];
+		inconclusiveReason?: "notify-write" | "diagnostics-wait" | "mixed";
 		// #1470: the narrowed confirmation an aux cut off by the grace timer
 		// produces — the touch is NOT inconclusive, but it no longer speaks for
 		// the named servers.
 		confirmation?: "confirmed" | "partial";
 		unconfirmedServerIds?: string[];
 		deferredServerIds?: string[];
+		binding?: { boundToCurrentDisk: boolean | "unknown" };
 	} = {},
 ) => ({ diags, ...extra });
 const readFileContent = vi.fn(() => "const x = 1;\n");
@@ -44,7 +47,7 @@ vi.mock("../../../../clients/dispatch/runners/utils/lazy-installer.js", () => ({
 	tryLazyInstall,
 }));
 
-vi.mock("../../../../clients/lsp/index.js", () => ({
+vi.mock("../../../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () =>
 		makeLspServiceDouble({
 			supportsLSP,
@@ -518,6 +521,112 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	it("preserves answered auxiliary findings beside an inconclusive primary (#4219)", async () => {
+		// #4219: marksman can miss the diagnostics deadline while typos has already
+		// published real findings for the same bytes. The inconclusive verdict must
+		// not erase those answered diagnostics before the dispatcher can deliver them.
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-4219-");
+		try {
+			const filePath = path.join(env.tmpDir, "README.md");
+			fs.writeFileSync(filePath, "A known mispeling and a seperat typo.\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 2,
+							message: "mispeling → misspelling",
+							source: "typos",
+							range: {
+								start: { line: 0, character: 7 },
+								end: { line: 0, character: 16 },
+							},
+						},
+						{
+							severity: 2,
+							message: "seperat → separate",
+							source: "typos",
+							range: {
+								start: { line: 0, character: 25 },
+								end: { line: 0, character: 32 },
+							},
+						},
+					],
+					{
+						inconclusive: true,
+						inconclusiveServerIds: ["marksman"],
+						inconclusiveReason: "diagnostics-wait",
+					},
+				),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.diagnostics).toHaveLength(2);
+			expect(result.diagnostics.map((d) => d.tool)).toEqual(["typos", "typos"]);
+			expect(result.status).toBe("succeeded");
+			expect(result.unconfirmedServerIds).toEqual(["marksman"]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops stale primary findings beside fresh answered findings (#4231)", async () => {
+		// #4231: a timed-out primary can retain its previous diagnostics. The
+		// runner must not turn that stale last-known error into a blocking result
+		// merely because an auxiliary answered for the new file content.
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-4231-");
+		try {
+			const filePath = path.join(env.tmpDir, "README.md");
+			fs.writeFileSync(filePath, "A fresh typo.\n");
+
+			supportsLSP.mockReturnValue(true);
+			touchFile.mockResolvedValue(
+				diagsResult(
+					[
+						{
+							severity: 1,
+							message: "stale primary error",
+							serverId: "marksman",
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 1 },
+							},
+						},
+						{
+							severity: 2,
+							message: "fresh auxiliary finding",
+							serverId: "typos",
+							source: "typos",
+							range: {
+								start: { line: 0, character: 2 },
+								end: { line: 0, character: 7 },
+							},
+						},
+					],
+					{
+						inconclusive: true,
+						inconclusiveServerIds: ["marksman"],
+						inconclusiveReason: "diagnostics-wait",
+						binding: { boundToCurrentDisk: false },
+					},
+				),
+			);
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]?.tool).toBe("typos");
+			expect(result.status).toBe("succeeded");
+			expect(result.unconfirmedServerIds).toEqual(["marksman"]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lsp runner returns skipped for an EMPTY result whose auxiliary was cut off (#1470)", async () => {
 		// The practical shape from #1470: opengrep hangs, our grace timer cuts it
 		// off, the primary answers clean. The touch is deliberately NOT
@@ -603,6 +712,111 @@ describe("runner status/semantic edge cases", () => {
 				registry,
 			);
 			expect(changed.output).toContain("coverage: ast-grep silent");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("repeats a scanner coverage notice on every pull without consuming the push latch (#3791)", async () => {
+		// #3791: the same session latch dedupes the scanner-partial notice class
+		// too, so a warm `pilens_analyze` pull of a file with a silent scanner
+		// also read as a clean result on the second call. A pull dispatch
+		// (`dedupeCoverageNotice: false`) must emit it every time and must leave
+		// the push latch intact.
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const { clearCoverageNoticeState, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const env = setupTestEnvironment("pi-lens-lsp-pull-coverage-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			clearCoverageNoticeState();
+			touchFile.mockResolvedValue(
+				diagsResult([], {
+					confirmation: "partial",
+					unconfirmedServerIds: ["opengrep"],
+				}),
+			);
+			const registry = new RunnerRegistry();
+			registry.register(runner);
+			const groups = [{ mode: "all" as const, runnerIds: ["lsp"] }];
+			const notice = "coverage: opengrep silent";
+			const pull = () =>
+				dispatchForFile(
+					ctx(filePath, env.tmpDir) as never,
+					groups,
+					registry,
+					undefined,
+					{ dedupeCoverageNotice: false },
+				);
+
+			// Pay the push latch first, so the pull has to ignore a set key.
+			const pushFirst = await dispatchForFile(
+				ctx(filePath, env.tmpDir) as never,
+				groups,
+				registry,
+			);
+			expect(pushFirst.output).toContain(notice);
+			const pushSecond = await dispatchForFile(
+				ctx(filePath, env.tmpDir) as never,
+				groups,
+				registry,
+			);
+			expect(pushSecond.output).not.toContain(notice);
+
+			expect((await pull()).output).toContain(notice);
+			expect((await pull()).output).toContain(notice);
+
+			// The pulls did not write the latch either: the next push stays silent.
+			const pushThird = await dispatchForFile(
+				ctx(filePath, env.tmpDir) as never,
+				groups,
+				registry,
+			);
+			expect(pushThird.output).not.toContain(notice);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps a fresh scanner push notice after two pulls (#3791 F2)", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const { clearCoverageNoticeState, dispatchForFile, RunnerRegistry } =
+			await import("../../../../clients/dispatch/dispatcher.js");
+		const env = setupTestEnvironment("pi-lens-lsp-fresh-push-coverage-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			clearCoverageNoticeState();
+			touchFile.mockResolvedValue(
+				diagsResult([], {
+					confirmation: "partial",
+					unconfirmedServerIds: ["opengrep"],
+				}),
+			);
+			const registry = new RunnerRegistry();
+			registry.register(runner);
+			const groups = [{ mode: "all" as const, runnerIds: ["lsp"] }];
+			const notice = "coverage: opengrep silent";
+			const pull = () =>
+				dispatchForFile(
+					ctx(filePath, env.tmpDir) as never,
+					groups,
+					registry,
+					undefined,
+					{ dedupeCoverageNotice: false },
+				);
+
+			expect((await pull()).output).toContain(notice);
+			expect((await pull()).output).toContain(notice);
+			const firstPush = await dispatchForFile(
+				ctx(filePath, env.tmpDir) as never,
+				groups,
+				registry,
+			);
+			expect(firstPush.output).toContain(notice);
 		} finally {
 			env.cleanup();
 		}

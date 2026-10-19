@@ -10,6 +10,21 @@ There are **two** pi-lens config files:
 Both files have the same shape, with one exception noted below the example:
 everything LSP-related lives under an `lsp` namespace inside them.
 
+Executable LSP fields from a project config are admitted only when pi has
+marked the project trusted. This includes custom `command` values, command
+overrides, `env`, and `initializationOptions`; an untrusted or older host is
+fail-closed and emits one bounded notice telling you to mark the project
+trusted in pi or upgrade pi. Global config remains trusted, and a project can
+always disable a server. pi-lens does not maintain a second trust setting.
+
+The editor-facing JSON Schema is published at
+[`docs/schema/pi-lens-config-v1.json`](schema/pi-lens-config-v1.json). LSP
+server entries also accept canonical argv arrays, optional `name` (defaulting
+to the map id), `enabled`, `role` (`language` or `auxiliary`), `args`, and
+`rootMarkers`. These new fields are experimental; reserved role, root-policy,
+and timing semantics are inert until their planned catalog slices land, so this
+schema slice does not change server launch behavior.
+
 ```jsonc
 {
   "$schema": "https://raw.githubusercontent.com/apmantza/pi-lens/master/docs/schema/pi-lens-config-v1.json",
@@ -23,8 +38,8 @@ everything LSP-related lives under an `lsp` namespace inside them.
       "my-server": {
         "name": "My Custom LSP",
         "extensions": [".myext"],
-        "command": "my-lsp-server",
-        "args": ["--stdio"]
+        "command": ["my-lsp-server", "--stdio"],
+        "covers": ["shellcheck"]
       }
     },
     "serverOverrides": {
@@ -36,6 +51,10 @@ everything LSP-related lives under an `lsp` namespace inside them.
 }
 ```
 
+An override may also provide an experimental launcher `command` and `env`.
+The built-in server ID and strategy remain in force; only the launcher is
+replaced, and project-sourced launcher fields follow the same pi trust gate.
+
 Each model-facing tool accepts `tools.<name>.enabled` in the config file. Valid
 names include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
 `lsp_navigation`, `lens_diagnostics`,
@@ -44,6 +63,42 @@ names include `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`,
 `latency`, `project_scan`, and `rebuild`. The activation loader and MCP
 lifecycle tools `session_start`, `turn_end`, and `session_end` remain enabled
 because their host protocols require them.
+
+To see the resolved tool surface, use `/lens-health`; the `effective_config`
+tool provides the full configuration provenance. Bundled skills are managed by
+pi's package-manifest filters.
+
+### Session-start orientation
+
+The session-start orientation names only the tools pi-lens actually registered.
+A tool disabled with `tools.<name>.enabled: false` is never advertised, so the
+orientation cannot direct the agent to a tool it cannot call. The tool roster is
+the same registry that drives registration; there is no second list.
+
+`contextInjection.requirePreExistingFixes` (default `true`) controls one
+sentence in that orientation: whether pre-existing blocking errors must be
+fixed. Set it to `false` when the task's scope excludes pre-existing debt. The
+orientation then requires fixes only for blocking errors the agent's own edits
+introduce; pre-existing ones are reported, not demanded. It is a global setting,
+like every `contextInjection` key.
+
+### `lsp.servers.<id>.covers` — declaring which runners a custom server subsumes
+
+A custom server entry accepts an optional `covers` array naming dispatch
+runner ids the server subsumes: while that server is a file's selected primary
+language server, the runners it names defer to the warm lane instead of also
+running as CLI scans. `covers: ["shellcheck"]` on a shell LSP, for example,
+makes the ShellCheck runner report a skip (`covered-by-primary`) for the files
+that server covers instead of double-reporting the same findings.
+
+- Values are runner ids (`shellcheck`, `shfmt`, `taplo`, … — the dispatch
+  registry's ids). A member pi-lens does not recognize is dropped with a
+  `PILENS_CFG_0005` warning naming the entry; the server itself still
+  registers and runs its language-server lane.
+- An empty `covers` array claims nothing and is recorded as configured.
+- Across files, the nearest tier that sets the field supplies the whole
+  array — a project value replaces the user-level value for that server;
+  fields are never united across tiers.
 
 **Some settings are global-only.** A handful of switches — `lsp.enabled`
 (`--no-lsp`), `tests.enabled`, `delta.enabled` and the other session-wide

@@ -89,15 +89,27 @@ describe("the canonical pi-lens config schema (#2426 / #2418)", () => {
 		}
 	});
 
-	it("reserves the lsp namespace without defining the #2416 server shape", () => {
+	it("reserves the lsp namespace open and types the covers claim under every server entry", () => {
 		const lsp = properties(schema)[LSP_NAMESPACE_KEY];
 		expect(lsp.type).toBe("object");
-		// Open: #2416 adds `lsp.servers.<id>`'s fields, and until it does an
-		// unrecognized key inside `lsp` must survive rather than be dropped.
+		// Open: an unrecognized key inside `lsp` must survive rather than be
+		// dropped — the loaders keep their own richer unknown-key diagnostics.
 		expect(lsp.additionalProperties).toBe(true);
 		const servers = properties(lsp).servers;
 		expect(servers.type).toBe("object");
+		// Server ids are USER-CHOSEN keys, so the entry shape lives under
+		// additionalProperties (a validating one), never `properties` — a fixed
+		// per-id shape would only know the ids of one session's table.
 		expect(servers.properties).toBeUndefined();
+		const entry = servers.additionalProperties as JsonSchemaNode;
+		expect(entry.type).toBe("object");
+		// Open on every other field (#2416 owns those shapes): only the claim
+		// itself is typed (#3968).
+		expect(entry.additionalProperties).toBe(true);
+		const covers = properties(entry).covers as JsonSchemaNode;
+		expect(covers.type).toBe("array");
+		expect((covers.items as JsonSchemaNode).type).toBe("string");
+		expect(covers[STABILITY_TIER_KEY]).toBe("experimental");
 	});
 
 	it("types every canonical lsp key the deprecation registry names", () => {

@@ -75,7 +75,68 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		expect(raw).toContain("Windows Vitest subset step outcome:");
 		expect(raw).toContain("windows_vitest=$outcome");
 		expect(raw).toContain("PI_LENS_TEST_TIMEOUT_SCALE: '3'");
-		expect(raw).toContain("Validate merge-train dispatch payload");
+	});
+
+	// #3926: a failed checkout leaves no repository and the enumeration step is
+	// skipped, so the summary must not invoke the checked-out population script;
+	// it reports "Not executed" and still writes the outcome keys the job output
+	// reads. The node invocation stays inside the list-present branch.
+	it("guards the Windows summary on the executed-file list", () => {
+		const job = readWorkflow().jobs["unit-tests-windows"];
+		const outcome = (job?.steps ?? []).find(
+			(step) => step.name === "Record Windows Vitest outcome",
+		);
+		const run = String(outcome?.run ?? "");
+		expect(outcome?.if).toBe("always()");
+		const guard = run.indexOf('[ -f "$RUNNER_TEMP/windows-vitest-files.txt" ]');
+		const population = run.indexOf("win32-gate-population.mjs --summary");
+		const unavailable = run.indexOf("Not executed");
+		const key = run.indexOf("windows_vitest=$outcome");
+		expect(guard).toBeGreaterThan(-1);
+		expect(population).toBeGreaterThan(guard);
+		expect(unavailable).toBeGreaterThan(population);
+		expect(key).toBeGreaterThan(-1);
+	});
+
+	it("publishes a visible red after recording the failed Vitest count", () => {
+		const raw = readFileSync(WORKFLOW_PATH, "utf8");
+		const job = readWorkflow().jobs["unit-tests-windows"];
+		const steps = job?.steps ?? [];
+		const record = steps.find(
+			(step) => step.name === "Record Windows Vitest outcome",
+		);
+		const failure = steps.find(
+			(step) => step.name === "Fail Windows advisory when Vitest fails",
+		);
+
+		// Recurrence: #4019's continue-on-error made 56 failed Windows tests read
+		// as a green job, hiding the red from both reviewers and ci-verdict.
+		expect(record?.run).toContain(
+			'windows-vitest-failure-count.mjs "$RUNNER_TEMP/windows-vitest.log"',
+		);
+		expect(record?.run).toContain("Windows Vitest failures:");
+		expect(failure?.if).toBe("always()");
+		expect(failure?.run).toContain("steps.windows-vitest.outcome");
+		expect(failure?.run).toContain("exit 1");
+		expect(raw).toContain("continue-on-error: true");
+	});
+
+	// Recurrence: #4042 review F1 — a Vitest crash creates an empty log, so an
+	// absent summary must stay visibly unavailable rather than becoming zero.
+	it("reports an unknown count when Vitest emits no summary", () => {
+		const raw = readFileSync(WORKFLOW_PATH, "utf8");
+		const job = readWorkflow().jobs["unit-tests-windows"];
+		const record = (job?.steps ?? []).find(
+			(step) => step.name === "Record Windows Vitest outcome",
+		);
+		const failure = (job?.steps ?? []).find(
+			(step) => step.name === "Fail Windows advisory when Vitest fails",
+		);
+		expect(record?.run).toContain(
+			"Windows Vitest failures: ${failures:-unknown}",
+		);
+		expect(failure?.run).toContain("${failures:-unknown} Vitest tests failed");
+		expect(raw).not.toContain("Windows Vitest failures: ${failures:-0}");
 	});
 
 	it("pins the sibling action revisions and the isolated home", () => {
@@ -83,7 +144,7 @@ describe("Windows Vitest workflow contract (#2536)", () => {
 		const steps = job?.steps ?? [];
 		expect(steps.filter((step) => step.uses).map((step) => step.uses)).toEqual([
 			"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-			"actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+			"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 		]);
 		const raw = readFileSync(WORKFLOW_PATH, "utf8");
 		expect(raw).toContain(

@@ -12,6 +12,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { FormatService } from "../../clients/format-service.js";
 import { clearFormatterRuntimeState } from "../../clients/formatters.js";
+import { setProjectTrustState } from "../../clients/project-trust.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const safeSpawnAsync = vi.hoisted(() => vi.fn());
@@ -133,6 +134,9 @@ function reindentAsBiome(content: string, width: number, unit: number): string {
 
 describe("formatter indentation inference through FormatService (#3038)", () => {
 	beforeEach(() => {
+		// This suite witnesses indentation inference, not the trust gate; local
+		// rungs are planted on purpose and the gate is covered elsewhere.
+		setProjectTrustState("trusted");
 		safeSpawnAsync.mockReset();
 		clearFormatterRuntimeState();
 		resetDegradationLedger();
@@ -354,6 +358,8 @@ describe("formatter indentation inference through FormatService (#3038)", () => 
 			expect(safeSpawnAsync.mock.calls[0]?.[1]).toEqual(
 				expect.arrayContaining(["--indent-style", "tab"]),
 			);
+			// #4321: the style is pinned, the width is the formatter's own.
+			expect(safeSpawnAsync.mock.calls[0]?.[1]).not.toContain("--indent-width");
 			expect(fs.readFileSync(filePath, "utf8")).toBe(tabDocCommented);
 		} finally {
 			env.cleanup();

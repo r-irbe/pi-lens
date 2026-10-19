@@ -1,6 +1,6 @@
 {
 	"name": "pi-lens",
-	"version": "4.3.0",
+	"version": "4.4.3",
 	"type": "module",
 	"description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
 	"repository": {
@@ -17,7 +17,7 @@
 		"build": "tsc --project tsconfig.build.json",
 		"build:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && node scripts/build-dist-tsc.mjs tsconfig.dist.json && npm run bundle:dist",
 		"bundle:dist": "node scripts/bundle-dist.mjs",
-		"prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/warm-loader-cache.mjs",
+		"prepare": "npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/stamp-package-lock.mjs && node scripts/warm-loader-cache.mjs",
 		"prepack": "node scripts/strip-dev-deps-for-pack.mjs --strip",
 		"postpack": "node scripts/strip-dev-deps-for-pack.mjs --restore",
 		"lint": "tsc --project tsconfig.json && npm run lint:js && npm run lint:js:tests",
@@ -40,6 +40,7 @@
 		"check": "node scripts/check-extensions.mjs",
 		"selftest:install": "node scripts/install-selftest.mjs",
 		"check:lockfile": "node scripts/check-lockfile-sync.mjs",
+		"check:allow-scripts": "node scripts/check-allow-scripts.mjs",
 		"preflight": "node scripts/pr-preflight.mjs",
 		"knip": "node scripts/run-knip.mjs",
 		"check:grammars": "node scripts/check-grammar-provenance.mjs",
@@ -48,6 +49,7 @@
 		"audit:rule-catalog": "node scripts/validate-rule-catalog.mjs",
 		"audit:astgrep-rule-pairs": "node scripts/audit-astgrep-rule-pairs.mjs",
 		"astgrep:self-scan": "node scripts/run-astgrep-pi-lens.mjs",
+		"lane:check": "node scripts/lane-check.mjs",
 		"astgrep:self-scan:update-baseline": "node scripts/run-astgrep-pi-lens.mjs --update-baseline",
 		"audit:playground": "node scripts/playground-verify-rule.mjs",
 		"bench:cascade-budget": "node scripts/bench-cascade-budget.mjs",
@@ -55,6 +57,7 @@
 		"logs:smells": "node scripts/analyze-pi-lens-logs.mjs",
 		"complexity": "node scripts/complexity-report.mjs",
 		"changelog:check": "node scripts/rollup-changelog.mjs --check",
+		"contributors:update": "node scripts/update-contributors.mjs",
 		"test:regen": "node scripts/regen-test-baseline.mjs",
 		"changelog:release": "node scripts/changelog-release.mjs",
 		"changelog:extract": "node scripts/changelog-extract.mjs",
@@ -121,8 +124,8 @@
 		"banner.png"
 	],
 	"dependencies": {
-		"@ast-grep/cli": "^0.45.0",
-		"@ast-grep/napi": "^0.45.0",
+		"@ast-grep/cli": "0.50.0",
+		"@ast-grep/napi": "^0.50.0",
 		"js-yaml": "^5.2.2",
 		"minimatch": "^10.2.6",
 		"pidusage": "^4.0.1",
@@ -130,7 +133,7 @@
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "^0.84.1 || ^0.85.0",
+		"@earendil-works/pi-tui": "*",
 		"typebox": "^1.0.0"
 	},
 	"peerDependenciesMeta": {
@@ -149,29 +152,33 @@
 		"web-tree-sitter": "0.25.10"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.10",
-		"@earendil-works/pi-coding-agent": "^0.85.1",
-		"@earendil-works/pi-tui": "^0.85.1",
+		"@biomejs/biome": "^2.5.15",
+		"@earendil-works/pi-coding-agent": "^1.0.0",
+		"@earendil-works/pi-tui": "^1.0.1",
+		"@jridgewell/sourcemap-codec": "^1.6.0",
+		"@jridgewell/trace-mapping": "^0.3.31",
 		"@stryker-mutator/core": "10.0.0",
+		"@stryker-mutator/vitest-runner": "10.0.0",
 		"@taplo/cli": "0.7.0",
-		"@types/node": "^26.0.0",
+		"@types/node": "^26.6.3",
 		"@types/pidusage": "^2.0.5",
 		"@types/semver": "^7.8.0",
-		"@vitest/coverage-v8": "^5.0.0",
-		"dependency-cruiser": "^18.2.0",
+		"@vitest/coverage-v8": "^5.0.3",
+		"dependency-cruiser": "^18.5.0",
+		"fast-check": "^4.10.2",
 		"husky": "^9.1.7",
-		"jscpd": "5.3.0",
+		"jscpd": "5.4.1",
 		"json5": "^2.2.3",
-		"knip": "6.37.0",
-		"oxfmt": "0.68.0",
-		"oxlint": "1.82.0",
-		"oxlint-tsgolint": "7.0.2002",
-		"publint": "0.3.24",
+		"knip": "6.41.0",
+		"oxfmt": "0.72.0",
+		"oxlint": "1.87.0",
+		"oxlint-tsgolint": "7.0.2003",
+		"publint": "0.3.25",
 		"semver": "^7.8.0",
 		"typebox": "^1.0.0",
 		"typescript": "^7.0.2",
 		"typescript-language-server": "5.3.0",
-		"vitest": "^5.0.0"
+		"vitest": "^5.0.3"
 	},
 	"pi": {
 		"extensions": [
@@ -182,9 +189,11 @@
 		]
 	},
 	"allowScripts": {
-		"@ast-grep/cli@0.45.3": true,
-		"@google/genai@1.52.0": true,
-		"protobufjs@7.6.5": true
+		"@ast-grep/cli@0.50.0": true,
+		"@google/genai@2.21.0": true,
+		"esbuild@0.28.2": true,
+		"fsevents@2.3.3": false,
+		"protobufjs@7.6.6": true
 	},
 	"overrides": {
 		"qs": "^6.15.4"

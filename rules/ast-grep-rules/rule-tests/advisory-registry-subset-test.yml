@@ -1,0 +1,41 @@
+id: advisory-registry-subset
+valid:
+  - |
+    // /^(typescript|python|marksman|opengrep):/ is prose, not code.
+    const one = "typescript|python";
+  - |
+    // ["typescript", "python"] is prose, not code.
+    const one = "['typescript', 'python']";
+  - |
+    const one = /^(typescript):/;
+  - |
+    const one = ["typescript"];
+  - |
+    const one = ["typescript", "not-a-server"];
+  - |
+    const one = /^(go|typescript-x):/;
+  - |
+    const one = /^(foo|typescript):/;
+  - |
+    const one = /^(typescript|foo):/;
+  - |
+    const one = /^typescript-python$/;
+invalid:
+  - |
+    const servers = /^(typescript|python|marksman|opengrep):/;
+  - |
+    const servers = ["typescript", "python", "marksman"];
+  - |
+    const servers = ["typescript", "python"];
+  - |
+    const servers = ['typescript', 'python', 'marksman'];
+  - |
+    const servers = ["foo", "typescript", "python"];
+  - |
+    const servers = ["typescript", "foo", "python"];
+  - |
+    const servers = ["foo", "typescript", "bar", "python"];
+  - |
+    const servers = /^(go|rust|ruby):/;
+  - |
+    const servers = /^(foo|typescript|python):/;

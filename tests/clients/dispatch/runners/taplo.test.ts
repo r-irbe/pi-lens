@@ -18,7 +18,7 @@ vi.mock("../../../../clients/safe-spawn.js", () => ({
 	safeSpawnAsync,
 }));
 
-const lspPrimaryCoversFile = vi.fn((..._args: unknown[]) => false);
+const lspPrimaryCoversFile = vi.fn((..._args: unknown[]) => false as unknown);
 vi.mock(
 	"../../../../clients/dispatch/runners/utils/runner-helpers.js",
 	async (importOriginal) => ({
@@ -54,8 +54,12 @@ function createTomlCtx(filePath: string, cwd: string) {
 }
 
 describe("taplo runner", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetModules();
+		// The suite plants a project-local taplo on purpose; the trust gate itself
+		// is witnessed in `tests/clients/project-local-bin-trust.test.ts`.
+		const trust = await import("../../../../clients/project-trust.js");
+		trust.setProjectTrustState("trusted");
 		safeSpawn.mockReset();
 		safeSpawnAsync.mockReset();
 		lspPrimaryCoversFile.mockReset();
@@ -70,7 +74,12 @@ describe("taplo runner", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "config.toml");
 			fs.writeFileSync(filePath, "a = 1\n");
-			lspPrimaryCoversFile.mockReturnValue(true); // toml LSP (taplo lsp) is primary
+			lspPrimaryCoversFile.mockReturnValue({
+				// the seam's match shape: the toml LSP covers the taplo runner,
+				// gated on the LSP's own binary
+				serverId: "toml",
+				gateCommands: ["taplo"],
+			}); // toml LSP (taplo lsp) is primary
 
 			const runner = (
 				await import("../../../../clients/dispatch/runners/taplo.js")
@@ -91,7 +100,10 @@ describe("taplo runner", () => {
 		try {
 			const filePath = path.join(env.tmpDir, "config.toml");
 			fs.writeFileSync(filePath, "a = 1\n");
-			lspPrimaryCoversFile.mockReturnValue(true);
+			lspPrimaryCoversFile.mockReturnValue({
+				serverId: "toml",
+				gateCommands: ["taplo"],
+			});
 			// A clean taplo run: exit 0, nothing on stdout, only tracing on
 			// stderr. The literal here used to be `{"errors":[]}`, a JSON
 			// envelope taplo has never emitted (#1937).

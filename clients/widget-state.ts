@@ -28,6 +28,8 @@ import {
 	type DispositionMarkTarget,
 } from "./diagnostic-dispositions.js";
 import { recordDegradationOnce } from "./degradation-ledger.js";
+import { defineSessionStore } from "./session-scope.js";
+import { dropStaleFiles } from "./session-state-store.js";
 
 /**
  * Canonical key for the `files` map (and `diagnosticsWriteGuard`) — #1020.
@@ -745,6 +747,39 @@ export function importWidgetState(
 	requestRenderFn?.();
 	return true;
 }
+
+/**
+ * The widget's per-file diagnostics as a session store (#190, #3589). The
+ * widget is shared by every live session in the process, so it has one cell,
+ * this module's state, which outlives the factory re-run: an in-process
+ * `/fork`, `/clone` or `/reload` keeps it as the parent left it (#3589 was the
+ * fork start clearing it). A resume, a launch and `pi --fork` adopt a
+ * sidecar, reconciled with disk first, so a file changed since the save
+ * re-scans.
+ */
+export const widgetStore = defineSessionStore<PersistedWidgetState>({
+	name: "widget",
+	policy: {
+		startup: "adopt",
+		new: "reset",
+		resume: "adopt",
+		fork: "none",
+		reload: "none",
+	},
+	snapshot: () => exportWidgetState(),
+	restore: async (_scope, payload, ctx) => {
+		clearWidgetState();
+		const state = payload as PersistedWidgetState | undefined;
+		if (!state?.files) return { itemsIn: 0, itemsKept: 0 };
+		// Only a sidecar reaches here (startup, resume), and it carries savedAt.
+		const fresh = await dropStaleFiles(state, ctx.savedAt as number);
+		importWidgetState(fresh);
+		return { itemsIn: state.files.length, itemsKept: fresh.files.length };
+	},
+	reset: () => clearWidgetState(),
+	reason:
+		"the diagnostics a conversation's edits produced, which a resume and a relaunch show again",
+});
 
 export function setSessionLanguages(langs: string[]): void {
 	sessionLanguages = langs;
@@ -1998,11 +2033,33 @@ export function recordLsp(
 
 const HORIZONTAL_MIN_WIDTH = 70;
 
+// #3959: compact summary header. The tally is this line's primary datum, so
+// the language list gets only the leftover width and is truncated first — a
+// whole-line fitLine truncation eats the totals from the tail.
+function fitCompactHeader(
+	width: number,
+	label: string,
+	languages: string,
+	chip: string,
+	summary: string,
+): string {
+	const tail = chip + (summary ? "  " + summary : "");
+	const langBudget = width - visibleWidth(` ${label}`) - visibleWidth(tail);
+	const langs =
+		languages && langBudget >= 4
+			? "  " + fitLine(languages, langBudget - 2, "…")
+			: "";
+	return fitLine(` ${label}${langs}${tail}`, width);
+}
+
 export function renderWidget(
 	width: number,
 	theme: {
 		fg: (color: string, s: string) => string;
 	},
+	// #3959: one-line summary switch (ui.compactWidget / --lens-compact-widget).
+	// An options object instead of a boolean flag parameter, per no-flag-argument.
+	opts?: { compact?: boolean },
 ): string[] {
 	const dim = (s: string) => theme.fg("dim", s);
 	const red = (s: string) => theme.fg("error", s);
@@ -2042,8 +2099,27 @@ export function renderWidget(
 	const spawning = [...lspServers.values()].filter(
 		(s) => s.status === "spawning",
 	);
+	// #3959: compact is a single line, so fold the spawning state into the header
+	// for narrow/wide consistency (narrow mode would otherwise drop it silently).
 	const lspChip =
-		useHorizontal && spawning.length > 0 ? "  " + dim("LSP↑") : "";
+		(useHorizontal || opts?.compact) && spawning.length > 0
+			? "  " + dim("LSP↑")
+			: "";
+
+	// #3959: compact mode stops at the summary header. File rows, the
+	// suppressed count and blocker details stay reachable via lens_diagnostics.
+	if (opts?.compact) {
+		lines.push(
+			fitCompactHeader(
+				w,
+				cyan("pi-lens"),
+				langStr ? dim(langStr) : "",
+				lspChip,
+				summary,
+			),
+		);
+		return lines;
+	}
 
 	const header = ` ${cyan("pi-lens")}${langStr ? "  " + dim(langStr) : ""}${lspChip}${summary ? "  " + summary : ""}`;
 	lines.push(fitLine(header, w));

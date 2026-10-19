@@ -385,3 +385,48 @@ describe("in-flight ABA release (#1968)", () => {
 		expect(internals.inFlight.size).toBe(0);
 	});
 });
+
+/**
+ * #3600: the widget's stale gate judges a folded dead-code row against the time
+ * the run READ its bytes. `runAnalyze` stamps at its top, before vulture reads;
+ * the spawn mock advances the faked clock, so a stamp moved to the parse/return
+ * site would carry the later time.
+ */
+describe("PythonDeadCodeClient stamps its run's read time (#3600)", () => {
+	it("carries scannedAt from the run body, before vulture reads", async () => {
+		const safeSpawnModule = await import("../../clients/safe-spawn.js");
+		const { tmpDir } = setupTestEnvironment("pi-lens-deadcode-stamp-");
+		const T0 = 1_900_000_000_000;
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(T0);
+		const spawn = vi
+			.spyOn(safeSpawnModule, "safeSpawnAsync")
+			.mockImplementation(async () => {
+				// vulture has now read; a stamp taken after this would be later.
+				vi.setSystemTime(T0 + 2_000);
+				return {
+					error: undefined,
+					status: 0,
+					stdout: VULTURE_OUTPUT,
+					stderr: "",
+				};
+			});
+		try {
+			fs.writeFileSync(path.join(tmpDir, "requirements.txt"), "requests\n");
+			const client = new PythonDeadCodeClient(false);
+			const internals = client as unknown as {
+				ensureAvailable: (root?: string) => Promise<boolean>;
+			};
+			vi.spyOn(internals, "ensureAvailable").mockResolvedValue(true);
+
+			const result = await client.analyze(tmpDir);
+
+			expect(result.scannedAt).toBe(new Date(T0).toISOString());
+			expect(result.unusedExports.length).toBeGreaterThan(0);
+		} finally {
+			spawn.mockRestore();
+			vi.useRealTimers();
+			removeTempDirSync(tmpDir);
+		}
+	});
+});

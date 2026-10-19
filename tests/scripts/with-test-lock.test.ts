@@ -22,6 +22,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	isEntryPoint,
 	quoteForWindowsCmd,
 	resolveVitestEntry,
 	sharedModeRequiresPaths,
@@ -148,5 +149,84 @@ describe("sharedModeRequiresPaths (review S11)", () => {
 		expect(
 			sharedModeRequiresPaths(["vitest", "run", "tests\\scripts\\x.test.ts"]),
 		).toBe(false);
+	});
+});
+
+describe("isEntryPoint (#4086)", () => {
+	const self = "/repo/scripts/with-test-lock.mjs";
+	const selfUrl = `file://${self}`;
+	// A resolver over a fake filesystem: `/link/scripts` is a symlink to
+	// `/repo/scripts`; anything unlisted does not exist.
+	const resolveIn =
+		(entries: Record<string, string>) =>
+		(p: string): string => {
+			const hit = entries[p];
+			if (hit === undefined) throw new Error(`ENOENT: ${p}`);
+			return hit;
+		};
+
+	it("is the entry point when argv[1] reaches this file through a symlink", () => {
+		// #4086 recurrence: the lexical compare returned false for a symlinked
+		// scripts/ directory, so the CLI exited 0 having run nothing.
+		const realpath = resolveIn({
+			"/link/scripts/with-test-lock.mjs": self,
+			[self]: self,
+		});
+		expect(
+			isEntryPoint(selfUrl, {
+				argv1: "/link/scripts/with-test-lock.mjs",
+				realpath,
+			}),
+		).toBe(true);
+	});
+
+	it("is the entry point under --preserve-symlinks-main, where the module URL is the symlinked spelling", () => {
+		// #4086 review F5 recurrence: dropping the realpath of the module's own
+		// URL made this false whenever the main URL kept its symlinked spelling.
+		const linked = "/link/scripts/with-test-lock.mjs";
+		const realpath = resolveIn({ [linked]: self });
+		expect(isEntryPoint(`file://${linked}`, { argv1: linked, realpath })).toBe(
+			true,
+		);
+	});
+
+	it("is not the entry point when another file is the entry point", () => {
+		// #4086 review F4 recurrence: a guard that is always true runs main() on
+		// every import of this file (the selector imports it).
+		const realpath = resolveIn({
+			"/repo/other.mjs": "/repo/other.mjs",
+			[self]: self,
+		});
+		expect(isEntryPoint(selfUrl, { argv1: "/repo/other.mjs", realpath })).toBe(
+			false,
+		);
+	});
+
+	it.each([
+		["empty", ""],
+		["stdin marker", "-"],
+		["not a real path (node -e foo)", "pi-lens-no-such-entry-point"],
+	])(
+		"returns false, never throws, when argv[1] is %s (default resolver)",
+		(_name, argv1) => {
+			// #4086 review F2 recurrence: throwing on an unresolvable argv[1] made
+			// merely importing the script throw under `node -e` and stdin. Uses the
+			// real fs.realpathSync.native (the undefined argv[1] of a bare `node -e`
+			// is covered through a real child in pre-push-targeted-tests.test.ts).
+			expect(isEntryPoint(selfUrl, { argv1 })).toBe(false);
+		},
+	);
+
+	it("fails closed when its own path cannot be resolved", () => {
+		// #4086 review F3 recurrence: returning false here would silently skip
+		// the CLI, the exit-0-having-run-nothing failure this guard exists for.
+		const realpath = resolveIn({
+			"/repo/scripts/x.mjs": "/repo/scripts/x.mjs",
+		});
+		expect(() =>
+			isEntryPoint(selfUrl, { argv1: "/repo/scripts/x.mjs", realpath }),
+		).toThrow(
+			/cannot resolve the entry-point path of file:\/\/\/repo\/scripts\/with-test-lock\.mjs: ENOENT/,
+		);
 	});
 });

@@ -17,6 +17,7 @@ import {
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
 	flushReviewGraphPersistsForTests,
+	waitForReviewGraphPersistsForTests,
 	getCachedReviewGraph,
 	getGraphSourceFiles,
 	_resetReviewGraphSourcePathMemoForTests,
@@ -428,6 +429,9 @@ describe("review graph service", () => {
 			);
 			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
 			flushReviewGraphPersistsForTests();
+			// Wait for the offloaded persist to land instead of only a fixed 500 ms
+			// poll: the worker write outlived it on the Windows runner (#4019).
+			await waitForReviewGraphPersistsForTests();
 			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
 				await new Promise((r) => setTimeout(r, 25));
 			}
@@ -498,6 +502,9 @@ describe("review graph service", () => {
 			);
 			expect(alphaId).toBeDefined();
 			flushReviewGraphPersistsForTests();
+			// Wait for the offloaded persist to land instead of only a fixed 500 ms
+			// poll: the worker write outlived it on the Windows runner (#4019).
+			await waitForReviewGraphPersistsForTests();
 			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
 				await new Promise((r) => setTimeout(r, 25));
 			}
@@ -559,6 +566,9 @@ describe("review graph service", () => {
 			const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
 			expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
 			flushReviewGraphPersistsForTests();
+			// Wait for the offloaded persist to land instead of only a fixed 500 ms
+			// poll: the worker write outlived it on the Windows runner (#4019).
+			await waitForReviewGraphPersistsForTests();
 			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
 				await new Promise((r) => setTimeout(r, 25));
 			}

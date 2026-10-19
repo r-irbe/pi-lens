@@ -82,11 +82,11 @@ import {
 } from "../../clients/dispatch/integration.js";
 
 // Mock LSP service
-vi.mock("../../clients/lsp/index.js", () => ({
+vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: vi.fn(),
 }));
 
-import { getLSPService } from "../../clients/lsp/index.js";
+import { getLSPService } from "../../clients/lsp/capabilities.js";
 
 describe("Pipeline", () => {
 	let tmpDir: string;
@@ -357,6 +357,83 @@ describe("Pipeline", () => {
 		});
 	});
 
+	// #4137 round 3: `clearInlineBlockers` compares the bytes a run without
+	// authorship read against the record it would clear, so the baseline is
+	// returned for a clean result too, not only beside a blocker.
+	it("carries the content baseline of the bytes it analysed on a clean result", async () => {
+		const filePath = createTempFile(
+			tmpDir,
+			"clean-baseline.ts",
+			"const x = 1;\n",
+		);
+		vi.mocked(dispatchLintWithResult).mockImplementationOnce(async () => ({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "clean",
+			blockerOutput: "",
+			hasBlockers: false,
+		}));
+
+		const result = await runPipeline(
+			createMockContext(filePath, { allowAutonomousWriters: false }),
+			createMockDeps(),
+		);
+
+		expect(result.hasBlockers).toBe(false);
+		expect(result.inlineBlockerFileContent).toEqual({
+			size: Buffer.byteLength("const x = 1;\n"),
+			sha256: createHash("sha256").update("const x = 1;\n").digest("hex"),
+		});
+	});
+
+	it("states why a delta-promoted unused finding blocks in the enriched STOP block (#3218)", async () => {
+		// The turn-end replay renders through `formatDiagnostics`, but the inline
+		// tool result renders the enriched variant. Both must carry the seam's
+		// rationale, or the agent sees a hint-severity finding labelled a blocker
+		// with no explanation during the edit itself.
+		const filePath = createTempFile(
+			tmpDir,
+			"promoted-blocker.ts",
+			"const tmpdir = 1;\n",
+		);
+		const blocker: Diagnostic = {
+			id: "promoted-unused",
+			message: "'tmpdir' is declared but its value is never read.",
+			filePath,
+			severity: "error",
+			semantic: "blocking",
+			tool: "lsp",
+			line: 1,
+			promotionNote:
+				"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.",
+		};
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [blocker],
+			blockers: [blocker],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: true,
+		});
+
+		const result = await runPipeline(
+			createMockContext(filePath),
+			createMockDeps(),
+		);
+
+		expect(result.output).toContain("🔴 STOP — 1 issue(s) must be fixed");
+		expect(result.output).toContain(
+			"new in this edit → blocks in delta mode; pre-existing unused declarations only advise.",
+		);
+	});
+
 	it("hands the cascade the PROJECT root alongside the language cwd (#3157)", async () => {
 		// The cascade's display filter reads the disposition store and the
 		// `.pi-lens.json` rule policy, both written under the project root
@@ -395,6 +472,89 @@ describe("Pipeline", () => {
 			filePath,
 			languageRoot,
 			expect.objectContaining({ projectRoot: tmpDir }),
+		);
+	});
+
+	it("hands the cascade the session generation captured at dispatch (#3512)", async () => {
+		// The cascade's tier-3 touch record drops a touch whose dispatch session
+		// was replaced. The handle comes from runtime-tool-result.ts; if this hop
+		// drops it, the guard is inert in production.
+		const filePath = createTempFile(tmpDir, "cascade-generation.ts", "x");
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: false,
+		});
+		const sessionGeneration = {
+			generation: 7,
+			isCurrent: () => true,
+			guardedWrite: <T>(_subject: string, write: () => T) => write(),
+		};
+
+		await runPipeline(
+			createMockContext(filePath, { sessionGeneration }),
+			createMockDeps(),
+		);
+
+		expect(computeCascadeForFile).toHaveBeenCalledWith(
+			filePath,
+			tmpDir,
+			expect.objectContaining({ sessionGeneration }),
+		);
+		// #3568: and the dispatch, whose collect-later runner defers its result
+		// to a turn end through the same handle
+		// (tests/clients/dispatch/runner-collect-later.test.ts pins the drop).
+		expect(dispatchLintWithResult).toHaveBeenCalledWith(
+			filePath,
+			tmpDir,
+			expect.anything(),
+			undefined,
+			expect.anything(),
+			expect.objectContaining({ sessionGeneration }),
+		);
+	});
+
+	it("hands the cascade the dispatch's order turn beside its session turn (#3540 r2)", async () => {
+		// The cascade's widget reconcile orders by the order turn, which a
+		// session reset never restarts; `turnSeq` (the session's turn) keeps
+		// scoping its caches. If this hop drops `orderTurn`, the reconcile is
+		// unordered in production.
+		const filePath = createTempFile(tmpDir, "cascade-order-turn.ts", "x");
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: false,
+		});
+
+		await runPipeline(
+			createMockContext(filePath, {
+				telemetry: {
+					model: "m",
+					sessionId: "s",
+					turnIndex: 1,
+					orderTurn: 6,
+					writeIndex: 2,
+				},
+			}),
+			createMockDeps(),
+		);
+
+		expect(computeCascadeForFile).toHaveBeenCalledWith(
+			filePath,
+			tmpDir,
+			expect.objectContaining({ turnSeq: 1, orderTurn: 6, writeSeq: 2 }),
 		);
 	});
 
@@ -690,7 +850,11 @@ describe("Pipeline", () => {
 				retainedEntries: 0,
 			});
 			expect(getDegradationSummary()).toEqual([]);
-		});
+			// 10,000 sequential real pipeline runs: ~0.7 s on Linux, past Vitest's
+			// 5 s default on the Windows runner where every run pays native
+			// path-canonicalization syscalls (#4019). The population is the claim, so
+			// the budget grows rather than the population shrinking.
+		}, 60_000);
 
 		it("surfaces formatter failures instead of plain clean output", async () => {
 			const filePath = createTempFile(
@@ -1373,6 +1537,52 @@ describe("Pipeline", () => {
 			await runPipeline(createMockContext(filePath), deps);
 
 			expect(syncedStamp()).toBeGreaterThanOrEqual(fixedAt);
+		});
+	});
+
+	describe("Cascade compute rejection (#3605)", () => {
+		const { WebAssembly } = globalThis as unknown as {
+			WebAssembly: { RuntimeError: new (message: string) => Error };
+		};
+
+		async function cascadeAfterRejection(error: Error) {
+			const filePath = createTempFile(tmpDir, "cascade-throws.ts", "x");
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "",
+				blockerOutput: "",
+				hasBlockers: false,
+			});
+			vi.mocked(computeCascadeForFile).mockRejectedValueOnce(error);
+			const result = await runPipeline(
+				createMockContext(filePath),
+				createMockDeps(),
+			);
+			return (await result.cascadePromise)?.indeterminate;
+		}
+
+		it("reports a tree-sitter wasm trap as a degraded graph, not a compute error", async () => {
+			// The per-edit cascade turned the reporter's wasm trap into
+			// `cascade_indeterminate` / `error`.
+			expect(
+				await cascadeAfterRejection(
+					new WebAssembly.RuntimeError("table index is out of bounds"),
+				),
+			).toEqual({
+				reason: "graph_degraded",
+				detail: "review graph degraded — tree-sitter wasm runtime failure",
+			});
+		});
+
+		it("still reports any other rejection as a compute error", async () => {
+			expect(await cascadeAfterRejection(new TypeError("cascade bug"))).toEqual(
+				{ reason: "error", detail: "cascade computation failed" },
+			);
 		});
 	});
 

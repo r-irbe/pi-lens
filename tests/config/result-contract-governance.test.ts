@@ -1,11 +1,23 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// #3567: load the extension graph once at collection, outside any budget.
+// The fork's first load measured 6.6 s of the `beforeAll` below's 7.2 s
+// (0.85 s in plain node; the rest is Vitest transforming each module the
+// first time), and it scales with CPU contention, so it timed that hook out
+// at Vitest's 10 s default on a loaded host. The hook still evaluates its own
+// copy after `chdir`, because module state captured at evaluation differs by
+// cwd; re-evaluating an already-transformed graph costs about 0.2 s.
+import "../../index.js";
 import { TOOL_REGISTRY } from "../../clients/tool-config.js";
 import { MAX_RESULT_BYTES } from "../../tools/render-compact.js";
-import { McpHarness } from "../mcp/harness.js";
+import { McpHarness, testTimeoutScale } from "../mcp/harness.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
 import { createPiMock } from "../support/pi-mock.js";
+
+// #4151: parity must not race two independent cold ast-grep starts against
+// the product's 1800 ms strategy budget; this test is about rendered results.
 
 type ToolResult = {
 	content?: { type: string; text?: string }[];
@@ -22,6 +34,11 @@ function stableRenderedText(
 	return (text ?? "").replace(/("when":\s*")[^"]+(")/, "$1<build-time>$2");
 }
 
+// The Windows lane declares PI_LENS_TEST_TIMEOUT_SCALE=3 for exactly this: the
+// sweep took 25.6-26.9 s there (and passed or timed out at 30 s from run to
+// run), against ~3 s on Linux (#4019).
+const SWEEP_TIMEOUT_MS = 30_000 * testTimeoutScale;
+
 const EXACT_PARITY_TOOLS = new Set([
 	"ast_grep_search",
 	"ast_grep_replace",
@@ -37,7 +54,17 @@ describe("result contract across registered tool surfaces", () => {
 	let pi: ReturnType<typeof createPiMock>;
 
 	beforeAll(async () => {
-		cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-result-contract-"));
+		// #4019: canonicalize the fixture cwd. `os.tmpdir()` is a symlink on macOS
+		// (`/tmp` -> `/private/tmp`), and the two surfaces resolve the same directory
+		// through different spellings: the pi surface joins the `ctx.cwd` STRING, while
+		// the MCP child's OS cwd (and the pi extension's own `getProjectRoot()`) is the
+		// realpath. `toProjectRelativePath` cannot relativize across that mismatch on
+		// POSIX today (its canonical rescue is win32-only), so pi rendered the file
+		// absolute while MCP rendered it relative. Realpath makes both surfaces observe
+		// one spelling; this is a fixture artifact, and the parity assertion is kept.
+		cwd = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-result-contract-")),
+		);
 		const fixtureRoot = path.resolve("tests/fixtures");
 		fs.copyFileSync(
 			path.join(fixtureRoot, "tool-smoke/ast-grep-baseline/bad.ts"),
@@ -61,10 +88,18 @@ describe("result contract across registered tool surfaces", () => {
 		bigLines.push("\treturn acc;", "}");
 		fs.writeFileSync(path.join(cwd, "big.ts"), `${bigLines.join("\n")}\n`);
 		process.chdir(cwd);
+		const parityWaitMs = String(10_000 * testTimeoutScale);
+		const env = {
+			PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS: parityWaitMs,
+			PI_LENS_AUX_GRACE_MS: parityWaitMs,
+		};
+		vi.stubEnv("PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS", parityWaitMs);
+		vi.stubEnv("PI_LENS_AUX_GRACE_MS", parityWaitMs);
 		pi = createPiMock();
+		vi.resetModules();
 		const { default: extension } = await import("../../index.js");
 		extension(pi.asExtensionAPI());
-		mcp = new McpHarness({ cwd });
+		mcp = new McpHarness({ cwd, env });
 		await mcp.request(1, "initialize", {
 			protocolVersion: "2025-06-18",
 			capabilities: {},
@@ -75,94 +110,128 @@ describe("result contract across registered tool surfaces", () => {
 	afterAll(() => {
 		mcp?.dispose();
 		process.chdir(originalCwd);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		// `dispose()` signals the MCP child but does not wait for it to exit; on
+		// Windows its cwd handle on this directory outlives the call and a bare
+		// `rmSync` threw EBUSY (#4019). The shared helper retries while it drains.
+		removeTempDirSync(cwd);
+		vi.unstubAllEnvs();
 	});
 
 	// Whole-roster sweep: drives every paired registry tool through a real pi
 	// call AND a real MCP child (#2800 item 5). Under CI load it crossed
 	// vitest's 5 s default twice on #2852 r6 (run 34442664966, both
 	// attempts); the budget mirrors the other whole-tree sweeps (#2857).
-	it("keeps every paired registry tool's real rendered text identical", async () => {
-		const fixtures: Record<string, Record<string, unknown>> = {
-			ast_grep_search: {
-				pattern: "$A.sort()",
-				lang: "typescript",
-				paths: ["bad.ts"],
-			},
-			ast_grep_replace: {
-				pattern: "$A.sort()",
-				rewrite: "$A.sort((a, b) => a - b)",
-				lang: "typescript",
-				paths: ["bad.ts"],
-				apply: false,
-			},
-			lsp_navigation: { operation: "documentSymbol", path: "fixture.ts" },
-			lens_diagnostics: { source: "lsp", scope: "paths", paths: ["bad.ts"] },
-			symbol_search: { query: "fixture", paths: ["fixture.ts"] },
-			module_report: { path: "fixture.ts", view: "compact" },
-			project_report: { view: "compact", limit: 1 },
-			read_symbol: { path: path.join(cwd, "fixture.ts"), symbol: "enclosing" },
-			read_enclosing: { path: path.join(cwd, "fixture.ts"), line: 2 },
-			effective_config: { file: "fixture.ts" },
-		};
-
-		for (const entry of TOOL_REGISTRY) {
-			if (!entry.piName || !entry.mcpName) continue;
-			const args = fixtures[entry.name];
-			expect(args, `${entry.name}: missing real fixture`).toBeDefined();
-			const piTool = pi.getTool(entry.piName) as {
-				execute?: (...args: unknown[]) => Promise<ToolResult>;
-			};
-			expect(
-				piTool?.execute,
-				`missing pi handler for ${entry.name}`,
-			).toBeTypeOf("function");
-			const piResult = await piTool.execute?.(
-				"governance",
-				args,
-				new AbortController().signal,
-				undefined,
-				{ cwd },
-			);
-			const mcpResult = await mcp.request(
-				100 + entry.name.length,
-				"tools/call",
-				{
-					name: entry.mcpName,
-					arguments: { ...args, ...(args.path ? { file: args.path } : {}) },
+	it(
+		"keeps every paired registry tool's real rendered text identical",
+		async () => {
+			const fixtures: Record<string, Record<string, unknown>> = {
+				ast_grep_search: {
+					pattern: "$A.sort()",
+					lang: "typescript",
+					paths: ["bad.ts"],
 				},
-			);
-			const mcpText = (mcpResult.result as ToolResult).content?.[0]?.text;
-			const piText = piResult?.content?.[0]?.text;
-			if (EXACT_PARITY_TOOLS.has(entry.name)) {
+				ast_grep_replace: {
+					pattern: "$A.sort()",
+					rewrite: "$A.sort((a, b) => a - b)",
+					lang: "typescript",
+					paths: ["bad.ts"],
+					apply: false,
+				},
+				lsp_navigation: { operation: "documentSymbol", path: "fixture.ts" },
+				lens_diagnostics: { source: "lsp", scope: "paths", paths: ["bad.ts"] },
+				symbol_search: { query: "fixture", paths: ["fixture.ts"] },
+				module_report: { path: "fixture.ts", view: "compact" },
+				project_report: { view: "compact", limit: 1 },
+				read_symbol: {
+					path: path.join(cwd, "fixture.ts"),
+					symbol: "enclosing",
+				},
+				read_enclosing: { path: path.join(cwd, "fixture.ts"), line: 2 },
+				effective_config: { file: "fixture.ts" },
+			};
+
+			// #3749: the MCP dispatcher reports any argument key a tool's schema does
+			// not declare, and that report leads the result text. Send each MCP tool
+			// only the keys it advertises, so the parity comparison below stays a
+			// comparison of the two surfaces' renderings.
+			const advertised = (
+				(await mcp.request(99, "tools/list", {})).result as {
+					tools: {
+						name: string;
+						inputSchema: { properties?: Record<string, unknown> };
+					}[];
+				}
+			).tools;
+			for (const entry of TOOL_REGISTRY) {
+				if (!entry.piName || !entry.mcpName) continue;
+				const args = fixtures[entry.name];
+				expect(args, `${entry.name}: missing real fixture`).toBeDefined();
+				const piTool = pi.getTool(entry.piName) as {
+					execute?: (...args: unknown[]) => Promise<ToolResult>;
+				};
 				expect(
-					stableRenderedText(entry.name, mcpText),
-					`${entry.name}: complete rendered text`,
-				).toBe(stableRenderedText(entry.name, piText));
+					piTool?.execute,
+					`missing pi handler for ${entry.name}`,
+				).toBeTypeOf("function");
+				const piResult = await piTool.execute?.(
+					"governance",
+					args,
+					new AbortController().signal,
+					undefined,
+					{ cwd },
+				);
+				const mcpResult = await mcp.request(
+					100 + entry.name.length,
+					"tools/call",
+					{
+						name: entry.mcpName,
+						arguments: Object.fromEntries(
+							Object.entries({
+								...args,
+								...(args.path ? { file: args.path } : {}),
+							}).filter(([key]) =>
+								Object.hasOwn(
+									advertised.find((tool) => tool.name === entry.mcpName)
+										?.inputSchema.properties ?? {},
+									key,
+								),
+							),
+						),
+					},
+				);
+				const mcpText = (mcpResult.result as ToolResult).content?.[0]?.text;
+				const piText = piResult?.content?.[0]?.text;
+				if (EXACT_PARITY_TOOLS.has(entry.name)) {
+					expect(
+						stableRenderedText(entry.name, mcpText),
+						`${entry.name}: complete rendered text`,
+					).toBe(stableRenderedText(entry.name, piText));
+				}
+				const mcpResultValue = mcpResult.result as ToolResult;
+				expect(mcpText, `${entry.name}: MCP result`).toMatch(
+					/result (?:ok|error)\n(?:diag severity=.*\n)?usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)$/,
+				);
+				expect(
+					mcpText?.includes("result error"),
+					`${entry.name}: MCP verdict matches isError`,
+				).toBe(mcpResultValue.isError === true);
+				expect(mcpText, `${entry.name}: MCP usage`).toMatch(
+					/usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)/,
+				);
+				expect(piText, `${entry.name}: pi result`).toMatch(
+					/result (?:ok|error)\n(?:diag severity=.*\n)?usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)$/,
+				);
+				expect(
+					piText?.includes("result error"),
+					`${entry.name}: pi verdict matches isError`,
+				).toBe(piResult?.isError === true);
+				expect(piText, `${entry.name}: pi usage`).toMatch(
+					/usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)/,
+				);
 			}
-			const mcpResultValue = mcpResult.result as ToolResult;
-			expect(mcpText, `${entry.name}: MCP result`).toMatch(
-				/result (?:ok|error)\n(?:diag severity=.*\n)?usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)$/,
-			);
-			expect(
-				mcpText?.includes("result error"),
-				`${entry.name}: MCP verdict matches isError`,
-			).toBe(mcpResultValue.isError === true);
-			expect(mcpText, `${entry.name}: MCP usage`).toMatch(
-				/usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)/,
-			);
-			expect(piText, `${entry.name}: pi result`).toMatch(
-				/result (?:ok|error)\n(?:diag severity=.*\n)?usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)$/,
-			);
-			expect(
-				piText?.includes("result error"),
-				`${entry.name}: pi verdict matches isError`,
-			).toBe(piResult?.isError === true);
-			expect(piText, `${entry.name}: pi usage`).toMatch(
-				/usage tokens=\d+ elapsed-ms=\d+ bytes=\d+ truncated=(?:true|false)/,
-			);
-		}
-	}, 30_000);
+		},
+		SWEEP_TIMEOUT_MS,
+	);
 
 	it("covers every pi-only registry tool through pi and proves MCP absence", async () => {
 		const piOnlyFixtures: Record<string, Record<string, unknown>> = {

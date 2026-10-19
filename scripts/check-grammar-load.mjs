@@ -11,9 +11,15 @@
  *   node scripts/check-grammar-load.mjs            # parent: check every grammar
  *   node scripts/check-grammar-load.mjs <language> # child: load+exercise one grammar
  *
- * Requires a built dist (`npm run build`). Exits non-zero if any grammar crashes.
+ * It also reads each grammar's wasm import section and reds on a function import
+ * web-tree-sitter does not export (#3996), through the same helper the per-PR
+ * sweep uses (`clients/grammar-wasm-imports.ts`).
+ *
+ * Requires a built dist (`npm run build`). Exits non-zero if any grammar crashes
+ * or imports an unexported function.
  */
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(import.meta.url);
@@ -62,6 +68,8 @@ async function main() {
 
 	const { LANGUAGE_TO_GRAMMAR, grammarBlockReason } =
 		await import("../clients/grammar-source.js");
+	const { grammarWasmFiles, runtimeExports, unresolvedImports } =
+		await import("../clients/grammar-wasm-imports.js");
 	const languages = Object.keys(LANGUAGE_TO_GRAMMAR).sort();
 
 	console.error(
@@ -69,8 +77,11 @@ async function main() {
 	);
 
 	const crashed = [];
+	const badImports = [];
 	const unavailable = [];
 	const blocked = [];
+	const exported = runtimeExports();
+	const wasmFiles = grammarWasmFiles();
 	for (const lang of languages) {
 		// Grammars the runtime intentionally refuses to load on this runtime
 		// (BLOCKED_GRAMMARS) are skipped here too — the runtime never loads them,
@@ -89,7 +100,21 @@ async function main() {
 		const code = r.status;
 		const signal = r.signal;
 		if (code === 0) {
-			console.error(`  ok     ${lang}`);
+			const file = wasmFiles.get(LANGUAGE_TO_GRAMMAR[lang]);
+			const unresolved = file
+				? unresolvedImports(fs.readFileSync(file), exported)
+				: [];
+			if (unresolved.length > 0) {
+				// #3996: loads and parses a trivial input, then throws on the first
+				// construct that reaches the stubbed import. Blocklisting does not
+				// help (the runtime is fine); the grammar build must be replaced.
+				badImports.push({ lang, unresolved });
+				console.error(
+					`  BADIMP ${lang} (unresolved imports ${unresolved.join(", ")})`,
+				);
+			} else {
+				console.error(`  ok     ${lang}`);
+			}
 		} else if (code === 3) {
 			unavailable.push(lang);
 			console.error(`  skip   ${lang} (grammar did not load — download/env)`);
@@ -110,14 +135,22 @@ async function main() {
 	console.error(
 		`  crashed:     ${crashed.map((c) => c.lang).join(", ") || "none"}`,
 	);
+	console.error(
+		`  bad imports: ${badImports.map((b) => `${b.lang} (${b.unresolved.join(", ")})`).join(", ") || "none"}`,
+	);
 	console.error(`  unavailable: ${unavailable.join(", ") || "none"}`);
 	console.error(`  blocked:     ${blocked.join(", ") || "none"}`);
+	if (badImports.length > 0) {
+		console.error(
+			`\n✗ ${badImports.length} grammar wasm(s) import functions web-tree-sitter does not export (#3996) — replace the grammar build (GRAMMAR_SOURCE_OVERRIDES) or admit the import with a reason (ADMITTED_UNRESOLVED_IMPORTS).`,
+		);
+	}
 	if (crashed.length > 0) {
 		console.error(
 			`\n✗ ${crashed.length} grammar(s) crash the runtime on this platform — they must be blocklisted (BLOCKED_GRAMMARS).`,
 		);
-		process.exit(1);
 	}
+	if (badImports.length > 0 || crashed.length > 0) process.exit(1);
 	console.error("\n✓ all resolvable grammars load + parse without crashing.");
 }
 

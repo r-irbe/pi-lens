@@ -395,31 +395,23 @@ describe("review-graph seq fast path (#451)", () => {
  * graph as `cached`, in this process and from review-graph.json.gz.
  *
  * The gate is a FactStore hook, not a sleep: the external write runs
- * synchronously inside a FactStore call the build makes after it has read the
- * file. `extract` fires on the re-extract read (`setFileFact("file.content")`
- * from the content provider); `noop` fires in the no-op branch's
- * changed-symbol refresh (`getBoundedSessionFact`), which runs after the
- * content hash and before the old re-stat.
+ * synchronously inside a SHARED-store call the build makes after it has read
+ * the file. Both branches fire on the changed-symbol read
+ * (`getBoundedSessionFact`, the graph's own `upsertChangedSymbols`): in the
+ * no-op branch it runs after the content hash and before the old re-stat; in
+ * the re-extract branch it runs at the end of `updateGraphFiles`, after the
+ * extraction read and before the old re-stat. The graph's extraction state
+ * lives in a run-local store (#3552), so its `file.content` writes are no
+ * longer observable on the shared store and cannot be the gate.
  */
 class WriteGateFacts extends FactStore {
-	arm:
-		| { branch: "extract" | "noop"; file: string; write: () => void }
-		| undefined;
-	private fire(branch: "extract" | "noop", key: string): void {
-		const arm = this.arm;
-		if (arm?.branch !== branch) return;
-		if (!key.endsWith(normalizeMapKey(arm.file))) return;
-		this.arm = undefined;
-		arm.write();
-	}
-	override setFileFact(filePath: string, factId: string, value: unknown): void {
-		super.setFileFact(filePath, factId, value);
-		if (factId === "file.content") {
-			this.fire("extract", normalizeMapKey(filePath));
-		}
-	}
+	arm: { file: string; write: () => void } | undefined;
 	override getBoundedSessionFact<T>(factId: string): T | undefined {
-		this.fire("noop", factId);
+		const arm = this.arm;
+		if (arm && factId.endsWith(normalizeMapKey(arm.file))) {
+			this.arm = undefined;
+			arm.write();
+		}
 		return super.getBoundedSessionFact<T>(factId);
 	}
 }
@@ -470,7 +462,6 @@ describe("review-graph seq fast path: a write after the read (#3535)", () => {
 				// fast path read a.ts. A different size, so `size:mtimeMs` moves
 				// even on a coarse-mtime filesystem.
 				facts.arm = {
-					branch,
 					file: aPath,
 					write: () =>
 						fs.writeFileSync(

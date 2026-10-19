@@ -13,7 +13,7 @@ const resolveAvailableOrInstall = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../../clients/safe-spawn.js", () => ({ safeSpawnAsync }));
 
-vi.mock("../../../../clients/lsp/index.js", () => ({
+vi.mock("../../../../clients/lsp/capabilities.js", () => ({
 	// The runner's warm-up (`clients/dispatch/runners/pyright.ts`) awaits
 	// `getClientForFile` inside a swallow-all catch, so a partial double here
 	// fails silently — factory-seeded, with only that method asserted (#2592).
@@ -34,8 +34,12 @@ vi.mock(
 const originalVenv = process.env.VIRTUAL_ENV;
 const originalConda = process.env.CONDA_PREFIX;
 
-beforeEach(() => {
+beforeEach(async () => {
 	vi.resetModules();
+	// The suite plants a project `.venv` on purpose; the trust gate itself is
+	// witnessed in `tests/clients/project-local-bin-trust.test.ts`.
+	const trust = await import("../../../../clients/project-trust.js");
+	trust.setProjectTrustState("trusted");
 	safeSpawnAsync.mockReset();
 	getClientForFile.mockClear();
 	isAvailableAsync.mockClear();

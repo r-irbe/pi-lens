@@ -121,3 +121,21 @@ export function resolveWebTreeSitterPackageDir(deps) {
 	}
 	return undefined;
 }
+
+/**
+ * The directory holding the core grammars an INSTALLED pi-lens can load, or
+ * undefined (#1185). The tarball ships them in `<packageRoot>/grammars` and the
+ * runtime reads that dir first (`bundledGrammarsDir` in
+ * clients/tree-sitter-client.ts); `<web-tree-sitter>/grammars` is only the
+ * lazy-fetch write target and nothing at install time fills it. The selftest
+ * used to probe only the latter, so it warned in every layout.
+ */
+export function findCoreGrammarDir({ packageRoot, webTreeSitterDir }) {
+	return [
+		path.join(packageRoot, "grammars"),
+		webTreeSitterDir && path.join(webTreeSitterDir, "grammars"),
+	].find(
+		(dir) =>
+			dir && fs.existsSync(path.join(dir, "tree-sitter-typescript.wasm")),
+	);
+}

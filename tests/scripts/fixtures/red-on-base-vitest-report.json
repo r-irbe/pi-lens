@@ -1,0 +1,41 @@
+{
+  "testResults": [
+    {
+      "name": "/repo/tests/scripts/zz/load.test.ts",
+      "status": "failed",
+      "message": "Cannot find module './missing.js' imported from /repo/tests/scripts/zz/load.test.ts",
+      "assertionResults": []
+    },
+    {
+      "name": "/repo/tests/scripts/zz/vec.test.ts",
+      "status": "failed",
+      "message": "",
+      "assertionResults": [
+        {
+          "ancestorTitles": [
+            "suite"
+          ],
+          "fullName": "suite passes",
+          "title": "passes",
+          "status": "passed"
+        },
+        {
+          "ancestorTitles": [
+            "suite"
+          ],
+          "fullName": "suite fails",
+          "title": "fails",
+          "status": "failed"
+        },
+        {
+          "ancestorTitles": [
+            "suite"
+          ],
+          "fullName": "suite skipped",
+          "title": "skipped",
+          "status": "skipped"
+        }
+      ]
+    }
+  ]
+}

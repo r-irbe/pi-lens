@@ -29,7 +29,10 @@ import {
 	applyFindingPolicy,
 	loadProjectRulePolicyMap,
 } from "../clients/dispatch/finding-policy.js";
-import { gateFindingsByPathFreshness } from "../clients/advisory-provenance.js";
+import {
+	gateFindingsByPathFreshness,
+	parseScannedAtMs,
+} from "../clients/advisory-provenance.js";
 import {
 	formatCacheAgeLabel,
 	markUnreconciledFindings,
@@ -49,14 +52,14 @@ import {
 	normalizeMapKey,
 	realpathOrResolve,
 } from "../clients/path-utils.js";
-import { getLSPService } from "../clients/lsp/index.js";
+import { getLSPService } from "../clients/lsp/capabilities.js";
 import { retireInlineBlockerAndResyncGuard } from "../clients/git-guard.js";
 import {
 	primaryServerId,
 	resolveLspCwdForFile,
 } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
-import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/index.js";
+import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/capabilities.js";
 import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
 import {
@@ -130,6 +133,7 @@ import {
 	MAX_BATCH_FILES,
 	renderBatchOutcomeLines,
 	type BatchOutcomeDetail,
+	type LspDiagnosticsFlagReader,
 } from "./lsp-diagnostics.js";
 import {
 	demotePastEofDiagnostics,
@@ -191,11 +195,11 @@ type WorkspaceLspDiagnosticResult = {
 	// Auxiliary lanes that did not answer. Other servers' diagnostics remain
 	// usable, but this result must not replace fully-covered cached/widget state.
 	unconfirmedServerIds?: string[];
-	// #1093: set only for cache-hit results (a replay of an older scan) — the
-	// wall-clock time the diagnostics were originally observed. Threaded into the
-	// footer reconcile so a cache-served mode=full doesn't re-arm the widget's
-	// mtime-staleness gate. See LSPWorkspaceDiagnosticResult.observedAt.
-	observedAt?: number;
+	// #1093: the wall-clock time the diagnostics were observed — a cache hit's
+	// original scan, or (#3573) a fresh result's read. Threaded into the footer
+	// reconcile so neither a cache-served nor a fresh mode=full row is stamped
+	// after a write it never saw. See LSPWorkspaceDiagnosticResult.observedAt.
+	observedAt?: number | undefined;
 	contentHash?: string;
 	boundToCurrentDisk?: BoundToCurrentDisk;
 	writeIndex?: number;
@@ -287,6 +291,10 @@ export function createLensDiagnosticsTool(
 		| import("../clients/runtime-coordinator.js").RuntimeCoordinator
 		| undefined,
 	isLensGuardEnabled: () => boolean = () => true,
+	// #4323: the host's flag resolver, so the `source=lsp` probe leaves the
+	// auxiliaries the operator turned off unstarted (see
+	// `createLspDiagnosticsTool`'s `getFlag`). index.ts and mcp/server.ts inject it.
+	getFlag?: LspDiagnosticsFlagReader,
 ) {
 	const lspProbe = createLspDiagnosticsTool(
 		nextWriteIndex,
@@ -313,6 +321,7 @@ export function createLensDiagnosticsTool(
 			}
 		},
 		getLspService,
+		getFlag,
 	);
 	return {
 		name: "lens_diagnostics" as const,
@@ -350,6 +359,7 @@ export function createLensDiagnosticsTool(
 			incompleteFiles?: number;
 			unconfirmed?: boolean;
 			timedOut?: boolean;
+			primaryUnavailable?: string;
 			filePath?: string;
 		}>(({ details, args, isError, text }) => {
 			if (details?.source === "lsp") {
@@ -394,7 +404,10 @@ export function createLensDiagnosticsTool(
 				if (count === 0 && details.unconfirmed)
 					return details.timedOut
 						? `lens_diagnostics${scope} — timed out (result may be incomplete)`
-						: `lens_diagnostics${scope} — unconfirmed (server cannot confirm clean)`;
+						: // #4322: no language server answered; it is not a silent server.
+							details.primaryUnavailable !== undefined
+							? `lens_diagnostics${scope} — unconfirmed (no language server answered)`
+							: `lens_diagnostics${scope} — unconfirmed (server cannot confirm clean)`;
 				return `lens_diagnostics${scope} — ${count} ${noun}`;
 			}
 			// Streaming progress partials render the live bar (see scanningSummaryLine)
@@ -957,7 +970,10 @@ function filterDeltaReportDispositions(
 				d.filePath,
 			).length === 1,
 	);
-	const policyKept = applyRulePolicy(kept, policyMap);
+	const policyKept = applyRulePolicy(kept, policyMap, {
+		root: cwd,
+		filePath: cwd,
+	});
 	if (policyKept.length === report.diagnostics.length) return report;
 	return { ...report, diagnostics: policyKept };
 }
@@ -1195,6 +1211,7 @@ function formatDeltaMode(
 				warnings: applyRulePolicy(
 					applyCachedDispositions(file.warnings ?? [], cwd, file.filePath),
 					policyMap,
+					{ root: cwd, filePath: file.filePath },
 				),
 			}))
 			.filter((file) => file.warnings.length > 0);
@@ -1323,6 +1340,7 @@ function formatDeltaMode(
 				diagnostics: applyRulePolicy(
 					applyCachedDispositions(f.diagnostics, cwd, f.filePath),
 					policyMap,
+					{ root: cwd, filePath: f.filePath },
 				),
 			}))
 			.filter((f) => f.diagnostics.length > 0);
@@ -1542,11 +1560,15 @@ function filterProjectDiagnosticsDeltaReport(
 function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
 	value: T | undefined,
 	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
+	root: string,
 ): T | undefined {
 	if (!value) return undefined;
 	return {
 		...value,
-		diagnostics: applyRulePolicy(value.diagnostics, policyMap),
+		diagnostics: applyRulePolicy(value.diagnostics, policyMap, {
+			root,
+			filePath: value.diagnostics[0]?.filePath ?? root,
+		}),
 	};
 }
 
@@ -1649,6 +1671,13 @@ function projectDiagnosticToWidget(
 		rule: diagnostic.rule ?? diagnostic.code,
 		tool: diagnostic.runner || diagnostic.tool,
 		uri: widgetDiagnosticUri(filePath, diagnostic.line, diagnostic.column),
+		// #3600: carry the analyzer's own read stamp through the #1888
+		// correlated commit, which otherwise re-stamps the row with the project
+		// scan's `scannedAt` or the fold's `Date.now()`. Absent for the cheap
+		// scan's rows, whose freshness is settled by a content fingerprint.
+		...(diagnostic.observedAt !== undefined && {
+			observedAt: diagnostic.observedAt,
+		}),
 	};
 }
 
@@ -2031,21 +2060,45 @@ function mergeDiagnosticsWithWidgetSummaries(
 	for (const result of lspResults) {
 		const filePath = path.resolve(result.filePath);
 		for (const diagnostic of result.diagnostics ?? []) {
-			addDiagnostic(filePath, lspDiagnosticToWidget(diagnostic));
+			// #3573: the row keeps its sweep read stamp through the correlated
+			// commit, which otherwise stamps it with the project scan's time or now.
+			// Absent only for a service double that predates the field.
+			addDiagnostic(filePath, {
+				...lspDiagnosticToWidget(diagnostic),
+				...(result.observedAt !== undefined && {
+					observedAt: result.observedAt,
+				}),
+			});
 		}
 	}
 
+	// #3600: the delta report's own `generatedAt`, never the fold's `now`. A row
+	// that already carries its own `observedAt` keeps it; the report stamp is
+	// only a fallback for rows the delta writer did not stamp. An unparseable
+	// `generatedAt` is recorded rather than silently widened to `Date.now()`.
+	const deltaDiagnostics = projectDelta?.diagnostics ?? [];
+	const deltaObservedAt = parseScannedAtMs(projectDelta?.generatedAt);
+	if (deltaDiagnostics.length > 0 && deltaObservedAt === undefined) {
+		recordDegradationOnce({
+			kind: "project-delta-generatedat-unparseable",
+			subject: String(projectDelta?.generatedAt),
+			reason:
+				"projectDelta rows fell back to the fold time because generatedAt could not be parsed",
+		});
+	}
 	for (const diagnostic of projectSnapshot?.diagnostics ?? []) {
 		addDiagnostic(
 			path.resolve(diagnostic.filePath),
 			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
 		);
 	}
-	for (const diagnostic of projectDelta?.diagnostics ?? []) {
-		addDiagnostic(
-			path.resolve(diagnostic.filePath),
-			projectDiagnosticToWidget(diagnostic, diagnostic.filePath),
-		);
+	for (const diagnostic of deltaDiagnostics) {
+		const widget = projectDiagnosticToWidget(diagnostic, diagnostic.filePath);
+		const observedAt = widget.observedAt ?? deltaObservedAt;
+		addDiagnostic(path.resolve(diagnostic.filePath), {
+			...widget,
+			...(observedAt !== undefined && { observedAt }),
+		});
 	}
 
 	return [...byFile.values()];
@@ -2081,7 +2134,10 @@ async function applyInlineSuppressionsToSummaries(
 				// Inline suppression/disposition remains fail-open when the file cannot
 				// be read, but project policy does not depend on content and must still
 				// be applied so a fresh full-mode result cannot bypass `disable`/`select`.
-				const policyKept = applyRulePolicy(summary.diagnostics, policyMap);
+				const policyKept = applyRulePolicy(summary.diagnostics, policyMap, {
+					root: cwd,
+					filePath: summary.filePath,
+				});
 				return policyKept.length === summary.diagnostics.length
 					? summary
 					: summarizeDiagnostics(
@@ -2186,8 +2242,9 @@ async function getProjectDiagnosticsSnapshotForFullMode(
 		includeGenerated?: boolean;
 	},
 ): Promise<ProjectDiagnosticsSnapshot | undefined> {
+	let loaded: ProjectDiagnosticsSnapshot | undefined;
 	if (shouldRefreshProjectDiagnostics(options.refreshRunners)) {
-		return scanProjectDiagnostics({
+		loaded = await scanProjectDiagnostics({
 			cwd,
 			tier: "cheap",
 			maxFiles: options.maxProjectFiles,
@@ -2195,38 +2252,44 @@ async function getProjectDiagnosticsSnapshotForFullMode(
 			files: options.files,
 			includeGenerated: options.includeGenerated,
 		});
-	}
-	if (shouldUseCachedProjectDiagnostics(options.refreshRunners)) {
+	} else if (shouldUseCachedProjectDiagnostics(options.refreshRunners)) {
 		// The cached snapshot is a cross-session cache; drop diagnostics for files
-		// edited/deleted since the scan so a stale entry isn't replayed (#298). A
-		// fresh scan (above) is current by construction and needs no reconcile.
-		const cached = loadProjectDiagnosticsSnapshot(cwd);
-		if (!cached) return undefined;
-		const reconciled = reconcileProjectDiagnosticsSnapshot(cached);
-		// #2154: what this gate DROPS was invisible — the count was computed and
-		// thrown away, so a session that silently retired another session's rows
-		// (the whole point of the content axis added this round) left no record
-		// of having done so. Bounded by construction: at most one row per
-		// mode=full call, and only when rows were actually retired — the shape
-		// `lsp_authoritative_widget_retire` uses for the sibling arm.
-		if (reconciled.staleDropped > 0) {
-			logLatency({
-				type: "phase",
-				toolName: "lens_diagnostics",
-				filePath: cwd,
-				phase: "project_snapshot_rows_retired",
-				durationMs: 0,
-				metadata: {
-					files: reconciled.staleDropped,
-					rows:
-						cached.diagnostics.length - reconciled.snapshot.diagnostics.length,
-					scannedAt: cached.scannedAt,
-				},
-			});
-		}
-		return reconciled.snapshot;
+		// edited/deleted since the scan so a stale entry isn't replayed (#298).
+		loaded = loadProjectDiagnosticsSnapshot(cwd);
 	}
-	return undefined;
+	if (!loaded) return undefined;
+	// #3573: a fresh scan is reconciled too. Its `scannedAt` is taken after the
+	// whole file loop, and it becomes the widget row's `observedAt`, so a file
+	// rewritten while the scan was still running reads as older than its row and
+	// no widget gate would ever drop it. The fingerprint of the bytes the rules
+	// read settles it before the rows reach the widget.
+	const reconciled = reconcileProjectDiagnosticsSnapshot(loaded);
+	// #2154: what this gate DROPS was invisible — the count was computed and
+	// thrown away, so a session that silently retired another session's rows
+	// (the whole point of the content axis added this round) left no record
+	// of having done so. Bounded by construction: at most one row per
+	// mode=full call, and only when rows were actually retired — the shape
+	// `lsp_authoritative_widget_retire` uses for the sibling arm.
+	if (reconciled.staleDropped > 0) {
+		logLatency({
+			type: "phase",
+			toolName: "lens_diagnostics",
+			filePath: cwd,
+			phase: "project_snapshot_rows_retired",
+			durationMs: 0,
+			metadata: {
+				files: reconciled.staleDropped,
+				rows:
+					loaded.diagnostics.length - reconciled.snapshot.diagnostics.length,
+				scannedAt: loaded.scannedAt,
+				// #3573: which arm retired them, now that both are reconciled.
+				arm: shouldRefreshProjectDiagnostics(options.refreshRunners)
+					? "fresh"
+					: "cached",
+			},
+		});
+	}
+	return reconciled.snapshot;
 }
 
 // @delivery-surface: lens-diagnostics:mode-full
@@ -2440,12 +2503,11 @@ async function formatFullMode(
 				// The service reserves this token when the file enters the scan. The
 				// fallback preserves compatibility with older test doubles/services.
 				result.writeIndex ?? nextWriteIndex?.(),
-				// #1093: `observedAt` is set only when this result was served from
-				// the workspace-diagnostics cache (a replay of an older scan) —
-				// stamp `touchedAt` with when it was scanned, not now(), so a
-				// mode=full that only re-serves the cache can't keep a resolved
-				// finding on screen by re-arming the mtime gate. Undefined for
-				// freshly-touched results (observed now).
+				// #1093: for a result served from the workspace-diagnostics cache,
+				// `observedAt` is when it was scanned, not now(), so a mode=full
+				// that only re-serves the cache can't keep a resolved finding on
+				// screen by re-arming the mtime gate. #3573: for a fresh result it
+				// is the sweep's read of the file.
 				result.observedAt,
 			);
 			// A result rejected by the shared ordering guard is not authoritative
@@ -2520,6 +2582,7 @@ async function formatFullMode(
 	const projectSnapshot = applyProjectRulePolicy(
 		foldedProjectSnapshot,
 		policyMap,
+		cwd,
 	);
 	const projectDelta = applyProjectRulePolicy(
 		filterProjectDiagnosticsDeltaReport(
@@ -2527,6 +2590,7 @@ async function formatFullMode(
 			includeFile,
 		),
 		policyMap,
+		cwd,
 	);
 	// #630: only the CONFIRMED LSP results contribute diagnostics to the merge
 	// — an unconfirmed (timed-out/errored) file's placeholder `[]` must not be
@@ -3219,7 +3283,10 @@ async function formatAllMode(
 		: summaries.map((s) => {
 				const diagnostics = s.diagnostics ?? [];
 				const kept = applyCachedDispositions(diagnostics, cwd, s.filePath);
-				const policyKept = applyRulePolicy(kept, policyMap);
+				const policyKept = applyRulePolicy(kept, policyMap, {
+					root: cwd,
+					filePath: s.filePath,
+				});
 				if (
 					policyKept.length === kept.length &&
 					kept.length === diagnostics.length

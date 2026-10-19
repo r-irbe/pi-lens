@@ -1,5 +1,7 @@
 // Type declarations for md-matrix.mjs (untyped .mjs imported from .ts tests).
 
+export const GENERATED_LSP_DOCS: readonly string[];
+
 export interface ParsedTable {
 	start: number;
 	end: number;
@@ -83,3 +85,86 @@ export function mergeServerCapabilitiesDoc(
 	priorText: string,
 	freshText: string,
 ): { text: string; preservedCount: number };
+
+/** #3401: elapsed days after the first miss before a `direct` `first-publish` cell expires. */
+export const FIRST_PUBLISH_EXPIRY_DAYS: number;
+
+/** #3401: consecutive agreeing runs before a `clean-behavior`/`tier` change is written. */
+export const TIER_CHANGE_AGREE_RUNS: number;
+
+export function advancePendingClass(
+	confirmed: string,
+	pending: { value: string; runs: number } | undefined,
+	observed: string,
+	agreeRuns: number,
+): {
+	confirmed: string;
+	pending?: { value: string; runs: number };
+	committed: boolean;
+};
+
+export interface MatrixObservation {
+	lang: string;
+	firstPublish?: string | null;
+	cleanBehavior?: string | null;
+	tier?: string | null;
+}
+
+export interface RefreshState {
+	"first-publish"?: Record<
+		string,
+		{
+			firstMissed?: string;
+			pendingFirstPublish?: "direct" | "empty-first";
+			runs?: number;
+		}
+	>;
+	"clean-behavior"?: Record<
+		string,
+		{ pendingBehavior: string; pendingTier: string; runs: number }
+	>;
+	"idle-eviction"?: Record<string, { nights: IdleEvictionNight[] }>;
+}
+
+export function parseRefreshState(text: string): RefreshState;
+
+/** #3989: the refresh-state key holding the idle-eviction promotion bookkeeping. */
+export const IDLE_EVICTION_KEY: "idle-eviction";
+
+export interface IdleEvictionNight {
+	day: string;
+	rssMb: number | null;
+	coldMs: number;
+}
+
+/** #3989: replace the `idle-eviction` key of the refresh-state block. */
+export function setIdleEvictionState(
+	text: string,
+	idleEviction: Record<string, { nights: IdleEvictionNight[] }>,
+): string;
+
+export function refreshCapabilityMatrix(
+	text: string,
+	observations: readonly MatrixObservation[],
+	opts?: {
+		src?: string;
+		marker?: string;
+		agreeRuns?: number;
+		expireDays?: number;
+		/** The injected clock; default is the real one. */
+		now?: Date | number | string;
+		/** A subset probe's langs; a lang outside it keeps its bookkeeping. */
+		probedLangs?: Iterable<string>;
+	},
+): {
+	text: string;
+	changed: boolean;
+	reason?: string;
+	expired: number;
+	pending: number;
+	committed: number;
+	/** The langs behind each count, in table order (named in the step log). */
+	expiredLangs: string[];
+	pendingLangs: string[];
+	committedLangs: string[];
+};

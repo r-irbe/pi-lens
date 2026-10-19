@@ -1,0 +1,32 @@
+
+ RUN  v5.0.3 /repo
+
+ ❯ |default| tests/scripts/zz-probe-4087.test.ts (4 tests | 1 failed | 1 skipped) 13ms
+   × probe red 4ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  |default| tests/scripts/zz-probe-4087.test.ts > probe red
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ tests/scripts/zz-probe-4087.test.ts:5:35
+      3| it("probe green two", () => {});
+      4| it.skip("probe skipped", () => {});
+      5| it("probe red", () => { expect(1).toBe(2); });
+       |                                   ^
+      6|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed | 1 skipped (4)
+   Start at  18:35:50
+   Duration  387ms (transform 51%, setup 28%, tests 15%, worker 3%, import 3%)
+

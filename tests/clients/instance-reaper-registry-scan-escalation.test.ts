@@ -37,6 +37,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setPlatform } from "../support/platform-stub.js";
 
 interface SpawnRecord {
 	command: string;
@@ -57,6 +58,8 @@ const h = vi.hoisted(() => {
 		hangOnScannerIndex: number;
 		/** pids of every scanner child spawned, in spawn order. */
 		scannerPids: number[];
+		/** stdout a scanner emits before it closes, by 1-based spawn index. */
+		stdoutByScanner: Record<number, string>;
 	} = {
 		registry: [],
 		enabled: true,
@@ -64,6 +67,7 @@ const h = vi.hoisted(() => {
 		scannerSpawnCount: 0,
 		hangOnScannerIndex: 0,
 		scannerPids: [],
+		stdoutByScanner: {},
 	};
 	let nextPid = 80_000;
 	function makeFakeChild(command: string, _args: string[]) {
@@ -92,7 +96,11 @@ const h = vi.hoisted(() => {
 			once(event: string, cb: (...a: unknown[]) => void) {
 				if (hang) return child; // never settles — exercises the caller's timeout
 				if (event === "close") {
-					queueMicrotask(() => cb(0, null));
+					queueMicrotask(() => {
+						const out = state.stdoutByScanner[scannerIndex];
+						if (out) for (const handler of stdoutHandlers) handler(out);
+						cb(0, null);
+					});
 				}
 				return child;
 			},
@@ -115,13 +123,6 @@ vi.mock("../../clients/instance-registry.js", () => ({
 }));
 
 const realPlatform = process.platform;
-function setPlatform(platform: NodeJS.Platform): void {
-	Object.defineProperty(process, "platform", {
-		value: platform,
-		configurable: true,
-	});
-}
-
 /**
  * `instance-reaper.ts` reads `process.platform` into a module-load-time
  * `const isWindows`, so forcing the platform only takes effect on a FRESH
@@ -179,6 +180,7 @@ beforeEach(() => {
 	h.state.scannerSpawnCount = 0;
 	h.state.hangOnScannerIndex = 0;
 	h.state.scannerPids.length = 0;
+	h.state.stdoutByScanner = {};
 	vi.useFakeTimers();
 	vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
 		if (h.state.alivePids.has(Math.abs(pid))) return true;
@@ -254,5 +256,37 @@ describe("#2527 review F2: sweepOrphans' own scanner queries escalate through te
 		expect(reasons).toHaveLength(1);
 		expect(reasons[0].reason).toContain(`${BACKSTOP_SCAN_TIMEOUT_MS}ms`);
 		expect(reasons[0].subject).toContain(String(h.state.scannerPids[1]));
+	});
+});
+
+describe("#3538 review F3: the Windows marker-search kill asks again before its signal", () => {
+	const MARKER = "C:/temp/pi-lens-ast-grep/x.yml";
+	const taskkills = () =>
+		h.spawns.filter((s) => s.command.toLowerCase().includes("taskkill"));
+
+	async function sweepWithRecheckCommand(command: string) {
+		const { sweepOrphans } = await loadInstanceReaperFor("win32");
+		h.state.registry = [
+			deadParentInstanceWithChild({ pid: 100, marker: MARKER }),
+		];
+		// 1: the sweep's identity query (nothing alive); 2: the marker search
+		// finds pid 4242; 3: the identity query right before the kill.
+		h.state.stdoutByScanner = {
+			2: "4242\r\n",
+			3: `4242\t2026-09-26T09:00:00.0000000Z\t${command}\r\n`,
+		};
+		await sweepOrphans();
+	}
+
+	it("a pid that no longer carries the marker is not killed", async () => {
+		await sweepWithRecheckCommand("C:\\Windows\\notepad.exe other.txt");
+
+		expect(taskkills()).toEqual([]);
+	});
+
+	it("a pid that still carries the marker is killed (control)", async () => {
+		await sweepWithRecheckCommand(`ast-grep.exe lsp --config ${MARKER}`);
+
+		expect(taskkills()).toHaveLength(1);
 	});
 });

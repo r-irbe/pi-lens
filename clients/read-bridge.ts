@@ -29,7 +29,7 @@
  *   bridge?.recordRead({
  *     filePath,          // absolute path
  *     requestedOffset,   // 1-indexed first line (default 1)
- *     requestedLimit,    // line count, or undefined for the whole file
+ *     requestedLimit,    // line count, undefined for the whole file, or 0 for an (empty-file) zero-line read
  *     consumer,          // optional identifier, e.g. "my-extension" (appears in read-guard.log)
  *   });
  *
@@ -55,26 +55,45 @@
  * using the *current* activation's flag getter (stored in a module-level
  * holder refreshed on every factory activation — same pattern as
  * `_turnSummaryEmitCtx`), so flag changes take effect immediately.
+ *
+ * Since #3654 this shim is a translator: a valid, recordable entry becomes a
+ * v2 `disk`-evidence read facet and goes to the unified bridge's body
+ * (`recordIOEntry` in `clients/io-bridge.ts`, injected as `deps.forward`), the
+ * same body the mounted v2 bridge runs. There is no second v1 body.
  */
+import {
+	type BridgeActivation,
+	rebindableProcessBridgeDeps,
+	registerProcessBridge,
+} from "./process-bridge.js";
+import type {
+	BridgeEntry,
+	LineRange,
+	RecordResult,
+} from "./io-bridge-contract.js";
 
 /** Stable Symbol key — identical across module reloads in the same process. */
-import { registerProcessBridge } from "./process-bridge.js";
-import {
-	captureReadContentBinding,
-	type ReadContentBinding,
-} from "./read-guard.js";
-
 export const READ_BRIDGE_KEY: unique symbol = Symbol.for("pi-lens:read-bridge");
 
 /** Payload a producer passes when recording a read. */
 export interface ReadBridgeEntry {
-	/** Absolute path to the file that was read. */
+	/**
+	 * Absolute path to the file that was read. Since #3654 a read of a file
+	 * that is absent when the call lands records nothing (v2's disk-evidence
+	 * read refuses it, with an `io-bridge-read-dropped` ledger row).
+	 */
 	filePath: string;
 	/** First line read (1-indexed). Defaults to 1 when no offset was given. */
 	requestedOffset: number;
 	/**
 	 * Number of lines read. `undefined` means the whole file was requested;
 	 * pi-lens will treat the effective limit as the full file length.
+	 * `0` is a valid observation only when the target file exists and is
+	 * empty: it grants whole-file coverage (normalized to line 1) so a
+	 * subsequent edit is authorized. A zero-line read carries no
+	 * `contentBinding` — no content was delivered, so there is nothing to
+	 * bind — and a zero-line read of a non-empty or unreadable file is
+	 * dropped.
 	 */
 	requestedLimit: number | undefined;
 	/**
@@ -96,29 +115,15 @@ export interface ReadBridge {
 }
 
 interface BridgeDeps {
-	getReadGuard(): {
-		recordRead(record: {
-			filePath: string;
-			requestedOffset: number;
-			requestedLimit: number;
-			effectiveOffset: number;
-			effectiveLimit: number;
-			expandedByLsp: boolean;
-			turnIndex: number;
-			writeIndex: number;
-			timestamp: number;
-			source?: string;
-			contentBinding?: ReadContentBinding;
-		}): void;
-	};
-	getTurnIndex(): number;
-	peekWriteIndex(): number;
+	onUnavailable?: () => void;
 	/**
 	 * Return `true` when the entry should be forwarded to the read-guard.
 	 * Called on every `recordRead` invocation so flag / project-root changes
 	 * take effect immediately without re-registration.
 	 */
 	isRecordable(filePath: string): boolean;
+	/** The unified bridge body (`recordIOEntry` bound to the live deps). */
+	forward(entry: BridgeEntry): RecordResult;
 }
 
 /**
@@ -148,13 +153,14 @@ function isValidEntry(entry: unknown): entry is ReadBridgeEntry {
 	)
 		return false;
 
-	// requestedLimit must be undefined or a finite positive integer.
+	// requestedLimit must be undefined or a finite non-negative integer. 0 is
+	// admitted here and narrowed to genuinely empty files by v2's zero-line read.
 	const limit = e["requestedLimit"];
 	if (limit !== undefined) {
 		if (
 			typeof limit !== "number" ||
 			!Number.isFinite(limit) ||
-			limit < 1 ||
+			limit < 0 ||
 			!Number.isInteger(limit)
 		)
 			return false;
@@ -164,12 +170,53 @@ function isValidEntry(entry: unknown): entry is ReadBridgeEntry {
 }
 
 /**
+ * The v2 `ranges` a v1 entry's offset/limit denotes. `undefined` means
+ * whole-file; `MAX_SAFE_INTEGER` avoids an unsafe `offset + …` and lets the
+ * guard's own file-length probe clip the effective limit. A zero-line read
+ * (`requestedLimit: 0`) is v2's explicit zero-line read, `[]`: it credits
+ * whole-file coverage only for a genuinely empty file (#3652). Spelling it as
+ * the range `[offset, offset - 1]` is malformed in v2, so the read was dropped
+ * and the next edit of the empty file blocked (#3654 F1).
+ */
+function delegatedRanges(entry: ReadBridgeEntry): LineRange[] {
+	const offset = entry.requestedOffset;
+	if (entry.requestedLimit === 0) return [];
+	const limit = entry.requestedLimit ?? Number.MAX_SAFE_INTEGER;
+	const end =
+		limit === Number.MAX_SAFE_INTEGER
+			? Number.MAX_SAFE_INTEGER
+			: offset + limit - 1;
+	return [[offset, end]];
+}
+
+/**
+ * Identity for a direct registration that does not name the activation its
+ * deps were built for (unit tests). A real activation passes the live
+ * `RuntimeCoordinator`, so a fresh module graph rebinds the shared deps cell
+ * (`rebindableProcessBridgeDeps`, #4169).
+ */
+const DEFAULT_ACTIVATION = Symbol("pi-lens:read-bridge-activation");
+
+/**
  * Mount the bridge singleton. Call once from inside the extension factory
  * (protected by the `_readBridgeRegistered` module-level flag). Subsequent
  * calls are no-ops (first-wins, `clients/process-bridge.ts` owns the mount
  * body — see that module's header, #2437).
+ *
+ * `activation` is the identity the `deps` were built for. A call carrying a
+ * new one rebinds the shared deps cell, so a `/reload` that re-evaluates the
+ * module graph keeps the mounted bridge pointed at the live runtime (#4169).
  */
-export function registerReadBridge(deps: BridgeDeps): void {
+export function registerReadBridge(
+	deps: BridgeDeps,
+	activation: BridgeActivation = DEFAULT_ACTIVATION,
+): void {
+	const currentDeps = rebindableProcessBridgeDeps(
+		"read-bridge-deps",
+		1,
+		activation,
+		deps,
+	);
 	registerProcessBridge(READ_BRIDGE_KEY, (): ReadBridge => ({
 		version: 1 as const,
 		recordRead(entry: ReadBridgeEntry): void {
@@ -177,35 +224,28 @@ export function registerReadBridge(deps: BridgeDeps): void {
 			// integration bugs in callers (malformed fields, bad numbers).
 			if (!isValidEntry(entry)) return;
 
-			if (!deps.isRecordable(entry.filePath)) return;
+			// #3654 D14: the v1 recordability gate runs FIRST, on the v1 path. Its
+			// flag read is this bridge's own ("read-bridge" subject, and a
+			// near-match stale error rethrows as v1 did); delegating first would
+			// report "io-bridge" and swallow the rethrow inside the v2
+			// never-throw wrapper.
+			const liveDeps = currentDeps();
+			if (!liveDeps) {
+				deps.onUnavailable?.();
+				return;
+			}
+			if (!liveDeps.isRecordable(entry.filePath)) return;
 
-			const offset = entry.requestedOffset;
-			// When no limit is given treat the whole file as covered — the
-			// guard clips to the actual line count via its own file-length
-			// probe.
-			const limit = entry.requestedLimit ?? Number.MAX_SAFE_INTEGER;
-			const contentBinding = captureReadContentBinding(
-				entry.filePath,
-				offset,
-				limit,
-			);
-
-			deps.getReadGuard().recordRead({
+			// The v2 body stamps the timestamp (Date.now()), the turn and write
+			// indexes, and the `bridge:<consumer>` provenance read-guard.log shows.
+			liveDeps.forward({
 				filePath: entry.filePath,
-				requestedOffset: offset,
-				requestedLimit: limit,
-				effectiveOffset: offset,
-				effectiveLimit: limit,
-				expandedByLsp: false,
-				turnIndex: deps.getTurnIndex(),
-				writeIndex: deps.peekWriteIndex(),
-				// Stamp the timestamp here, matching exactly how the internal
-				// read path works (runtime-tool-call.ts always uses Date.now()).
-				timestamp: Date.now(),
-				// Provenance: identifies this record as bridge-sourced in
-				// read-guard.log.
-				source: `bridge:${entry.consumer ?? "unknown"}`,
-				...(contentBinding !== undefined && { contentBinding }),
+				...(entry.consumer !== undefined && { consumer: entry.consumer }),
+				read: {
+					ranges: delegatedRanges(entry),
+					evidence: "disk",
+					source: `bridge:${entry.consumer ?? "unknown"}`,
+				},
 			});
 		},
 	}));

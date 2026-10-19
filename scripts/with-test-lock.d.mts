@@ -14,3 +14,8 @@ export function parseWrapperArgs(argv: string[]): {
 	commandArgs: string[];
 	errors: string[];
 };
+
+export function isEntryPoint(
+	selfUrl: string,
+	options?: { argv1?: string | undefined; realpath?: (path: string) => string },
+): boolean;

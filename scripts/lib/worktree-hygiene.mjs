@@ -351,6 +351,24 @@ export function parseDuration(text) {
 }
 
 /**
+ * The first live-process cwd at or under `key` (a `toComparablePath` key), or
+ * null. `undefined`/`null` (no scan supplied, or the scan is unknowable) never
+ * matches: the callers decide what "unknown" means for them (#3694).
+ *
+ * @param {Set<string>|null|undefined} liveProcessCwds
+ * @param {string} key
+ * @returns {string|null}
+ */
+function liveCwdWithin(liveProcessCwds, key) {
+	if (!liveProcessCwds) return null;
+	return (
+		[...liveProcessCwds].find(
+			(cwd) => cwd === key || cwd.startsWith(`${key}/`),
+		) ?? null
+	);
+}
+
+/**
  * @typedef {object} WorktreeCandidate
  * @property {string} path            Absolute worktree path.
  * @property {string|null} [head]     HEAD sha.
@@ -387,6 +405,9 @@ export function parseDuration(text) {
  *   lives in — its own file location AND its cwd can sit in different trees,
  *   and neither may ever be removed out from under a running sweep.
  * @param {(pid: number) => boolean} [options.isPidAlive]
+ * @param {Set<string>|null} [options.liveProcessCwds] Cwd of every live process
+ *   (`toComparablePath` keys); `null` = the scan is unavailable or incomplete;
+ *   `undefined` = the caller did not scan.
  * @returns {{ remove: { path: string, branch: string|null, ageMs: number, locked: boolean, selected: boolean }[], keep: { path: string, reason: string, detail: string|null }[] }}
  */
 export function planWorktreePrune({
@@ -396,6 +417,7 @@ export function planWorktreePrune({
 	only = null,
 	selfPath = null,
 	isPidAlive = () => false,
+	liveProcessCwds = undefined,
 }) {
 	const selectedKeys = only ? new Set(only.map(toComparablePath)) : null;
 	// By CONTAINMENT, not equality (review S4): the caller's "where am I"
@@ -427,6 +449,17 @@ export function planWorktreePrune({
 		}
 		if (selfKeys.has(key)) {
 			push("self", "this sweep is running inside it");
+			continue;
+		}
+		// #3694: a live process's cwd inside ANOTHER tree keeps it. A tree the
+		// caller NAMED (`selected`: the SubagentStop hook's own agent, or a human's
+		// `--only`) is the one whose leftovers this sweep exists to reap, so it is
+		// exempt exactly like the soft rails below. `null` (cwd scan unknowable)
+		// adds no rail here: the age rail below is already the "recently
+		// modified" fallback.
+		const liveCwd = selected ? null : liveCwdWithin(liveProcessCwds, key);
+		if (liveCwd) {
+			push("live-cwd", `a live process has cwd ${liveCwd}`);
 			continue;
 		}
 		if (selectedKeys && !selected) {
@@ -509,11 +542,16 @@ export function planWorktreePrune({
  * clean, pushed trees because the sweep only ever considered
  * `.claude/worktrees/agent-*`.
  *
- * Deliberately NO age rail: a clean tree at a merged HEAD is byte-identical
- * to a commit that is already on `origin/master`, so there is nothing in it
- * to lose at any age. The protection a live session gets is the rails below —
- * uncommitted or untracked files (a working tree is rarely clean), and the
- * git lock naming a live pid.
+ * A clean tree at a merged HEAD is byte-identical to a commit that is
+ * already on `origin/master`, so nothing COMMITTED in it can be lost. What
+ * can be lost is the session working in it, so a live session gets the rails
+ * below — uncommitted or untracked files (a working tree is rarely clean),
+ * the git lock naming a live pid, a live process whose cwd is inside the
+ * tree (the sweep used to `kill` exactly that process and delete its
+ * directory), and activity within `minAgeMs` (#3694): a fixer that has just
+ * cut its tree at `origin/master` is merged and clean, and often holds no
+ * process at the instant of the sweep. A NAMED tree is exempt from the last
+ * three, as in the age sweep.
  *
  * THE UNTRACKED-FILE RAIL IS THE WHOLE POINT. An untracked file is a
  * deliverable, never disposable: on 2026-09-09 a 22 KB report left untracked
@@ -535,6 +573,13 @@ export function planWorktreePrune({
  * @param {(pid: number) => boolean} [options.isPidAlive]
  * @param {Set<string>|null} [options.selectedKeys] `--only` narrowing; the
  *   merged sweep runs over the same set the age sweep was narrowed to.
+ * @param {Set<string>|null} [options.liveProcessCwds] A tree holding a live
+ *   process's cwd is kept (#3694) -- a merged, clean tree is still someone's
+ *   working directory. `null` means liveness is unknowable (no /proc, a hidden
+ *   pid namespace) and adds no rail of its own: `minAgeMs` already applies.
+ *   A NAMED tree (`selectedKeys`) is exempt.
+ * @param {number} [options.minAgeMs] Quiet time an unnamed tree needs before
+ *   it is removable (#3694), whether or not liveness is known.
  * @returns {PrunePlan}
  */
 export function planMergedWorktreeRemovals({
@@ -543,6 +588,8 @@ export function planMergedWorktreeRemovals({
 	selfPath = null,
 	isPidAlive = () => false,
 	selectedKeys = null,
+	liveProcessCwds = undefined,
+	minAgeMs = DEFAULT_MIN_AGE_MS,
 }) {
 	const selfKeys = new Set(
 		(Array.isArray(selfPath) ? selfPath : selfPath ? [selfPath] : [])
@@ -595,8 +642,21 @@ export function planMergedWorktreeRemovals({
 			push("locked-live", `git lock names live pid ${lockPid}`);
 			continue;
 		}
+		const liveCwd = selected ? null : liveCwdWithin(liveProcessCwds, key);
+		if (liveCwd) {
+			push("live-cwd", `a live process has cwd ${liveCwd}`);
+			continue;
+		}
 		if (!row.mergedIntoMaster) {
 			push("unmerged", "HEAD is not an ancestor of origin/master");
+			continue;
+		}
+		// #3694: "or modified within N minutes", whatever the cwd scan said. A
+		// fresh fixer tree cut at origin/master is merged and clean, and agent
+		// shells reset their cwd between calls, so at the instant of the sweep
+		// it often holds no process at all (PR #3697 round 2 verify).
+		if (!selected && ageMs < minAgeMs) {
+			push("too-young", `age ${ageMs}ms < min ${minAgeMs}ms`);
 			continue;
 		}
 		remove.push({

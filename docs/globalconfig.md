@@ -33,6 +33,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-compact-tool-line` | `ui.compactToolLine` | `false` |
 | `--lens-compact-lsp-status` | `ui.compactLspStatus` | `false` |
 | `--lens-hide-lsp-status` | `ui.hideLspStatus` | `false` |
+| `--lens-compact-widget` | `ui.compactWidget` | `false` |
 | `--no-lazy-tools` | `tools.lazy` | `true` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
 | `--no-knip` | `knip.enabled` | `true` |
@@ -110,6 +111,8 @@ Hide the diagnostics widget by default, run formatting immediately after write/e
 `autofix.enabled` (default `true`) is the global-config counterpart to the project `.pi-lens.json` `autofix.enabled` below — set it to `false` to match `--no-autofix` for every project that doesn't set its own `autofix.enabled`. As with `format.enabled` and `actionableWarnings.autoFix.enabled`, a project's own `.pi-lens.json` value overrides this global default in either direction (see "Mutation controls" below).
 
 `contextInjection.enabled` (default `true`) controls whether pi-lens prepends automatic findings — session-start guidance, turn-end findings, and test findings — into the next model turn. Set it to `false` (or use `--no-lens-context` / `PI_LENS_NO_CONTEXT_INJECTION=1` / `/lens-context-toggle`) to keep tools, LSP, read-guard, and formatting running while avoiding the prompt-cache invalidation that injected messages cause in long, cache-sensitive sessions. Findings are still cached, so `lens_diagnostics` and `/lens-health` keep working.
+
+`contextInjection.requirePreExistingFixes` (default `true`) controls whether the session-start orientation tells the agent to fix pre-existing blocking errors; set `false` to scope that demand to errors its own edits introduce.
 
 `actionableWarnings.enabled` gates the turn_end report. `includeLspCodeActions` fetches LSP code actions for each warning (requires an active language server). `deltaOnly` (default `true`) limits the report to lines touched in the current turn. `autoFix.enabled` applies conservative LSP quickfixes at `agent_end`; `autoFix.maxFixes` caps the number applied per turn (default `5`, must be a non-negative whole number). `maxFixes: 0` keeps the report and applies nothing, which is a useful halfway step before enabling `autoFix` for real. Unlike the toggles in the table above there is no CLI counterpart, since it takes a number rather than being on or off.
 
@@ -262,7 +265,7 @@ not corrupt delta baselines.
 
 ### `maxProjectFiles`
 
-Single scale knob (default `2000`) that a large-but-healthy repo can raise to scale five independent size budgets together instead of tripping each one separately: the project-diagnostics scanner (0.25×, default 500 files), the review graph (0.5× up to a point, default 1,000 files — see below), the startup scan (1×, default 2,000 source files), jscpd (3×, default 6,000 directory entries), and the word index (3×, default 6,000 files). Raising it (e.g. to `5000`) scales all five proportionally. Each subsystem's own environment-variable override (e.g. `PI_LENS_REVIEW_GRAPH_MAX_FILES`, `PI_LENS_STARTUP_SCAN_MAX_ENTRIES`) still takes precedence over this knob when set, and a separate `PI_LENS_MAX_PROJECT_FILES` environment variable sits below `maxProjectFiles` but above the built-in default. See `clients/project-scale.ts` for the full ratio table and precedence order.
+Single scale knob (default `2000`) that a large-but-healthy repo can raise to scale five independent size budgets together instead of tripping each one separately: the project-diagnostics scanner (0.25×, default 500 files), the review graph (0.5× up to a point, default 1,000 files — see below), the startup scan (1.25×, default 2,500 source files), jscpd (3×, default 6,000 directory entries), and the word index (3×, default 6,000 files). Raising it (e.g. to `5000`) scales all five proportionally. Each subsystem's own environment-variable override (e.g. `PI_LENS_REVIEW_GRAPH_MAX_FILES`, `PI_LENS_STARTUP_SCAN_MAX_ENTRIES`) still takes precedence over this knob when set, and a separate `PI_LENS_MAX_PROJECT_FILES` environment variable sits below `maxProjectFiles` but above the built-in default. See `clients/project-scale.ts` for the full ratio table and precedence order.
 
 Unlike the other four, the review graph's budget stops scaling flatly at 0.5× once `maxProjectFiles` climbs past 4,000 — it tapers toward a 5,000-file ceiling instead of growing unbounded (#775). Its higher per-file cold-build cost bounds this default file budget independently of the graph's disk-persist circuit-breaker, whose measured default is now 500,000 elements (#936; override with `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`). An over-cap graph persists a centrality-ranked partial snapshot with explicit total-versus-persisted coverage; read-only orientation may use it, but incremental builds never reuse it as a complete base. Below the 4,000 threshold (which covers every typical/default-sized project) it's the same flat 0.5× ratio as before. See `reviewGraph.maxFiles` below for an explicit opt-in past the taper.
 

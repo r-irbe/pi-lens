@@ -22,8 +22,8 @@ export interface GzipStageWriteMetrics {
 }
 
 export interface GzipStageWriteOptions {
-	/** Runs on the worker thread after JSON serialization, never on the caller. */
-	semanticFingerprint?: (json: string) => string;
+	/** Runs on the worker thread over the serialized body, never on the caller. */
+	semanticFingerprint?: (body: string | Uint8Array) => string;
 	/** Return before gzip/write when the derived digest equals one of these. */
 	skipIfFingerprints?: readonly string[];
 }
@@ -34,6 +34,13 @@ export interface GzipStageWorkerRequest {
 	id: number;
 	generation: number;
 	stagePath: string;
+	/**
+	 * Either an object the worker serializes itself (the structured clone of the
+	 * whole graph rides the message), or already-serialized JSON as UTF-8 bytes
+	 * whose `ArrayBuffer` the caller lists in `postMessage`'s transfer list, so
+	 * the body crosses the thread boundary zero-copy (#3789). The project
+	 * snapshot uses the bytes form; the review graph still sends objects.
+	 */
 	data: unknown;
 	testDelayMs?: number;
 }
@@ -43,7 +50,13 @@ export interface GzipStageWorkerRequest {
 export interface GzipStageWorkerResult {
 	id: number;
 	generation: number;
-	stagePath: string;
+	/**
+	 * Optional on purpose (#4400): this is wire data from another thread, and a
+	 * worker that failed before staging (or a build that does not echo it) leaves
+	 * it out. A host cleans up the path it sent in its own request record and
+	 * reads this only for a result with no such record.
+	 */
+	stagePath?: string;
 	rawBytes?: number;
 	gzBytes?: number;
 	serializeMs?: number;
@@ -55,8 +68,26 @@ export interface GzipStageWorkerResult {
 }
 
 /**
+ * Host-side reap of a stage file that a worker `message` listener no longer
+ * needs. `force` suppresses ENOENT but not EISDIR or EBUSY/EPERM (Windows AV
+ * or backup can briefly hold the handle), and a throw out of that listener is
+ * an uncaught exception that ends the host (#1361, #4400). Returns the failure
+ * so each host records it in its own sink; the startup stage sweep reclaims
+ * whatever a failed removal leaves behind.
+ */
+export function reapStageFile(stagePath: string): Error | undefined {
+	try {
+		fs.rmSync(stagePath, { force: true });
+		return undefined;
+	} catch (err) {
+		return err instanceof Error ? err : new Error(String(err));
+	}
+}
+
+/**
  * Shared worker-thread body-persist core (#958, single source of truth #883):
- * `JSON.stringify` → chunked `createGzip` pipeline → a per-call staging file
+ * `JSON.stringify` (or pre-serialized bytes, #3789) → chunked `createGzip`
+ * pipeline → a per-call staging file
  * from `atomic-write.ts`'s {@link stagePathFor} → atomic rename to
  * `stagePath`, returning byte/timing metrics. Both
  * `clients/review-graph/persist-worker.ts` and
@@ -103,10 +134,11 @@ export async function writeGzipStageFile(
 			await new Promise((resolve) => setTimeout(resolve, testDelayMs));
 		}
 		const serializeStarted = performance.now();
-		const json = JSON.stringify(data);
+		// Pre-serialized bytes cost the worker no stringify and no copy (#3789).
+		const body = data instanceof Uint8Array ? data : JSON.stringify(data);
 		const serializeMs = performance.now() - serializeStarted;
-		const rawBytes = Buffer.byteLength(json);
-		const semanticFingerprint = options?.semanticFingerprint?.(json);
+		const rawBytes = Buffer.byteLength(body);
+		const semanticFingerprint = options?.semanticFingerprint?.(body);
 		if (
 			semanticFingerprint !== undefined &&
 			options?.skipIfFingerprints?.includes(semanticFingerprint)
@@ -125,9 +157,22 @@ export async function writeGzipStageFile(
 		const writeStarted = performance.now();
 		await fs.promises.mkdir(path.dirname(stagePath), { recursive: true });
 		const chunks = function* () {
-			const chunkChars = 256 * 1024;
-			for (let offset = 0; offset < json.length; offset += chunkChars) {
-				yield json.slice(offset, offset + chunkChars);
+			const chunkSize = 256 * 1024;
+			let offset = 0;
+			while (offset < body.length) {
+				let end = Math.min(offset + chunkSize, body.length);
+				// A string chunk is encoded on its own, so a surrogate pair split
+				// across two chunks would become two U+FFFD (#3913). JSON.stringify
+				// escapes lone surrogates, so a high surrogate ending a chunk always
+				// pairs with the next unit: end the chunk one unit early instead.
+				if (typeof body === "string" && end < body.length) {
+					const last = body.charCodeAt(end - 1);
+					if (last >= 0xd800 && last <= 0xdbff) end--;
+				}
+				yield typeof body === "string"
+					? body.slice(offset, end)
+					: body.subarray(offset, end);
+				offset = end;
 			}
 		};
 		await pipeline(
@@ -163,11 +208,12 @@ export async function writeGzipStageFile(
  */
 export function serveGzipStageWorker<
 	Req extends GzipStageWorkerRequest,
-	Base extends { id: number; generation: number; stagePath: string },
+	Base extends { id: number; generation: number },
 >(
-	buildBaseResult: (request: Req) => Base,
+	// The worker must echo `stagePath`; its host may not rely on that (#4400).
+	buildBaseResult: (request: Req) => Base & { stagePath: string },
 	options?: {
-		semanticFingerprint?: (request: Req, json: string) => string;
+		semanticFingerprint?: (request: Req, body: string | Uint8Array) => string;
 		skipIfFingerprints?: (request: Req) => readonly string[] | undefined;
 	},
 ): void {
@@ -188,7 +234,7 @@ export function serveGzipStageWorker<
 					request.testDelayMs,
 					{
 						semanticFingerprint: fingerprint
-							? (json) => fingerprint(request, json)
+							? (body) => fingerprint(request, body)
 							: undefined,
 						skipIfFingerprints: options?.skipIfFingerprints?.(request),
 					},

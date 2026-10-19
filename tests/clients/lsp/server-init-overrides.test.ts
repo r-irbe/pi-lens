@@ -9,13 +9,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
 
 process.env.PI_LENS_TEST_MODE = "1";
 
-vi.mock("../../../clients/lsp/launch.js", () => ({
+vi.mock("../../../clients/lsp/launch.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../../clients/lsp/launch.js")>()),
 	launchLSP: vi.fn(),
+	refuseUntrustedLspExecution: vi.fn(),
+	admitProjectSuppliedTsserver: (tsserverPath: string) => tsserverPath,
 }));
 
 vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
@@ -27,6 +30,11 @@ vi.mock("../../../clients/latency-logger.js", async (importActual) => ({
 }));
 
 const dirs: string[] = [];
+
+beforeEach(async () => {
+	const trust = await import("../../../clients/project-trust.js");
+	trust.setProjectTrustState("trusted");
+});
 
 function tmpDir(): string {
 	const d = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-overrides-"));

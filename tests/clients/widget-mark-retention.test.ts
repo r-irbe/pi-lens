@@ -79,6 +79,7 @@ function diag(
 
 function makeService(diags: Array<Record<string, unknown>>) {
 	return {
+		announceCreatedFiles: vi.fn(),
 		touchFile: vi.fn(async () => ({ diags })),
 		getDiagnostics: vi.fn(async () => []),
 		getCapabilitySnapshots: vi.fn(async () => []),

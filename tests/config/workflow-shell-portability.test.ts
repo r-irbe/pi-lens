@@ -6,6 +6,7 @@ import { assertNonEmptyScan } from "../support/sweep-kit.js";
 import {
 	BASH4_NEEDLES,
 	findBash4PortabilityFindings,
+	lexShell,
 	type Workflow,
 } from "../support/workflow-shell-portability.js";
 
@@ -336,5 +337,31 @@ jobs:
 		);
 
 		expect(findings).toEqual([]);
+	});
+});
+
+// #4339 review F3: each case hid a real call from every lexShell consumer
+// (the bash 4 scan, the #2940 release gate, the #4339 npx scan).
+describe("lexShell keeps code after shell escapes and comments", () => {
+	it.each([
+		["an escaped double quote", 'echo "a \\" b" && npx foo'],
+		["an escaped single quote", "echo it\\'s && npx foo"],
+		["an escaped quote in an ANSI-C string", "echo $'a\\'b' && npx foo"],
+		["an escaped backslash before #", "echo \\\\#x && npx foo"],
+		["a comment that ends in a backslash", "# note \\\nnpx foo"],
+	])("after %s", (_name, source) => {
+		expect(lexShell(source)).toMatch(/(?<![\w])npx foo$/);
+	});
+
+	it("blanks an ANSI-C string inside a command substitution", () => {
+		// Without the `$'` state the body's quotes never balance, its end is
+		// not found, and the whole body is left raw.
+		expect(lexShell(`x="$(echo $'it\\'s')"`)).not.toContain("it");
+	});
+
+	it("blanks a string continued inside a command substitution", () => {
+		// The substitution body is lexed in place: a joined (shorter) body
+		// left its last raw characters, here `"npx"`, readable as code.
+		expect(lexShell('x="$(a \\\n     "npx")"')).not.toContain("npx");
 	});
 });

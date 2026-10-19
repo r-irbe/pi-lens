@@ -5,7 +5,7 @@ description: Run the pi-lens release-readiness QA pass â€” witness the feature Ã
 
 # Release QA
 
-The pass that runs before a release is cut. Sibling of `merge-train`: that skill
+The pass that runs before a release is cut. Sibling of the merge policy (`docs/pi-lens-merge-policy.md`): that policy
 decides whether one PR may land, this one decides whether the accumulated result
 may ship.
 
@@ -171,6 +171,9 @@ node scripts/changelog-release.mjs <version> --root-dir "$S"
 (cd "$S" && npm version <version> --no-git-tag-version >/dev/null && ln -s "$OLDPWD/node_modules" node_modules && npm run build >/dev/null && \
   npx vitest run $(grep -rl "CHANGELOG.md\|\.changelog\|package.json" tests/ | grep -v "^tests/support\|fixtures" | tr '\n' ' '))
 ```
+
+Read the release body too: `(cd "$S" && node scripts/changelog-extract.mjs <version> --summary)`
+must list only `audience: user` entries and end with the internal count.
 
 Every red here is a release-only calibration: fix it IN the bump PR (a
 trailing commit after the bump+roll commit is fine) and name it in the PR

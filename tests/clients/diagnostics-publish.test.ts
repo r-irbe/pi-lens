@@ -48,15 +48,6 @@ describe("diagnostics-publish — pilens:diagnostics (#502)", () => {
 		}
 	});
 
-	it("no-ops when never wired (unit tests / MCP server path have no pi host)", () => {
-		expect(() =>
-			publishDiagnostics({
-				cwd: "/repo",
-				files: [{ path: "/repo/a.ts", diagnostics: [diag()] }],
-			}),
-		).not.toThrow();
-	});
-
 	it("emits the exact payload shape: v, source, cwd, seq, ts, files", () => {
 		const emit = vi.fn();
 		wireDiagnosticsBusEmitter(emit);

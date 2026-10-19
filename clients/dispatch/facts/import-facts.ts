@@ -126,114 +126,124 @@ export const importFactProvider: FactProvider = {
 
 		// Grammar unavailable / parse failed / wasm aborted — degrade to empty
 		// (there is no typescript-compiler fallback by design, #402).
-		const parsed = await withFactTree(ctx.filePath, content, (root) => {
-			// --- module-type detection + static import/re-export node collection ---
-			let hasEsm = false;
-			let hasCjs = false;
-			const importNodes: TsNode[] = [];
-			const reExportNodes: TsNode[] = [];
+		const parsed = await withFactTree(
+			ctx.filePath,
+			content,
+			(root) => {
+				// --- module-type detection + static import/re-export node collection ---
+				let hasEsm = false;
+				let hasCjs = false;
+				const importNodes: TsNode[] = [];
+				const reExportNodes: TsNode[] = [];
 
-			for (const child of root.children ?? []) {
-				if (!child) continue;
-				if (child.type === "import_statement") {
-					hasEsm = true;
-					importNodes.push(child);
-				} else if (child.type === "export_statement") {
-					const isReExport = Boolean(firstChildOfType(child, "string"));
-					// `export { x }` / `export * from` / `export { x } from` are ESM
-					// declarations (like TS's isExportDeclaration); `export const x` /
-					// `export default` (a wrapped declaration) is NOT counted here.
-					if (isReExport || firstChildOfType(child, "export_clause")) {
+				for (const child of root.children ?? []) {
+					if (!child) continue;
+					if (child.type === "import_statement") {
 						hasEsm = true;
-					}
-					if (isReExport) reExportNodes.push(child);
-				}
-			}
-
-			// --- dynamic import() / require() / module.exports (anywhere in the tree) ---
-			const dynamicRaw: Array<{ source: string; kind: "import" | "require" }> =
-				[];
-			walk(root, (node) => {
-				if (node.type === "call_expression") {
-					const callee = node.children?.[0];
-					const args = firstChildOfType(node, "arguments");
-					const strArg = args ? firstChildOfType(args, "string") : undefined;
-					if (!strArg) return; // non-string arg (e.g. template literal) — skip
-					const source = stripQuotes(strArg.text);
-					if (callee?.type === "import") {
-						dynamicRaw.push({ source, kind: "import" });
-					} else if (
-						callee?.type === "identifier" &&
-						callee.text === "require"
-					) {
-						dynamicRaw.push({ source, kind: "require" });
-						hasCjs = true;
-					}
-				} else if (node.type === "member_expression") {
-					// module.exports = ...
-					const obj = node.children?.[0];
-					if (obj?.type === "identifier" && obj.text === "module") {
-						const prop = firstChildOfType(node, "property_identifier");
-						if (prop?.text === "exports") hasCjs = true;
+						importNodes.push(child);
+					} else if (child.type === "export_statement") {
+						// The `from` keyword separates a re-export's source string from
+						// `export default "x"` / `export = "x"`, whose string is a value.
+						const isReExport = Boolean(firstChildOfType(child, "from"));
+						// `export { x }` / `export * from` / `export { x } from` are ESM
+						// declarations (like TS's isExportDeclaration); `export const x` /
+						// `export default` (a wrapped declaration) is NOT counted here.
+						if (isReExport || firstChildOfType(child, "export_clause")) {
+							hasEsm = true;
+						}
+						if (isReExport) reExportNodes.push(child);
 					}
 				}
-			});
 
-			const moduleType: "esm" | "cjs" | "unknown" =
-				hasEsm && !hasCjs
-					? "esm"
-					: hasCjs && !hasEsm
-						? "cjs"
-						: hasEsm || hasCjs
-							? "esm" // mixed — static imports present, treat as ESM
-							: "unknown";
-
-			// --- build entries ---
-			const imports: ImportEntry[] = [];
-			for (const node of importNodes) {
-				const entry = parseStaticImport(node, moduleType);
-				if (entry) imports.push(entry);
-			}
-			let dynamicCount = 0;
-			for (const d of dynamicRaw) {
-				if (d.kind === "import") {
-					imports.push({
-						source: d.source,
-						names: [],
-						isDynamic: true,
-						moduleType,
-					});
-				} else {
-					imports.push({ source: d.source, names: [], moduleType: "cjs" });
-				}
-				dynamicCount++;
-			}
-			store.setFileFact(ctx.filePath, "file.imports", imports);
-
-			const reexports: ReExportEntry[] = [];
-			for (const node of reExportNodes) {
-				const r = parseReExport(node);
-				if (r) reexports.push(r);
-			}
-			store.setFileFact(ctx.filePath, "file.reexports", reexports);
-
-			// Telemetry: log when a file has dynamic imports or re-exports so we can
-			// measure coverage and validate the implementation across real projects.
-			if (dynamicCount > 0 || reexports.length > 0) {
-				logLatency({
-					type: "call_graph_facts" as any,
-					filePath: ctx.filePath,
-					durationMs: 0,
-					metadata: {
-						moduleType,
-						staticImports: imports.length - dynamicCount,
-						dynamicImports: dynamicCount,
-						reexports: reexports.length,
-						starReexports: reexports.filter((r) => r.names.length === 0).length,
-					},
+				// --- dynamic import() / require() / module.exports (anywhere in the tree) ---
+				const dynamicRaw: Array<{
+					source: string;
+					kind: "import" | "require";
+				}> = [];
+				walk(root, (node) => {
+					if (node.type === "call_expression") {
+						const callee = node.children?.[0];
+						const args = firstChildOfType(node, "arguments");
+						const strArg = args ? firstChildOfType(args, "string") : undefined;
+						if (!strArg) return; // non-string arg (e.g. template literal) — skip
+						const source = stripQuotes(strArg.text);
+						if (callee?.type === "import") {
+							dynamicRaw.push({ source, kind: "import" });
+						} else if (
+							callee?.type === "identifier" &&
+							callee.text === "require"
+						) {
+							dynamicRaw.push({ source, kind: "require" });
+							hasCjs = true;
+						}
+					} else if (node.type === "member_expression") {
+						// module.exports = ...
+						const obj = node.children?.[0];
+						if (obj?.type === "identifier" && obj.text === "module") {
+							const prop = firstChildOfType(node, "property_identifier");
+							if (prop?.text === "exports") hasCjs = true;
+						}
+					}
 				});
-			}
-		});
+
+				const moduleType: "esm" | "cjs" | "unknown" =
+					hasEsm && !hasCjs
+						? "esm"
+						: hasCjs && !hasEsm
+							? "cjs"
+							: hasEsm || hasCjs
+								? "esm" // mixed — static imports present, treat as ESM
+								: "unknown";
+
+				// --- build entries ---
+				const imports: ImportEntry[] = [];
+				for (const node of importNodes) {
+					const entry = parseStaticImport(node, moduleType);
+					if (entry) imports.push(entry);
+				}
+				let dynamicCount = 0;
+				for (const d of dynamicRaw) {
+					if (d.kind === "import") {
+						imports.push({
+							source: d.source,
+							names: [],
+							isDynamic: true,
+							moduleType,
+						});
+					} else {
+						imports.push({ source: d.source, names: [], moduleType: "cjs" });
+					}
+					dynamicCount++;
+				}
+				store.setFileFact(ctx.filePath, "file.imports", imports);
+
+				const reexports: ReExportEntry[] = [];
+				for (const node of reExportNodes) {
+					const r = parseReExport(node);
+					if (r) reexports.push(r);
+				}
+				store.setFileFact(ctx.filePath, "file.reexports", reexports);
+
+				// Telemetry: log when a file has dynamic imports or re-exports so we can
+				// measure coverage and validate the implementation across real projects.
+				if (dynamicCount > 0 || reexports.length > 0) {
+					logLatency({
+						type: "call_graph_facts" as any,
+						filePath: ctx.filePath,
+						durationMs: 0,
+						metadata: {
+							moduleType,
+							staticImports: imports.length - dynamicCount,
+							dynamicImports: dynamicCount,
+							reexports: reexports.length,
+							starReexports: reexports.filter((r) => r.names.length === 0)
+								.length,
+						},
+					});
+				}
+			},
+			importFactProvider.id,
+		);
 		if (!parsed.parsed) setEmpty();
 		else
 			store.setFileFact(ctx.filePath, "file.importFactsCoverage", "complete");

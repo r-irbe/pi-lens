@@ -33,6 +33,13 @@
  * NO walk-up (verified via `@npmcli/config`'s `loadLocalPrefix()`), so it is
  * independent of `cwd`/`runPath` entirely: Arborist's tree at that empty
  * directory is always empty, so npm always installs into its own npx cache.
+ * LIFECYCLE SCRIPTS (#4062): the outer `npm install --strict-allow-scripts`
+ * runs `prepare`, and npm hands the strict policy to every child through its
+ * environment. This nested exec has an empty prefix and so no `package.json`
+ * `allowScripts`; esbuild's `postinstall` was therefore "not covered" and the
+ * whole install failed (ESTRICTALLOWSCRIPTS). The invocation approves exactly
+ * the one spec it installs with `--allow-scripts=<packageSpec>`.
+ *
  * The spawn's `cwd` is left to the caller: esbuild's call site keeps it at
  * `root` because esbuild bakes bundled-module-path banner comments relative
  * to its own cwd (#2594 review F1) — see scripts/bundle-dist.mjs. `tsc` has
@@ -42,9 +49,32 @@
  * but its call site keeps `cwd: root` too, unchanged from before this fix —
  * see scripts/build-dist-tsc.mjs.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+/**
+ * #4066: source-build tools use the lockfile's exact resolved versions, even
+ * when devDependencies are omitted. Never infer a pin from installed modules
+ * or a manifest range. This selects the root entry; nested copies are unrelated.
+ *
+ * @param {{ root: string, packageName: string }} args
+ * @returns {string}
+ */
+export function readLockedToolVersion({ root, packageName }) {
+	const lockPath = path.join(root, "package-lock.json");
+	const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+	const version = lock?.packages?.[`node_modules/${packageName}`]?.version;
+	if (
+		typeof version !== "string" ||
+		!/^\d+\.\d+\.\d+(?:-[\da-z.-]+)?(?:\+[\da-z.-]+)?$/i.test(version)
+	) {
+		throw new Error(
+			`${lockPath}: node_modules/${packageName} needs an exact locked version`,
+		);
+	}
+	return version;
+}
 
 /**
  * A freshly created, empty directory for the `npm exec --prefix` flag.
@@ -89,6 +119,7 @@ export function buildIsolatedExecInvocation({
 			"--prefix",
 			execPrefix,
 			"--yes",
+			`--allow-scripts=${packageSpec}`,
 			"--package",
 			packageSpec,
 			"--",

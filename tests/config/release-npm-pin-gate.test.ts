@@ -27,7 +27,10 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "../../clients/deps/js-yaml.js";
 import { assertNonEmptyScan } from "../support/sweep-kit.js";
-import { lexShell } from "../support/workflow-shell-portability.js";
+import {
+	lexShell,
+	npmPinBoundAt,
+} from "../support/workflow-shell-portability.js";
 
 const ROOT = resolve(import.meta.dirname, "../..");
 const RELEASE_WORKFLOW = ".github/workflows/release.yml";
@@ -126,6 +129,31 @@ function requirePinned(workflow: Workflow): { variable: string; form: string } {
 	return pinned;
 }
 
+/**
+ * The guarded steps that run the pinned form where the variable is not bound
+ * to package.json's pin (`npmPinBoundAt`, shared with the #4339 npx scan). An
+ * unassigned variable expands to empty and `npm@` resolves to LATEST, while
+ * the pinned form still matches textually. Each step is its own shell, so each
+ * one must derive the pin itself.
+ */
+function unboundPinSteps(
+	workflow: Workflow,
+	pinned: { variable: string; form: string },
+): string[] {
+	return guardedSteps(workflow)
+		.filter((step) => {
+			const code = blankShellComments(step.run);
+			for (
+				let at = code.indexOf(pinned.form);
+				at >= 0;
+				at = code.indexOf(pinned.form, at + 1)
+			)
+				if (!npmPinBoundAt(step.run, pinned.variable, at)) return true;
+			return false;
+		})
+		.map((step) => `${step.job}/${step.name}`);
+}
+
 type BareNpmFinding = { job: string; step: string; verb: string };
 
 /**
@@ -174,15 +202,17 @@ function findPinAssertionStep(
 		if (step.job !== "publish-npm") return false;
 		const code = blankShellComments(step.run);
 		const lexed = lexShell(step.run);
+		// The exit and the comparison are read off the lexed text: an echoed
+		// `test ... = ${pin}` or `exit 1` is prose (#4339 sweep).
 		const comparesToPin = new RegExp(
 			`(?:test|\\[\\[?)\\s+[^\\n]*\\$\\{?${pinned.variable}\\}?`,
-		).test(code);
+		).test(lexed);
 		return (
 			new RegExp(`npx\\s+-y\\s+\\$\\{${pinned.variable}\\}\\s+--version`).test(
 				lexed,
 			) &&
 			new RegExp(`\\$\\{?${pinned.variable}\\}?`).test(code) &&
-			(/\bexit\s+[1-9]/.test(code) || comparesToPin)
+			(/\bexit\s+[1-9]/.test(lexed) || comparesToPin)
 		);
 	});
 }
@@ -231,17 +261,36 @@ describe("release.yml npm pin gate (#2940)", () => {
 			blankShellComments(step.run).includes(pinned.form),
 		);
 		expect(users.length).toBeGreaterThanOrEqual(3);
-		for (const step of users) {
-			// An unassigned variable expands to empty and `npm@` resolves to
-			// LATEST — the pinned form would still match textually. Each step is
-			// its own shell, so each one must derive the pin itself.
-			expect(
-				new RegExp(`${pinned.variable}=.*packageManager`).test(
-					blankShellComments(step.run),
-				),
-				`${step.job}/${step.name} uses the pinned form without deriving ${pinned.variable} from package.json`,
-			).toBe(true);
-		}
+		expect(unboundPinSteps(workflow, pinned)).toEqual([]);
+	});
+
+	// #4339 review F2, the same shape here: a string that mentions
+	// packageManager, or a later reassignment, satisfied the old line regex.
+	it("does not let a string or a later reassignment satisfy the pin bind", () => {
+		const fixture = loadWorkflow(`
+jobs:
+  prepare:
+    steps:
+      - name: Names packageManager in a string
+        run: |
+          npm_pin="latest"; echo "packageManager"
+          npx -y "npm@\${npm_pin}" install
+      - name: Reassigns after the bind
+        run: |
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npm_pin=latest
+          npx -y "npm@\${npm_pin}" install
+      - name: Binds the pin
+        run: |
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npx -y "npm@\${npm_pin}" install
+  publish-npm:
+    steps: []
+`);
+		expect(unboundPinSteps(fixture, requirePinned(fixture))).toEqual([
+			"prepare/Names packageManager in a string",
+			"prepare/Reassigns after the bind",
+		]);
 	});
 
 	it("asserts the pinned npm version immediately before publishing", () => {
@@ -313,6 +362,30 @@ jobs:
 		const pinned = requirePinned(fixture);
 		expect(pinned.variable).toBe("npm_pin");
 		expect(findPinAssertionStep(fixture, pinned)).toBeUndefined();
+	});
+
+	// #4339 sweep, the same shape: the exit and the comparison must be code,
+	// not words inside an echo.
+	it("does not let an echoed exit or comparison satisfy the runtime check", () => {
+		const fixture = loadWorkflow(`
+jobs:
+  prepare:
+    steps: []
+  publish-npm:
+    steps:
+      - name: Echoes the assertion
+        run: |
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npx -y "npm@\${npm_pin}" --version
+          echo "never: test it = \${npm_pin} or exit 1"
+      - name: Publish to npm
+        run: |
+          npm_pin="$(node -p "require('./package.json').packageManager.replace(/^npm@/, '')")"
+          npx -y "npm@\${npm_pin}" publish
+`);
+		expect(
+			findPinAssertionStep(fixture, requirePinned(fixture)),
+		).toBeUndefined();
 	});
 
 	it("does not let a single-quoted echo satisfy either runtime gate", () => {

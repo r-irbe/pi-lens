@@ -285,6 +285,26 @@ describe("getLastLoggedPhase (loop_block attribution, #1122/#1123)", () => {
 		expect(getLastLoggedPhase()?.phase).toBe("turn_end_tests");
 	});
 
+	// Recurrence prevented (#3871 review F2): the per-turn test-selection
+	// record is zero-duration decision telemetry written right before the
+	// knip/madge phases; without the exclusion it takes one of the five
+	// recent-phase slots loop_block attribution reads.
+	it("does not let the turn-end test-selection record own stall attribution (#3871)", () => {
+		logLatency({
+			type: "phase",
+			phase: "turn_end_tests",
+			filePath: "<pi-lens>",
+			durationMs: 5,
+		});
+		logLatency({
+			type: "phase",
+			phase: "turn_end_test_selection",
+			filePath: "/repo",
+			durationMs: 0,
+		});
+		expect(getLastLoggedPhase()?.phase).toBe("turn_end_tests");
+	});
+
 	// #2249/#2312 review F3: `concurrent_session_bind_rollup` is a zero-duration
 	// session-end summary, the same shape as `session_end_bus_rollup` and
 	// `path_attribution_verified_rollup` above — it must not win lastPhase

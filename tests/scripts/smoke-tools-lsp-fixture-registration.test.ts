@@ -52,7 +52,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { requireBuiltDist } from "../support/require-built-dist.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -60,6 +61,16 @@ const repoRoot = path.resolve(
 );
 const SMOKE_ENTRY = path.join(repoRoot, "scripts", "smoke-tools.mjs");
 const CHILD_TIMEOUT_MS = 30_000;
+
+// #4003: `smoke-tools.mjs --lsp` and the guard module both import dist/; the
+// in-place compiled twins from `npm run build` are not enough.
+beforeAll(() => {
+	requireBuiltDist(
+		repoRoot,
+		"clients/lsp/index.js",
+		"clients/lsp/session-roots.js",
+	);
+});
 
 const tmpDirs: string[] = [];
 function freshTmpDir(prefix: string): string {

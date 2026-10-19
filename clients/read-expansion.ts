@@ -290,24 +290,30 @@ export async function tryExpandRead(
 		// Resolve the enclosing node INSIDE the cache-safe callback: a tree handed
 		// back across an await can be retired by another consumer's eviction (#417).
 		const parsed = await withBudget(
-			tsClient.withParsedTree(filePath, languageId, content, (tree) => {
-				// biome-ignore lint/suspicious/noExplicitAny: tree-sitter root node
-				const node = findEnclosingNodeForRange(
-					tree.rootNode as any,
-					requestedStartRow,
-					requestedEndRow,
-					enclosingTypes,
-				);
-				if (!node) return undefined;
-				return {
-					name: getSymbolName(node),
-					kind: node.type as string,
-					startRow: node.startPosition.row,
-					// biome-ignore lint/suspicious/noExplicitAny: endPosition not in local interface
-					endRow: (node as any).endPosition?.row ?? node.startPosition.row,
-					ancestry: buildAncestryChain(node, enclosingTypes),
-				};
-			}),
+			tsClient.withParsedTree(
+				filePath,
+				languageId,
+				content,
+				(tree) => {
+					// biome-ignore lint/suspicious/noExplicitAny: tree-sitter root node
+					const node = findEnclosingNodeForRange(
+						tree.rootNode as any,
+						requestedStartRow,
+						requestedEndRow,
+						enclosingTypes,
+					);
+					if (!node) return undefined;
+					return {
+						name: getSymbolName(node),
+						kind: node.type as string,
+						startRow: node.startPosition.row,
+						// biome-ignore lint/suspicious/noExplicitAny: endPosition not in local interface
+						endRow: (node as any).endPosition?.row ?? node.startPosition.row,
+						ancestry: buildAncestryChain(node, enclosingTypes),
+					};
+				},
+				"read-expansion",
+			),
 			remaining,
 		);
 		const enclosing = parsed?.parsed ? parsed.value : undefined;

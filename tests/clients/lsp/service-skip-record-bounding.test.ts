@@ -115,10 +115,14 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 	it("writes one lsp_client_skipped_broken per file, not one per touch", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
-		const internal = service as unknown as { permanentlyBroken: Set<string> };
+		const internal = service as unknown as {
+			clientRegistry: { permanentlyBroken: Set<string> };
+		};
 		const server = fakeServer("opengrep");
 		getServersForFileWithConfig.mockReturnValue([server]);
-		internal.permanentlyBroken.add(`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`);
+		internal.clientRegistry.permanentlyBroken.add(
+			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
+		);
 
 		for (let touch = 0; touch < 3; touch++) {
 			expect(await service.getClientForFile(FIXTURE_FILE)).toBeUndefined();
@@ -164,10 +168,14 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 	it("gives a second file its own record, so one file cannot mask another", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
-		const internal = service as unknown as { permanentlyBroken: Set<string> };
+		const internal = service as unknown as {
+			clientRegistry: { permanentlyBroken: Set<string> };
+		};
 		const server = fakeServer("opengrep");
 		getServersForFileWithConfig.mockReturnValue([server]);
-		internal.permanentlyBroken.add(`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`);
+		internal.clientRegistry.permanentlyBroken.add(
+			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
+		);
 
 		await service.getClientForFile(FIXTURE_FILE);
 		await service.getClientForFile(FIXTURE_FILE);
@@ -201,10 +209,14 @@ describe("LSP per-file skip records are bounded (#1743)", () => {
 	it("stamps the identity into every skip record", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
-		const internal = service as unknown as { permanentlyBroken: Set<string> };
+		const internal = service as unknown as {
+			clientRegistry: { permanentlyBroken: Set<string> };
+		};
 		const server = fakeServer("opengrep");
 		getServersForFileWithConfig.mockReturnValue([server]);
-		internal.permanentlyBroken.add(`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`);
+		internal.clientRegistry.permanentlyBroken.add(
+			`opengrep:${normalizeMapKey(FIXTURE_ROOT)}`,
+		);
 
 		await service.getClientForFile(FIXTURE_FILE);
 

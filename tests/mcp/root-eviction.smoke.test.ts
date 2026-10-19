@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -58,7 +59,12 @@ describe(
 				(recovered.result as { content: { text: string }[] }).content[0]?.text,
 			);
 			expect(text).not.toContain("outside_project_root");
-			expect(text).toContain("clean=1");
+			// The re-registered root was checked: one file, answered by the tool (not
+			// an outside_project_root refusal). Whether the 1 ms budget let a
+			// language server confirm it clean is not what #2052 pins; since #4322 a
+			// check no server answered is inconclusive, never "clean".
+			expect(text).toContain("Files checked: 1");
+			expect(text).toMatch(/1 with no language server answer|clean=1,/);
 		}, 180_000);
 	},
 );

@@ -20,8 +20,10 @@ type CeilingHarness = {
 		demonstratedReady: Set<string>;
 		demonstratedCold: Set<string>;
 	};
-	clientLastUsedAt: Map<string, number>;
-	makeCapacityForClient(key: string): Promise<boolean>;
+	clientRegistry: {
+		clientLastUsedAt: Map<string, number>;
+		makeCapacityForClient(key: string): Promise<boolean>;
+	};
 };
 
 afterEach(() => {
@@ -37,10 +39,12 @@ describe("LSP per-session client ceiling (#1325)", () => {
 		const newest = fakeClient(false);
 		service.state.clients.set("json:/old", oldest);
 		service.state.clients.set("yaml:/new", newest);
-		service.clientLastUsedAt.set("json:/old", 10);
-		service.clientLastUsedAt.set("yaml:/new", 20);
+		service.clientRegistry.clientLastUsedAt.set("json:/old", 10);
+		service.clientRegistry.clientLastUsedAt.set("yaml:/new", 20);
 
-		await expect(service.makeCapacityForClient("go:/next")).resolves.toBe(true);
+		await expect(
+			service.clientRegistry.makeCapacityForClient("go:/next"),
+		).resolves.toBe(true);
 		expect(vi.mocked(oldest.shutdown)).toHaveBeenCalledWith({
 			reason: "client_ceiling_lru",
 		});
@@ -54,9 +58,9 @@ describe("LSP per-session client ceiling (#1325)", () => {
 		const inUse = fakeClient(true);
 		service.state.clients.set("kotlin:/active", inUse);
 
-		await expect(service.makeCapacityForClient("json:/next")).resolves.toBe(
-			false,
-		);
+		await expect(
+			service.clientRegistry.makeCapacityForClient("json:/next"),
+		).resolves.toBe(false);
 		expect(vi.mocked(inUse.shutdown)).not.toHaveBeenCalled();
 		expect(service.state.clients.has("kotlin:/active")).toBe(true);
 	});

@@ -9,9 +9,8 @@ import { docsSectionLines } from "../support/docs-section.js";
 
 /**
  * `.github/workflows/labels.yml` runs `micnncim/action-label-syncer` with
- * `prune: true`, dispatched on every merge-train post-merge
- * (`repository_dispatch: merge-train-post-merge`), against
- * `.github/labels.yml`. Prune means the manifest is the label set: any live
+ * `prune: true`, run on every master push that touches
+ * `.github/labels.yml`, against that manifest. Prune means the manifest is the label set: any live
  * label absent from it is DELETED on the next sync. #2553's manifest never
  * listed `priority:p1`/`p2`/`p3`, so every sync silently stripped the
  * priority label off every open issue (run 34042925533's log, verbatim:
@@ -32,9 +31,8 @@ import { docsSectionLines } from "../support/docs-section.js";
  * can silently drift from what those sources say — the TYPE, AREA and
  * "reuse GitHub defaults" labels come from AGENTS.md's own
  * "Issue triage & labels" section, and the merge-train warden's labels
- * come from grepping the merge-train skill, its `scripts/lib/merge-train-*`
- * modules, and every `.github/workflows/*.yml` file for their literal
- * label strings.
+ * come from grepping the merge policy doc and every `.github/workflows/*.yml`
+ * file for their literal label strings.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
@@ -156,9 +154,8 @@ function reuseDefaultLabelsFromSection(lines: readonly string[]): string[] {
 // ── Merge-train label literals ──────────────────────────────────────────────
 //
 // Enumerated by directory scan, not a hand-typed file list, so a new
-// `scripts/lib/merge-train-*.mjs` module or `.github/workflows/*.yml`
-// workflow is swept in automatically rather than needing this test updated
-// in lockstep (the same single-source-of-truth reasoning as the AREA list).
+// `.github/workflows/*.yml` workflow is swept in automatically rather than
+// needing this test updated in lockstep (the same single-source-of-truth reasoning as the AREA list).
 
 function filesMatching(dir: string, pattern: RegExp): string[] {
 	return fs
@@ -169,15 +166,13 @@ function filesMatching(dir: string, pattern: RegExp): string[] {
 }
 
 const MERGE_TRAIN_LITERAL_SOURCE_FILES = [
-	".claude/skills/merge-train/SKILL.md",
-	...filesMatching("scripts/lib", /^merge-train-.*\.mjs$/),
+	"docs/pi-lens-merge-policy.md",
 	...filesMatching(".github/workflows", /\.ya?ml$/),
 ];
 
 /**
- * Every `train:*`, `red-ci`, `conflict` and `priority:*` label literal named
- * in the merge-train skill doc, its `scripts/lib/merge-train-*.mjs` seams,
- * or any workflow file. `priority:p1|p2|p3` is the skill doc's own
+ * Every `red-ci`, `conflict` and `priority:*` label literal named in the
+ * merge policy doc or any workflow file. `priority:p1|p2|p3` is the policy doc's own
  * pipe-alternation shorthand for three labels, not one — expanded here
  * rather than mis-read as a single literal string.
  */
@@ -185,7 +180,6 @@ function mergeTrainLabelLiterals(): string[] {
 	const names = new Set<string>();
 	for (const relPath of MERGE_TRAIN_LITERAL_SOURCE_FILES) {
 		const text = readFile(relPath);
-		for (const m of text.matchAll(/\btrain:[a-z]+\b/g)) names.add(m[0]);
 		for (const m of text.matchAll(/\bred-ci\b/g)) names.add(m[0]);
 		for (const m of text.matchAll(/\bconflict\b/g)) names.add(m[0]);
 		for (const m of text.matchAll(/\bpriority:((?:p\d+)(?:\|p\d+)*)\b/g)) {
@@ -241,8 +235,8 @@ describe("label manifest coverage (#2553)", () => {
 
 		const required = requiredLabels();
 		// Same reasoning, for the derived requirement side: today's derived
-		// set is 28 labels (4 TYPE + 12 AREA + 5 reuse-defaults + 7
-		// merge-train literals) — a floor near that catches the derivation
+		// set is 26 labels (4 TYPE + 12 AREA + 5 reuse-defaults + 4
+		// merge-train literals + the drift label) — a floor near that catches the derivation
 		// itself silently collapsing, not just a manifest that dropped one.
 		assertNonEmptyScan(
 			"label-manifest-coverage: derived required labels",

@@ -11,13 +11,14 @@
  * actual pass/fail verdict and is wired to a FINAL `if: always()` step in
  * tool-smoke.yml, so it runs on every outcome.
  *
- * Reads the run's FOUR gating layer outcomes from env (set by the
+ * Reads the run's SIX gating layer outcomes from env (set by the
  * workflow step that invokes this script), plus each layer's captured log
  * text from the file paths the workflow's own `tee` steps wrote — never
  * re-derives success/failure or re-parses anything itself beyond those
- * inputs. The four layers are the only steps in tool-smoke.yml WITHOUT
- * `continue-on-error: true` (Tool layer, LSP handshake layer, LSP gate, Format
- * layer) — the only ones whose outcome can actually turn the job red;
+ * inputs. The six layers are the only steps in tool-smoke.yml WITHOUT
+ * `continue-on-error: true` (Tool layer, LSP handshake layer, LSP gate,
+ * lens_diagnostics mode=full row, Format layer, Resolution layer) — the only ones whose outcome
+ * can actually turn the job red;
  * see scripts/lib/tool-smoke-drift.mjs's module doc for the shared
  * four-outcome classification this reuses from install-smoke-drift.mjs.
  *
@@ -26,8 +27,10 @@
  *   TOOL_LAYER_OUTCOME / TOOL_LAYER_LOG
  *   LSP_HANDSHAKE_OUTCOME / LSP_HANDSHAKE_LOG
  *   LSP_GATE_OUTCOME / LSP_GATE_LOG
+ *   LENS_FULL_OUTCOME / LENS_FULL_LOG
  *   FORMAT_LAYER_OUTCOME / FORMAT_LAYER_LOG
- *   JOB_STATUS (GitHub's `job.status` context — #2723 review F3: the three
+ *   RESOLUTION_LAYER_OUTCOME / RESOLUTION_LAYER_LOG
+ *   JOB_STATUS (GitHub's `job.status` context — #2723 review F3: the six
  *     tracked layers all read "skipped" both when a step BEFORE them failed
  *     — checkout, a setup action, npm install, build:dist — and when the
  *     job was genuinely cancelled; JOB_STATUS disambiguates the two so the
@@ -64,7 +67,9 @@ const LAYERS = /** @type {const} */ ([
 	["TOOL_LAYER_OUTCOME", "TOOL_LAYER_LOG", "Tool layer"],
 	["LSP_HANDSHAKE_OUTCOME", "LSP_HANDSHAKE_LOG", "LSP handshake layer"],
 	["LSP_GATE_OUTCOME", "LSP_GATE_LOG", "LSP diagnostics clean-gate"],
+	["LENS_FULL_OUTCOME", "LENS_FULL_LOG", "lens_diagnostics mode=full row"],
 	["FORMAT_LAYER_OUTCOME", "FORMAT_LAYER_LOG", "Format layer"],
+	["RESOLUTION_LAYER_OUTCOME", "RESOLUTION_LAYER_LOG", "Resolution layer"],
 ]);
 
 const argv = process.argv.slice(2);

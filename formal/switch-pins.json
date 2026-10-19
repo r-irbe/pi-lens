@@ -1,0 +1,1208 @@
+{
+	"$comment": "#4393: every constant a formal/<family>/*.cfg assigns (`=` or `<-`), and every module `Name == TRUE|FALSE` that is not a `<-` target, is classified here, per family. `pins`: the constant mirrors a code choice; `value` is what every `\\* expect: pass` config resolves it to (its `=` value, the definition its `<-` names, or the module's `Name == <literal>`), and `test`/`title` name a test a run reaches, in a file vitest collects, that drives the real code and asserts that behaviour, so flipping the code reds the test and flipping the model alone reds tests/config/tla-switch-pins.test.ts. `also` names further tests when one value encodes several behaviours. `narrowedBy` admits a value an as-built config uses only to cut the explored schedules, with its reason. `notCodeChoice` and `deferred` groups carry a reason for each member, and tests/config/tla-switch-pins.test.ts pins the counts of deferred and notCodeChoice members exactly, so every move between them is a visible edit. Flipping a model value and this value together, without the code, reds neither the gate nor the pin, so a change to a value here is a reviewer's call. A PR that changes a pinned behaviour flips the constant, its configs and this value together (AGENTS.md shape 68).",
+	"families": {
+		"dispatch-pipeline": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Edits",
+						"ImmediateEdits",
+						"LspEdits",
+						"SEdits",
+						"SReplacer",
+						"SReplaced"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Parallel",
+						"Orphan",
+						"SConcurrent",
+						"SInOrderNotes",
+						"SAtomic",
+						"SCallInRun"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"ClaimGap",
+						"FixRecord",
+						"FixClear",
+						"FixTomb",
+						"FixQueue",
+						"FixQueueRefresh",
+						"FixReToken",
+						"WriterBound",
+						"FixHoldWriter",
+						"SettleCapture",
+						"RestoreQueue",
+						"KeepCaptureHistory",
+						"CarryPreRunCalls",
+						"RestoreNoCapInFlight",
+						"TargetHold",
+						"RestoreGatesHold",
+						"LspMulti"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"InFlightDedupe",
+						"WidgetGuard",
+						"LspQueue",
+						"SRestore",
+						"RestoreRecheck",
+						"RestoreInFlight"
+					]
+				}
+			]
+		},
+		"file-locks": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Procs",
+						"MaxCrashes",
+						"MaxInodes",
+						"MaxGen",
+						"Rounds"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"AllowExpiry",
+						"HeartbeatStall"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"EmptyIsDead",
+						"AtomicCreate",
+						"ListedMarker",
+						"Heartbeat",
+						"OwnsTop"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"IdentityCheck",
+						"Cleanup",
+						"Recheck"
+					]
+				},
+				{
+					"reason": "Deferred: a code constant at its code value, not shrunk. Every config sets `Retries = 3`, which is `REGISTRY_WRITE_RETRIES = 3` (clients/instance-registry.ts), so the value mirrors the code; no test that drives the retry loop was matched in #4393.",
+					"constants": [
+						"Retries"
+					]
+				}
+			]
+		},
+		"format-drain": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Edits",
+						"MaxOps",
+						"MaxTurns",
+						"MaxSessions",
+						"ExtWrites",
+						"InBand"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Overlap",
+						"Orphan",
+						"IdleRetire"
+					]
+				},
+				{
+					"reason": "Mutant-only design: every as-built config sets the off value, and it breaks a guard to show a violation; no code ever had it.",
+					"constants": [
+						"GenDropsAll"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"FixQueue",
+						"FixQueueHold",
+						"FixGen",
+						"FixStamp",
+						"LspGen",
+						"StartGen",
+						"FixOrphanSync",
+						"ServiceGen",
+						"HeldResync",
+						"OrphanSyncBound",
+						"OrphanLateSync"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"MtimeAuthored",
+						"ResetClearsGuard",
+						"EnterAfterResolve"
+					]
+				}
+			]
+		},
+		"instance-reaper": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Pids",
+						"Insts",
+						"Mcp",
+						"Crashable",
+						"NoKids",
+						"MaxBirth",
+						"Reapers",
+						"Backstops",
+						"RecCmd"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Posix",
+						"PidReuse",
+						"OtherProcs",
+						"LateRecord",
+						"ScanFail"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"FootprintPrune",
+						"StalePrune",
+						"Guards",
+						"FixParts"
+					]
+				}
+			]
+		},
+		"late-aux-drain": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"AgentTouches",
+						"ExternalEdits",
+						"MaxDrains",
+						"Closes",
+						"AllowSave"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"ExtDuringGrace",
+						"Refresh",
+						"RefreshOvertake",
+						"AllowClosePublish",
+						"AllowDefer",
+						"AllowCancel"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"MaxRearms",
+						"Tol"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"RefreshOnStale",
+						"CountBind",
+						"MarkAtNotify",
+						"RefreshRebaseline",
+						"SaveExpect",
+						"Carry"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"PublishedAtCheck",
+						"MtimeGate",
+						"ClosePublishFiltered"
+					]
+				}
+			]
+		},
+		"lsp-crash": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Shape",
+						"MaxCrashes",
+						"Uptimes",
+						"MaxEvicts",
+						"DerivedMissKinds"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Concurrent",
+						"Silent"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"Trip"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"LeaseCheck",
+						"FastPath",
+						"Fix",
+						"DerivedMissPath",
+						"RegStreak"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"PingGuard",
+						"WaitTimeout",
+						"WindowTrip",
+						"ClearReadyOnDeath",
+						"ColdGuard",
+						"RegClear",
+						"ReadyGuard",
+						"DeriveGuard"
+					]
+				}
+			]
+		},
+		"lsp-diagnostics-freshness": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"SkippedWait",
+						"Preserve",
+						"MaxPubs"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"VersionedServer",
+						"AsyncServer",
+						"ReplyFirst"
+					]
+				},
+				{
+					"reason": "Mutant-only design: every as-built config sets the off value, and it breaks a guard to show a violation; no code ever had it.",
+					"constants": [
+						"Mutant"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"SeedFirstPush",
+						"Fence"
+					]
+				}
+			]
+		},
+		"lsp-document-lifecycle": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Touches",
+						"StartOpen"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"TouchAfterRename"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"QueuedClose"
+					]
+				}
+			]
+		},
+		"lsp-ephemeral-data-dir": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"ProcIds",
+						"Pids",
+						"Roots",
+						"MaxStarts"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"UniqueToken",
+						"SafeSweep"
+					]
+				}
+			]
+		},
+		"lsp-idle-reset": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Sweep",
+						"Cascade",
+						"WarmAttach"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"SweepOverrun"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"Reaping",
+						"FixParts"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"HoldCheck"
+					]
+				}
+			]
+		},
+		"lsp-rename-edit": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Files",
+						"Target",
+						"Opened",
+						"Flow",
+						"PiWriteFiles",
+						"ExternalFiles",
+						"TouchFiles",
+						"SyncBeforeCapture",
+						"ForceFirstOpen",
+						"MaxWrites",
+						"MaxClock"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"KeepMtime",
+						"WatcherPrompt",
+						"AbortAfterText",
+						"Revert",
+						"SplitApply"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"Margin"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"SyncCarriesRead",
+						"StampedPrepare",
+						"FirstOpenExempt"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Rule"
+					]
+				}
+			]
+		},
+		"lsp-server-content": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Writes",
+						"Cascade",
+						"EqualLength",
+						"LossyFp",
+						"RecentA",
+						"MidSweeps",
+						"PriorInFlight"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"FifoLanding"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"FixCoalesce",
+						"FixDrop"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Debounce",
+						"SweepKey"
+					]
+				}
+			]
+		},
+		"opaque-baseline-slot": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Scenario"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Sequential",
+						"LatchClear"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"Cap"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"Keying",
+						"Dedupe",
+						"Retire",
+						"ClearRule"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Subtract",
+						"Observe"
+					]
+				}
+			]
+		},
+		"pending-runner-store": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Slots"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Peek",
+						"Drain",
+						"Requeue",
+						"NoHandle"
+					]
+				}
+			]
+		},
+		"read-guard": {
+			"pins": {
+				"AuthorBranch": {
+					"value": "TRUE",
+					"test": "tests/index-3521-fork-tree-witness.test.ts",
+					"title": "keeps the authorship of a brand-new file whose write is on the kept branch (#3603)"
+				},
+				"AuthorIdentity": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "ends bash authorship when another writer changes the bytes (#4131 R1)"
+				},
+				"BlockRelease": {
+					"value": "\"end\"",
+					"test": "tests/clients/runtime-tool-result.test.ts",
+					"title": "refuses a %s oldText edit in the same run once the blocked read's call ended"
+				},
+				"BranchFilter": {
+					"value": "TRUE",
+					"test": "tests/index-3521-fork-tree-witness.test.ts",
+					"title": "blocks an edit backed only by a read on the abandoned branch (A1)"
+				},
+				"BridgeNoAdvance": {
+					"value": "TRUE",
+					"test": "tests/clients/mutation-bridge.test.ts",
+					"title": "ends the authorship a ${provenance ?? \"co-process\"} write lands on",
+					"also": [
+						{
+							"test": "tests/clients/runtime-tool-call.test.ts",
+							"title": "spends an observed bridge license after one whole-file write (SpendLicense)"
+						}
+					]
+				},
+				"CoverageCheck": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "sizes a raced read from the delivered text, not from lines another writer appended"
+				},
+				"CreationHandlerEvidence": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not credit a write that lands between the host write and its tool_result (CreationAtResult)"
+				},
+				"DrainMode": {
+					"value": "\"fenced\"",
+					"test": "tests/clients/runtime-agent-end.test.ts",
+					"title": "drains an abort-requeued format ${where} as ${verdict}",
+					"narrowedBy": {
+						"\"atomic\"": "The drain runs inside the turn boundary, so no /tree lands between its settle and its write: a schedule the fenced drain also takes. Configs that do not test the drain's timing use it to cut states (formal/read-guard/README.md, Switches)."
+					}
+				},
+				"FileTimeCheck": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "leaves FileTime to recordWritten, so a write after it stays visible on an unhashed attachment"
+				},
+				"FormatStamp": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not credit the deferred format's bytes to an unhashed read (UnhashedFormatStamp)"
+				},
+				"HandlerEvidence": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not credit a write that lands after pi's read and before its tool_result (EvidenceAtResult)"
+				},
+				"InjectNamesAuthorship": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "allows the next edit after a bash write and its own oldText edits, also after a branch move (#4387)"
+				},
+				"KeepEmptyScope": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "keeps the in-flight line refused after a format drain and a move (#4387 S14)"
+				},
+				"MtimeAuthored": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard.test.ts",
+					"title": "blocks zero-read edit on a file another writer touched after the guard started (#3520)"
+				},
+				"OldTextNeedsNamedRead": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "keeps a line another writer changed during an own oldText edit refused when only a bridge read was there (#4387 S12)"
+				},
+				"OldTextRetires": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not retire a write's authorship at its own oldText edit (#4387)"
+				},
+				"OwnEditRescue": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "keeps another writer's change stale after an own positional edit (UnhashedOwnEditRescue)"
+				},
+				"OwnEditSkipsReloc": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not record a relocated edit at the agent's line numbers (OwnEditRelocInsert)"
+				},
+				"PipelineCreditsOldText": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "makes no authorship from an oldText edit of a file the conversation only read (#4387 G3)"
+				},
+				"ProvisionalCredit": {
+					"value": "FALSE",
+					"test": "tests/clients/runtime-tool-result.test.ts",
+					"title": "records a relative nested read under its parent's transcript identity, after a provisional record keyed by its own call"
+				},
+				"RecordAuthoritative": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "allows a one-line edit at the attachment's line numbers (AutofixFalseBlock)"
+				},
+				"RecordOwnEdit": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "allows re-editing the line the agent just wrote (OwnReEdit)"
+				},
+				"RelocFromLatest": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not relocate from the read that delivered the first line when a newer read delivered the last (SpanSnapshotFixAnyReloc)"
+				},
+				"RetireAtWrite": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not let an own bash write re-author bytes another writer changed (#4131 F6 P2)"
+				},
+				"RevokeFailedRead": {
+					"value": "TRUE",
+					"test": "tests/clients/runtime-tool-result.test.ts",
+					"title": "drops the capture of a read that errored, so an oldText edit of unseen lines is refused"
+				},
+				"SnapshotCheck": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "blocks a spanning edit when the SECOND read's line went stale"
+				},
+				"SpanSnapshot": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "does not let a newer context-only read cancel a stale line (ContextSuppress)"
+				},
+				"WholeVouchesPastEnd": {
+					"value": "FALSE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "lets an older read speak for a line past a newer whole-file read's end (WholeVouchesPastEnd)"
+				},
+				"ZeroReadInjects": {
+					"value": "TRUE",
+					"test": "tests/clients/read-guard-conversation-evidence.test.ts",
+					"title": "keeps a bash write's whole-file authorship vouching after its own positional edit (#4387)"
+				}
+			},
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which agent tools, edit spans, other-writer kinds, boundaries and formatter shapes TLC explores; no code branch reads it.",
+					"constants": [
+						"N0",
+						"MaxLen",
+						"AgentOps",
+						"Ops",
+						"Spans",
+						"ExtWrites",
+						"ExtKinds",
+						"ExtPhases",
+						"FixKind",
+						"FormatDrain",
+						"Bounds",
+						"MaxBounds"
+					]
+				},
+				{
+					"reason": "Input, not a choice: `Hashes` stands for a file at most READ_HASH_MAX_LINES long, and `Ctx` for the user's contextLines setting; the configs run both values of each.",
+					"constants": [
+						"Hashes",
+						"Ctx"
+					]
+				},
+				{
+					"reason": "Inert in every as-built config: the model reads `ForkImport` and `ForkAtBoundary` only when BranchFilter = FALSE, and `SuppressByNewerContext` only when SpanSnapshot = FALSE (ReadGuard.tla Fork, Tree and SnapBlock). The pinned BranchFilter and SpanSnapshot carry the code's choice.",
+					"constants": [
+						"ForkImport",
+						"ForkAtBoundary",
+						"SuppressByNewerContext"
+					]
+				}
+			]
+		},
+		"review-graph-promotion": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Procs",
+						"MaxSeq",
+						"MaxBuilds"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"AllowCrash",
+						"AllowWorkerDeath"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Conc",
+						"GenGate",
+						"SweepLiveness",
+						"FlushCurrentOnly"
+					]
+				}
+			]
+		},
+		"review-graph-signatures": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Procs",
+						"Writers",
+						"Observers",
+						"Files",
+						"MaxWrites"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"AllowFastpath",
+						"FixFpNoop",
+						"FixFpExtract"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"SharedStore"
+					]
+				}
+			]
+		},
+		"session-lifecycle": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Transitions",
+						"Writers",
+						"FileLess",
+						"MaxSteps",
+						"MaxTurns"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"LateHandlers"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"FixParts",
+						"SecPolicy"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"ForwardExpiredUnstarted",
+						"Policy",
+						"Fence"
+					]
+				}
+			]
+		},
+		"session-registry": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"SharedSec",
+						"Reaper"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Contention",
+						"PeerStuck"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"RootRemoval",
+						"Teardown",
+						"FixParts"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"HbRepair",
+						"ClearIntent"
+					]
+				}
+			]
+		},
+		"session-straddle": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"QuietWindow"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"ToolDrift",
+						"Strays",
+						"Overflow",
+						"LateAdmit",
+						"EarlyAbandon"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"FixParts"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"ResetClears",
+						"Dedupe"
+					]
+				}
+			]
+		},
+		"snapshot-freshness": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Procs",
+						"MaxEdits"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"ColdSeeds",
+						"UnlockedEdits"
+					]
+				},
+				{
+					"reason": "Mutant-only design: every as-built config sets the off value, and it breaks a guard to show a violation; no code ever had it.",
+					"constants": [
+						"NeverSeqMutant",
+						"RefuseAllMutant",
+						"AlwaysIncompleteMutant"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"LogAlloc",
+						"CompleteStamp",
+						"SeqCAS",
+						"ReaderRule"
+					]
+				}
+			]
+		},
+		"snapshot-promotion": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Procs",
+						"MaxSeq",
+						"MaxSaves"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"AllowCrash"
+					]
+				},
+				{
+					"reason": "Mutant-only design: every as-built config sets the off value, and it breaks a guard to show a violation; no code ever had it.",
+					"constants": [
+						"SessionReset",
+						"RefuseAll"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"SweepLiveness",
+						"PromoteCAS",
+						"AdmissionCAS",
+						"CASAtomic"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"GenGate",
+						"SingleActive"
+					]
+				}
+			]
+		},
+		"store-freshness": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Writes",
+						"SizeMode",
+						"MaxTime",
+						"MinReadDelay",
+						"MaxServes"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Skew",
+						"AllowRegress",
+						"ServerLag"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"Tol",
+						"Gran"
+					]
+				},
+				{
+					"reason": "Mutant-only design: every as-built config sets the off value, and it breaks a guard to show a violation; no code ever had it.",
+					"constants": [
+						"SizeOnly"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"Stamp",
+						"Gate",
+						"ForceHash",
+						"StatAt",
+						"Binding",
+						"Latch"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"SizeKey",
+						"BindingAt"
+					]
+				}
+			]
+		},
+		"tree-sitter-trap-budget": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Inputs",
+						"Persistent",
+						"Files",
+						"Contents",
+						"Consumers",
+						"Swallowers",
+						"Owners",
+						"MaxHeap",
+						"MaxPend",
+						"PoisonCandidates",
+						"EnableFiles",
+						"EnableExt",
+						"EnableBatch",
+						"EnableRaw"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Flaky"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: no single as-built value yet. This family's `expect: pass` configs set it both ways (a pass config here is not an as-built claim), so the family must first name its as-built value before a pin can agree with it.",
+					"constants": [
+						"Coalesce",
+						"BatchHealDrop"
+					]
+				},
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Decay",
+						"Classify",
+						"KeyInputs",
+						"KeyExtractor",
+						"ParseNoCaller",
+						"ConsumeSharedKey",
+						"OwnHealOnly",
+						"FullIdentity",
+						"GuardF1",
+						"KeyBatch",
+						"CacheGuard",
+						"DistinctBatchKeys"
+					]
+				},
+				{
+					"reason": "Deferred: code constants at their code values, not shrunk. The as-built configs set `Budget = 3` (`WASM_TRAP_BUDGET = 3`) and `LatchThreshold = 2` (`GRAMMAR_TRAP_LATCH_THRESHOLD = WASM_TRAP_BUDGET - 1`, clients/tree-sitter-client.ts), so the values mirror the code; no budget or latch test was matched in #4393.",
+					"constants": [
+						"LatchThreshold",
+						"Budget"
+					]
+				}
+			]
+		},
+		"turn-end-delivery-holds": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"SizeSet",
+						"MaxTurns",
+						"MaxGen"
+					]
+				},
+				{
+					"reason": "A code constant at model scale (a retry count, a cap, a tolerance or a budget in ticks): the model shrinks it to bound the state space, so its value is not the code's.",
+					"constants": [
+						"CapChars",
+						"Sep",
+						"RearmMax"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"PeekCommit",
+						"DrainAsk",
+						"ReOffer",
+						"ParkKey",
+						"Lead",
+						"Recheck",
+						"Fence",
+						"OnReached",
+						"DrainFence"
+					]
+				}
+			]
+		},
+		"turn-end-late-scan": {
+			"notCodeChoice": [
+				{
+					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",
+					"constants": [
+						"Edits",
+						"MaxSess",
+						"MaxScan",
+						"MaxEnt"
+					]
+				},
+				{
+					"reason": "Environment: a host, OS, server or scheduling behaviour the code must tolerate, not a choice the code makes.",
+					"constants": [
+						"Foreign"
+					]
+				}
+			],
+			"deferred": [
+				{
+					"reason": "Deferred: every `expect: pass` config agrees on one value, but no existing dispatcher or entry-point test was matched to it in #4393, which pinned read-guard first.",
+					"constants": [
+						"Settle",
+						"SettlePoison",
+						"Poison",
+						"Late",
+						"InFlight",
+						"CarryRec",
+						"EntryScope",
+						"TakeBackoff",
+						"Backoff",
+						"StampAt",
+						"Join"
+					]
+				}
+			]
+		}
+	}
+}

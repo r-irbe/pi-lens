@@ -1,3 +1,4 @@
+// mutation-lane: exclude
 /**
  * #2439 — oxlint was a devDependency with no npm script and no CI job, so an
  * undefined identifier (a `ReferenceError` at runtime) in a `scripts/*.mjs`

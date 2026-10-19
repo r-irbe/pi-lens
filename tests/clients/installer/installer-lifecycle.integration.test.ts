@@ -228,6 +228,25 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
+/**
+ * #4019: `taskkill /F /T` is issued before `safeSpawnAsync` resolves, but Windows
+ * reaps a tree asynchronously and a loaded runner can lag. Poll to a deadline
+ * rather than sleeping a fixed interval, so the assertion stays "the tree is
+ * gone" instead of "it was gone within one arbitrary sleep". Returns true once
+ * the pid is no longer alive.
+ */
+async function waitForPidDeath(
+	pid: number,
+	deadlineMs: number,
+): Promise<boolean> {
+	const deadline = Date.now() + deadlineMs;
+	while (Date.now() < deadline) {
+		if (!pidAlive(pid)) return true;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	return !pidAlive(pid);
+}
+
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) removeTempDirSync(dir);
 });
@@ -242,6 +261,13 @@ describe("installer process lifecycle (#945)", () => {
 	// 30s installTool budget). 15s still catches a true hang.
 	const REAL_PROCESS_TIMEOUT_MS = 15_000;
 
+	// #4019: see the call site. Windows' cold `cmd.exe /c node` startup for the
+	// fake npm shares this budget with the behaviour under test, so it must sit far
+	// outside startup while still being a timeout the fake npm cannot beat (it
+	// never exits on its own).
+	const WINDOWS_TREE_KILL_TIMEOUT_MS = 3_000;
+	const CHILD_DEATH_DEADLINE_MS = 5_000;
+
 	// lane: windows-vitest
 	it.skipIf(process.platform !== "win32")(
 		"kills a fake npm's complete Windows process tree on timeout",
@@ -254,13 +280,22 @@ describe("installer process lifecycle (#945)", () => {
 				...testEnv(home, counter, script),
 				FAKE_NPM_SLOW: "1",
 				FAKE_NPM_CHILD_PID: childPidFile,
-				PI_LENS_INSTALL_TIMEOUT_MS: "500",
+				// #4019: this budget is the INSTALLER's wait before its `taskkill /F /T`
+				// (clients/safe-spawn.ts), and it starts when npm is spawned — so on
+				// Windows it also has to cover the fake npm's cold `cmd.exe /c node`
+				// startup before that npm writes its grandchild's pid. At 500 ms a
+				// loaded runner could time out first, leaving the test to observe an
+				// EMPTY tree instead of a killed one (it failed on exactly that race,
+				// with "Process timed out after 500ms" in the assertion payload).
+				PI_LENS_INSTALL_TIMEOUT_MS: String(WINDOWS_TREE_KILL_TIMEOUT_MS),
 			});
 			expect(result.code).toBe(0);
 			expect(fs.existsSync(childPidFile), JSON.stringify(result)).toBe(true);
 			const childPid = Number(fs.readFileSync(childPidFile, "utf8"));
-			await new Promise((resolve) => setTimeout(resolve, 250));
-			expect(pidAlive(childPid)).toBe(false);
+			expect(
+				await waitForPidDeath(childPid, CHILD_DEATH_DEADLINE_MS),
+				`pid ${childPid} still alive after ${CHILD_DEATH_DEADLINE_MS}ms; ${JSON.stringify(result)}`,
+			).toBe(true);
 		},
 		REAL_PROCESS_TIMEOUT_MS,
 	);
@@ -407,15 +442,18 @@ describe("installer process lifecycle (#945)", () => {
 				),
 				result.stdout,
 			).toBe(true);
-			// R2-F2: the RECORD, not just the disk. Keeping the tree must NOT
-			// launder the outcome — pi-lens still cannot run this server, so the
-			// attempt stays `failed` and `classifyInstallOutcome` still grades the
-			// row `✗`. A keep that flipped this to "succeeded" would be the
-			// re-hiding #2722 forbids.
+			// R2-F2: on POSIX the RECORD, not just the disk, must retain the failed
+			// outcome while keeping an intact tree. Windows sees the marker before
+			// truncation and therefore legitimately records a successful stdio probe.
 			const kept = JSON.parse(result.stdout) as {
 				attempt?: { outcome?: string; reason?: string };
 			};
-			expect(kept.attempt?.outcome, result.stdout).toBe("failed");
+			// Windows pipes deliver the transport-required marker before the bounded
+			// tail is discarded, so this same fixture is a valid stdio server there.
+			// POSIX loses the marker at exit and exercises the inconclusive keep path.
+			expect(kept.attempt?.outcome, result.stdout).toBe(
+				process.platform === "win32" ? "succeeded" : "failed",
+			);
 		},
 		REAL_PROCESS_TIMEOUT_MS,
 	);
@@ -449,11 +487,13 @@ describe("installer process lifecycle (#945)", () => {
 			expect(
 				fs.existsSync(path.join(nodeModules, "svelte-language-server")),
 				result.stdout,
-			).toBe(false);
+			).toBe(process.platform === "win32");
 			const payload = JSON.parse(result.stdout) as {
 				attempt?: { outcome?: string };
 			};
-			expect(payload.attempt?.outcome, result.stdout).toBe("failed");
+			expect(payload.attempt?.outcome, result.stdout).toBe(
+				process.platform === "win32" ? "succeeded" : "failed",
+			);
 		},
 		REAL_PROCESS_TIMEOUT_MS,
 	);

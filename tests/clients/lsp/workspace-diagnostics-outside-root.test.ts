@@ -68,6 +68,7 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 			id: "typescript",
 			name: "typescript",
 			extensions: [".ts"],
+			idleEviction: "resident",
 			root: async (filePath: string) =>
 				filePath.startsWith(sessionDir) ? sessionDir : foreignDir,
 			spawn: vi.fn(async () => ({ process: {}, source: "test" })),
@@ -82,7 +83,10 @@ describe("#2052 sweep over a foreign root does not report or cache a clean", () 
 			root: foreignDir,
 			getWorkspaceDiagnosticsSupport: () => ({ advertised: false }),
 			getOperationSupport: () => ({}),
-			notify: { open: vi.fn(async () => {}) },
+			notify: {
+				announceCreated: () => undefined,
+				open: vi.fn(async () => {}),
+			},
 			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
 			getDiagnostics: vi.fn(() => []),
 		});

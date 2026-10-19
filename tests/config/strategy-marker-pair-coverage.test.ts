@@ -19,8 +19,10 @@
  * renamed test, or a stale row reds here.
  *
  * What it cannot see: whether the named test actually exercises the
- * interaction. It checks that a test with that title exists as code in the
- * named file and names the server; the reviewer judges the rest.
+ * interaction. It checks that a test a run reaches carries that title in the
+ * named file vitest collects (`testDeclarations`: a skipped, conditional or
+ * uncalled test is absent) and that the file names the server; the reviewer
+ * judges the rest.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -34,7 +36,9 @@ import {
 	assertNonEmptyScan,
 	escapeRegExp,
 	stripSource,
+	testDeclarations,
 } from "../support/sweep-kit.js";
+import { vitestCollects } from "../support/vitest-collection.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -45,6 +49,8 @@ const repoRoot = path.resolve(
 export const BEHAVIOUR_MARKERS = [
 	"diagnosticsFence",
 	"emptyFirstPublish",
+	// #3548: typos' close-publish marker.
+	"publishesOnClose",
 	"reopenOnResync",
 	"rescansOnSave",
 	"silentOnClean",
@@ -69,6 +75,11 @@ const PAIR_TESTS: Record<string, PairTest> = {
 		file: "tests/clients/lsp/late-auxiliary-findings.test.ts",
 		title:
 			"REPLAY-SAVE-RESCAN: opengrep's didSave rescan of v1 cannot answer v2's send, so v1 is withheld after a re-touch (#3482 surplus)",
+	},
+	"typescript:emptyFirstPublish+silentOnClean": {
+		file: "tests/clients/lsp/cascade-tier.test.ts",
+		title:
+			"keeps TypeScript's empty-first hold and silent-clean cascade markers together",
 	},
 };
 
@@ -123,12 +134,24 @@ export function auditPairCoverage(
 			problems.push(`MISSING ${pair}: ${file} does not exist`);
 			continue;
 		}
-		// Comments blanked, strings kept: the title and the server id must be
-		// literals in code, not in a comment.
-		const code = stripSource(source, { strings: "keep" });
-		const titleCall = new RegExp(`\\(\\s*(["'\`])${escapeRegExp(title)}\\1`);
-		if (!titleCall.test(code))
+		if (!vitestCollects(file)) {
+			problems.push(
+				`NOT A TEST FILE ${pair}: ${file} is not a test file vitest collects`,
+			);
+			continue;
+		}
+		// The title counts only on a test a run reaches (#4393's shared walker):
+		// not a comment, a skipped or conditional suite, a dead branch or an
+		// uncalled function. The server id must be a literal in code.
+		const live = testDeclarations(source).some(
+			(declaration) =>
+				declaration.live &&
+				(declaration.callee === "it" || declaration.callee === "test") &&
+				declaration.title === title,
+		);
+		if (!live)
 			problems.push(`NO TEST ${pair}: ${file} has no test titled "${title}"`);
+		const code = stripSource(source, { strings: "keep" });
 		const server = pair.slice(0, pair.indexOf(":"));
 		if (!new RegExp(`(["'\`])${escapeRegExp(server)}\\1`).test(code))
 			problems.push(`SERVER ${pair}: ${file} never names "${server}"`);
@@ -212,6 +235,51 @@ describe("strategy marker pair coverage (#3491)", () => {
 					reads(`it.each([1])(\n\t"${title}",\n\t() => { "php"; },\n);\n`),
 				),
 			).toEqual([]);
+		});
+
+		it("reds a pair test no run reaches: a skipped or conditional suite, a dead branch, an uncalled function, or a support file", () => {
+			// Recurrence: #4399 review F1, the same title lookup as the TLA+
+			// switch pins. Each form kept a pair "tested" that vitest never ran.
+			const tests = { [pair]: { file, title } };
+			const body = `"${title}", () => { "php"; }`;
+			for (const source of [
+				`describe.skip("s", () => {\n\tit(${body});\n});\n`,
+				`describe.skipIf(true)("s", () => {\n\tit(${body});\n});\n`,
+				`if (process.pid < 0) it(${body});\n`,
+				`const never = () => it(${body});\n`,
+				// #4399 verify r2 F2 and Q5: an options skip, unread options, a
+				// body skip (state-space rows 7 to 10).
+				`it("${title}", { skip: true }, () => { "php"; });\n`,
+				`describe("s", { skip: true }, () => {\n\tit(${body});\n});\n`,
+				`it("${title}", opts, () => { "php"; });\n`,
+				`it("${title}", (ctx) => { ctx.skip(); "php"; });\n`,
+			])
+				expect(auditPairCoverage([pair], tests, {}, reads(source))).toEqual([
+					`NO TEST ${pair}: ${file} has no test titled "${title}"`,
+				]);
+			const support = "tests/support/x.ts";
+			expect(
+				auditPairCoverage(
+					[pair],
+					{ [pair]: { file: support, title } },
+					{},
+					(name) => (name === support ? `it(${body});\n` : null),
+				),
+			).toEqual([
+				`NOT A TEST FILE ${pair}: ${support} is not a test file vitest collects`,
+			]);
+			// #4399 verify r2 F3: vitest.config.ts excludes tests/fixtures/**.
+			const excluded = "tests/fixtures/x.test.ts";
+			expect(
+				auditPairCoverage(
+					[pair],
+					{ [pair]: { file: excluded, title } },
+					{},
+					(name) => (name === excluded ? `it(${body});\n` : null),
+				),
+			).toEqual([
+				`NOT A TEST FILE ${pair}: ${excluded} is not a test file vitest collects`,
+			]);
 		});
 
 		it("reds a stale row, a missing file, and a reasonless exemption", () => {

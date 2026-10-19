@@ -1,0 +1,50 @@
+id: advisory-registry-subset
+language: TypeScript
+severity: info
+metadata:
+  category: pi-lens-self-scan
+message: "Hand-enumerated registry subset — explain the excluded ids or use the registry"
+ignores:
+  - "**/tests/**"
+note: |
+  Advisory only: `severity: info` self-scan rules are printed by
+  `npm run astgrep:self-scan` and never gate or enter the baseline
+  (scripts/lib/astgrep-self-scan.mjs), and are reported only in files
+  changed against a diff base (`--base <ref>`, CI's GITHUB_BASE_REF), or
+  everywhere with `--all-advisory`. This is a population-screening
+  prompt: two or more LSP server ids from clients/lsp/server.ts in a regex
+  alternation (any branch position) or in a string array (any position,
+  either quote style). The AST matcher does not scan comments or ordinary
+  strings. Tool and language registries remain a follow-up because their
+  larger populations need a separate low-noise rule shape.
+
+  Admission classes (every current hit belongs to one; the reader decides
+  whether a new hit needs a reason in the owning change):
+  - Extension / shell-name regexes (`file-role.ts`, `word-index.ts`,
+    `cache-manager.ts`, `jscpd-client.ts`, `tree-sitter-client.ts`,
+    `git-guard.ts`): file suffixes or shell binaries that share a spelling
+    with a server id; lexical coincidence, not a registry subset.
+  - Language-kind and runner-applicability arrays (`language-registry.ts`,
+    `tree-sitter-shared.ts`, `tree-sitter.ts`, `review-graph/builder.ts`,
+    `fact-rules.ts`, `biome-client.ts`, `ast-grep-napi.ts`,
+    `integration.ts`, `spotbugs.ts`, `test-runner-client.ts`,
+    `trivy-config.ts`): file-kind or language ids, an intentional
+    per-consumer applicability subset.
+  - `clients/file-kinds.ts` CODE_KINDS and NON_CODE_KINDS: derived
+    partitions of one registry, not independent registry choices.
+  - `clients/lsp/server.ts` OPENGREP_KINDS and AST_GREP_KINDS: auxiliary
+    servers attach to a deliberate cross-language subset.
+  - `clients/installer/index.ts` GITHUB_TOOLS: tool names, enforced against
+    the tool registry by tool-registry-consistency.
+rule:
+  any:
+    - kind: regex
+      regex: '^/[^/\n]*\b(?:typescript|deno|python|python-jedi|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)\b[^/\n]*\|[^/\n]*\b(?:typescript|deno|python|python-jedi|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)\b[^/\n]*/[dgimsuvy]*$'
+    - kind: array
+      has:
+        kind: string
+        regex: '^["''](typescript|deno|python|python-jedi|go|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)["'']$'
+        follows:
+          kind: string
+          regex: '^["''](typescript|deno|python|python-jedi|go|rust|ruby|php|powershell|csharp|omnisharp|fsharp|java|kotlin|swift|dart|lua|cpp|zig|haskell|elixir|expert|gleam|tinymist|marksman|ocaml|clojure|cue|terraform|nix|bash|fish|cmake|docker|yaml|json|html|toml|prisma|vue|svelte|css|opengrep|ast-grep|zizmor|typos)["'']$'
+          stopBy: end

@@ -46,9 +46,16 @@
  * behavior change beyond "no nudges".
  */
 import type { FilesTouchedPayload } from "./bus-publish.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
+import { hashText } from "./finding-identity.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
 import type { ReadGuard } from "./read-guard.js";
+import {
+	defineSessionStore,
+	type LineageHandle,
+	type SessionScope,
+} from "./session-scope.js";
 
 const BUS_FILES_TOUCHED_EVENT = "pilens:files:touched";
 const MAX_NAMES_SHOWN = 5;
@@ -75,8 +82,12 @@ const MAX_NAMES_SHOWN = 5;
 type AccumulatedFileOrigin = "local" | "cross-process";
 
 interface AccumulatedFile {
+	/** The accumulator key (`normalizeMapKey` form), for the `agent_nudge` row's hash (#3873). */
+	key: string;
 	/** Original (non-normalized) path, for display. First-seen form wins. */
 	displayPath: string;
+	/** The pi session that wrote a cross-process touch, when its record named one (#3873). */
+	originSessionId?: string;
 	reasons: Set<FilesTouchedPayload["reason"]>;
 	origin: AccumulatedFileOrigin;
 	/**
@@ -107,10 +118,123 @@ const _touched = new Map<string, AccumulatedFile>();
 // "only nudge for files the session saw" rule.
 let _relevanceFilteredCount = 0;
 
+// #3873 O7: how many non-empty queue drains this process has made. An
+// `agent_nudge` row carries the drain it came from, so the same file in three
+// rows of three drains reads as three deliveries of one touch (a replay), and
+// in one drain as one.
+let _queueEpoch = 0;
+
+// #3598: model-facing advisories a producer cannot put in a tool result because
+// its tool result was already delivered (the deferred agent_end drain). Same
+// `context` channel as `_touched`, but drained per session scope (#3748): the
+// queue is process-global while sessions are not, so an untagged advisory was
+// delivered to, or drained by, whichever session's `context` call came first.
+// Bounded so a wedged producer cannot grow it.
+const MAX_QUEUED_ADVISORIES = 8;
+
+interface QueuedAdvisory {
+	/** The scope that queued it; current while that scope is live. */
+	readonly scope: LineageHandle;
+	readonly text: string;
+}
+
+const _advisories: QueuedAdvisory[] = [];
+
+/** One counted row per distinct (why, scope) a queued advisory never reached the model. */
+function countDroppedAdvisory(
+	why: "cap" | "scope-retired",
+	scopeId: number,
+): void {
+	incrementDegradationCount({
+		kind: "agent-advisory-dropped",
+		subject: `${why}:${scopeId}`,
+		reason:
+			why === "cap"
+				? `an agent advisory of scope ${scopeId} was dropped: ${MAX_QUEUED_ADVISORIES} were already queued`
+				: `an agent advisory of scope ${scopeId} was dropped: its session scope retired before its next context call`,
+	});
+}
+
+/** Drop what a retired scope queued: no later `context` call belongs to it. */
+function pruneRetiredAdvisories(): void {
+	const live: QueuedAdvisory[] = [];
+	for (const entry of _advisories) {
+		if (entry.scope.isCurrent()) live.push(entry);
+		else countDroppedAdvisory("scope-retired", entry.scope.scopeId);
+	}
+	_advisories.splice(0, _advisories.length, ...live);
+}
+
+/**
+ * Queue one advisory for the next `context` call of `scope`, the session the
+ * producer ran in (capture it before the first await). Not gated by the nudge
+ * kill switch: it reports that an edit of the agent's may be gone, which is a
+ * correctness signal, not a formatting nudge.
+ */
+export function queueAgentAdvisory(text: string, scope: LineageHandle): void {
+	pruneRetiredAdvisories();
+	if (_advisories.length >= MAX_QUEUED_ADVISORIES) {
+		countDroppedAdvisory("cap", scope.scopeId);
+		return;
+	}
+	_advisories.push({ scope, text });
+}
+
+/**
+ * #3612: a scope's undelivered advisories, as a session store. A `/reload`
+ * continues the conversation under a new scope, so they move to it; every
+ * other start leaves them to the session that queued them (#3748).
+ */
+export const agentAdvisoryStore = defineSessionStore<string[]>({
+	name: "agent-advisories",
+	policy: {
+		startup: "none",
+		new: "none",
+		resume: "none",
+		fork: "none",
+		reload: "adopt",
+	},
+	snapshot: (scope) => {
+		const texts: string[] = [];
+		for (const entry of _advisories)
+			if (entry.scope.scopeId === scope.scopeId) texts.push(entry.text);
+		return texts;
+	},
+	restore: (scope, payload, ctx) => {
+		// Only the slot is the queue as the predecessor's shutdown left it; a
+		// sidecar is a past turn's, whose advisories may have been delivered.
+		if (ctx.source !== "slot" || !Array.isArray(payload))
+			return { itemsIn: 0, itemsKept: 0 };
+		const handle = scope.capture();
+		const ownCount = () => {
+			let count = 0;
+			for (const entry of _advisories)
+				if (entry.scope.scopeId === scope.scopeId) count += 1;
+			return count;
+		};
+		const before = ownCount();
+		for (const text of payload) {
+			if (typeof text !== "string") continue;
+			// Re-tag the predecessor's entry, so the prune does not count a
+			// carried advisory as dropped.
+			const at = _advisories.findIndex(
+				(entry) => !entry.scope.isCurrent() && entry.text === text,
+			);
+			if (at === -1) queueAgentAdvisory(text, handle);
+			else _advisories[at] = { scope: handle, text };
+		}
+		return { itemsIn: payload.length, itemsKept: ownCount() - before };
+	},
+	reason:
+		"the advisories a session queued and has not seen; a reload keeps the conversation, so they reach its next context call",
+});
+
 /** Test-only: clear accumulator state between test files/cases. */
 export function _resetAgentNudgeForTests(): void {
+	_advisories.length = 0;
 	_touched.clear();
 	_relevanceFilteredCount = 0;
+	_queueEpoch = 0;
 	_enabledCache = undefined;
 }
 
@@ -175,6 +299,7 @@ function recordTouchedEvent(
 			existing.contentDelivered = false;
 		} else {
 			_touched.set(mapKey, {
+				key: mapKey,
 				displayPath: rawPath,
 				reasons: new Set([payload.reason]),
 				origin: "local",
@@ -209,7 +334,11 @@ function recordTouchedEvent(
  * so entries reaching this function are already the "new, foreign" set.
  */
 export function recordCrossProcessTouches(
-	entries: Array<{ path: string; reason: FilesTouchedPayload["reason"] }>,
+	entries: Array<{
+		path: string;
+		reason: FilesTouchedPayload["reason"];
+		sessionId?: string;
+	}>,
 ): void {
 	if (!isAgentNudgeEnabled()) return;
 	for (const entry of entries) {
@@ -224,7 +353,11 @@ export function recordCrossProcessTouches(
 			existing.contentDelivered = false;
 		} else {
 			_touched.set(mapKey, {
+				key: mapKey,
 				displayPath: entry.path,
+				...(entry.sessionId !== undefined && {
+					originSessionId: entry.sessionId,
+				}),
 				reasons: new Set([entry.reason]),
 				origin: "cross-process",
 				contentDelivered: false,
@@ -350,6 +483,28 @@ export function wireAgentNudgeSubscriber(
  */
 export function consumeAgentNudge(
 	dbg?: (msg: string) => void,
+	/** The session scope of this `context` call; none drains no advisory. */
+	scope?: SessionScope,
+): { messages: Array<{ role: "user"; content: string }> } | undefined {
+	const touched = consumeTouchedNudge(dbg, scope?.scopeId);
+	pruneRetiredAdvisories();
+	const own: QueuedAdvisory[] = [];
+	const others: QueuedAdvisory[] = [];
+	for (const entry of _advisories) {
+		(scope && entry.scope.scopeId === scope.scopeId ? own : others).push(entry);
+	}
+	_advisories.splice(0, _advisories.length, ...others);
+	const advisories = own.map((entry) => ({
+		role: "user" as const,
+		content: `[pi-lens automated context — not a user request] ${entry.text}`,
+	}));
+	const messages = [...(touched?.messages ?? []), ...advisories];
+	return messages.length > 0 ? { messages } : undefined;
+}
+
+function consumeTouchedNudge(
+	dbg?: (msg: string) => void,
+	scopeId?: number,
 ): { messages: Array<{ role: "user"; content: string }> } | undefined {
 	const drained = Array.from(_touched.values());
 	_touched.clear();
@@ -358,6 +513,7 @@ export function consumeAgentNudge(
 
 	if (!isAgentNudgeEnabled()) return undefined;
 	if (drained.length === 0) return undefined;
+	_queueEpoch += 1;
 
 	try {
 		// #1464: a write whose post-fix bytes were attached to its own tool
@@ -417,6 +573,19 @@ export function consumeAgentNudge(
 				// alongside the existing relevance-filter metric.
 				originLocal: localCount,
 				originCrossProcess: crossProcessCount,
+				// #3873 O7: which files, written by which sessions, drained for
+				// which scope in which drain. Bounded: 8 hashes of 8 characters
+				// and 4 session ids per row.
+				fileKeys: entries.slice(0, 8).map((e) => hashText(e.key, 8)),
+				originSessionIds: [
+					...new Set(
+						entries.flatMap((e) =>
+							e.originSessionId === undefined ? [] : [e.originSessionId],
+						),
+					),
+				].slice(0, 4),
+				scopeId,
+				queueEpoch: _queueEpoch,
 			},
 		});
 

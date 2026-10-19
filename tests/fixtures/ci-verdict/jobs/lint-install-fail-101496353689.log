@@ -1,0 +1,212 @@
+﻿2026-09-06T13:41:12.8480687Z Current runner version: '2.337.0'
+2026-09-06T13:41:12.8507599Z ##[group]Runner Image Provisioner
+2026-09-06T13:41:12.8508490Z Hosted Compute Agent
+2026-09-06T13:41:12.8509061Z Version: 20260828.587
+2026-09-06T13:41:12.8509825Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-06T13:41:12.8510591Z Build Date: 2026-08-28T16:44:25Z
+2026-09-06T13:41:12.8511359Z Worker ID: {e83c6dbc-eb59-487a-a162-015e32537342}
+2026-09-06T13:41:12.8512073Z Azure Region: eastus
+2026-09-06T13:41:12.8512634Z ##[endgroup]
+2026-09-06T13:41:12.8515689Z ##[group]Operating System
+2026-09-06T13:41:12.8516352Z Ubuntu
+2026-09-06T13:41:12.8516949Z 24.04.4
+2026-09-06T13:41:12.8517457Z LTS
+2026-09-06T13:41:12.8517944Z ##[endgroup]
+2026-09-06T13:41:12.8518591Z ##[group]Runner Image
+2026-09-06T13:41:12.8519197Z Image: ubuntu-24.04
+2026-09-06T13:41:12.8519807Z Version: 20260831.293.1
+2026-09-06T13:41:12.8521088Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260831.293/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-06T13:41:12.8522808Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260831.293
+2026-09-06T13:41:12.8523782Z ##[endgroup]
+2026-09-06T13:41:12.8525186Z ##[group]GITHUB_TOKEN Permissions
+2026-09-06T13:41:12.8527398Z Contents: read
+2026-09-06T13:41:12.8528135Z Metadata: read
+2026-09-06T13:41:12.8528721Z ##[endgroup]
+2026-09-06T13:41:12.8530965Z Secret source: Actions
+2026-09-06T13:41:12.8532068Z Prepare workflow directory
+2026-09-06T13:41:12.8884412Z Prepare all required actions
+2026-09-06T13:41:12.8934953Z Getting action download info
+2026-09-06T13:41:13.0891488Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+2026-09-06T13:41:13.2142061Z Download action repository 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020' (SHA:820762786026740c76f36085b0efc47a31fe5020)
+2026-09-06T13:41:13.4075404Z Complete job name: Lint & type-check
+2026-09-06T13:41:13.4999086Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-09-06T13:41:13.5000226Z with:
+2026-09-06T13:41:13.5000661Z   ref: refs/pull/2588/merge
+2026-09-06T13:41:13.5001173Z   persist-credentials: false
+2026-09-06T13:41:13.5001688Z   repository: apmantza/pi-lens
+2026-09-06T13:41:13.5005600Z   token: ***
+2026-09-06T13:41:13.5006036Z   ssh-strict: true
+2026-09-06T13:41:13.5006461Z   ssh-user: git
+2026-09-06T13:41:13.5006872Z   clean: true
+2026-09-06T13:41:13.5007306Z   sparse-checkout-cone-mode: true
+2026-09-06T13:41:13.5007812Z   fetch-depth: 1
+2026-09-06T13:41:13.5008230Z   fetch-tags: false
+2026-09-06T13:41:13.5008657Z   show-progress: true
+2026-09-06T13:41:13.5009097Z   lfs: false
+2026-09-06T13:41:13.5009512Z   submodules: false
+2026-09-06T13:41:13.5009951Z   set-safe-directory: true
+2026-09-06T13:41:13.5010480Z   allow-unsafe-pr-checkout: false
+2026-09-06T13:41:13.5011309Z ##[endgroup]
+2026-09-06T13:41:13.6086320Z Syncing repository: apmantza/pi-lens
+2026-09-06T13:41:13.6089057Z ##[group]Getting Git version info
+2026-09-06T13:41:13.6090153Z Working directory is '/home/runner/work/pi-lens/pi-lens'
+2026-09-06T13:41:13.6091805Z [command]/usr/bin/git version
+2026-09-06T13:41:13.6178981Z git version 2.55.0
+2026-09-06T13:41:13.6204431Z ##[endgroup]
+2026-09-06T13:41:13.6212925Z Temporarily overriding HOME='/home/runner/work/_temp/c705b405-345d-4884-976d-d1c4438d1f5e' before making global git config changes
+2026-09-06T13:41:13.6215862Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-06T13:41:13.6219158Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/pi-lens/pi-lens
+2026-09-06T13:41:13.6278958Z Deleting the contents of '/home/runner/work/pi-lens/pi-lens'
+2026-09-06T13:41:13.6282740Z ##[group]Determining repository object format
+2026-09-06T13:41:13.7736912Z ##[endgroup]
+2026-09-06T13:41:13.7766843Z ##[group]Initializing the repository
+2026-09-06T13:41:13.7786304Z [command]/usr/bin/git init /home/runner/work/pi-lens/pi-lens
+2026-09-06T13:41:13.7890830Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-06T13:41:13.7893143Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-06T13:41:13.7895379Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-06T13:41:13.7907014Z hint: call:
+2026-09-06T13:41:13.7915300Z hint:
+2026-09-06T13:41:13.7916892Z hint: 	git config --global init.defaultBranch <name>
+2026-09-06T13:41:13.7918196Z hint:
+2026-09-06T13:41:13.7919462Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-06T13:41:13.7921451Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-06T13:41:13.7923284Z hint:
+2026-09-06T13:41:13.7925410Z hint: 	git branch -m <name>
+2026-09-06T13:41:13.7927433Z hint:
+2026-09-06T13:41:13.7929683Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-06T13:41:13.7933425Z Initialized empty Git repository in /home/runner/work/pi-lens/pi-lens/.git/
+2026-09-06T13:41:13.7939132Z [command]/usr/bin/git remote add origin https://github.com/apmantza/pi-lens
+2026-09-06T13:41:13.7995683Z ##[endgroup]
+2026-09-06T13:41:13.7997635Z ##[group]Disabling automatic garbage collection
+2026-09-06T13:41:13.7999684Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-06T13:41:13.8059375Z ##[endgroup]
+2026-09-06T13:41:13.8061734Z ##[group]Setting up auth
+2026-09-06T13:41:13.8064311Z Removing SSH command configuration
+2026-09-06T13:41:13.8066870Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-06T13:41:13.8123622Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-06T13:41:13.8547464Z Removing HTTP extra header
+2026-09-06T13:41:13.8556169Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-06T13:41:13.8604428Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-06T13:41:13.8889223Z Removing includeIf entries pointing to credentials config files
+2026-09-06T13:41:13.8895715Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-06T13:41:13.8944808Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-06T13:41:13.9205356Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-06T13:41:13.9255478Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/pi-lens/pi-lens/.git.path /home/runner/work/_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:13.9295450Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/pi-lens/pi-lens/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:13.9338267Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:13.9380851Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:13.9418529Z ##[endgroup]
+2026-09-06T13:41:13.9420273Z ##[group]Fetching the repository
+2026-09-06T13:41:13.9428288Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +refs/pull/2588/merge:refs/remotes/pull/2588/merge
+2026-09-06T13:41:14.4594571Z From https://github.com/apmantza/pi-lens
+2026-09-06T13:41:14.4596127Z  * [new ref]         refs/pull/2588/merge -> pull/2588/merge
+2026-09-06T13:41:14.4599399Z ##[endgroup]
+2026-09-06T13:41:14.4600253Z ##[group]Determining the checkout info
+2026-09-06T13:41:14.4601321Z ##[endgroup]
+2026-09-06T13:41:14.4606751Z [command]/usr/bin/git sparse-checkout disable
+2026-09-06T13:41:14.4671048Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-06T13:41:14.4709413Z ##[group]Checking out the ref
+2026-09-06T13:41:14.4713910Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/2588/merge
+2026-09-06T13:41:14.7251905Z Note: switching to 'refs/remotes/pull/2588/merge'.
+2026-09-06T13:41:14.7252763Z 
+2026-09-06T13:41:14.7254361Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-09-06T13:41:14.7255674Z changes and commit them, and you can discard any commits you make in this
+2026-09-06T13:41:14.7256744Z state without impacting any branches by switching back to a branch.
+2026-09-06T13:41:14.7257227Z 
+2026-09-06T13:41:14.7257651Z If you want to create a new branch to retain commits you create, you may
+2026-09-06T13:41:14.7258398Z do so (now or later) by using -c with the switch command. Example:
+2026-09-06T13:41:14.7258805Z 
+2026-09-06T13:41:14.7259021Z   git switch -c <new-branch-name>
+2026-09-06T13:41:14.7259360Z 
+2026-09-06T13:41:14.7259608Z Or undo this operation with:
+2026-09-06T13:41:14.7259933Z 
+2026-09-06T13:41:14.7260152Z   git switch -
+2026-09-06T13:41:14.7260442Z 
+2026-09-06T13:41:14.7261115Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-09-06T13:41:14.7262424Z 
+2026-09-06T13:41:14.7263152Z HEAD is now at 34c1ef7 Merge d974f366b400655b1c90db6a1e1f0e2ee669f79a into 66927544fa1a325bc2afc6f86dda6ba3d9cfe9be
+2026-09-06T13:41:14.7267403Z ##[endgroup]
+2026-09-06T13:41:14.7322132Z [command]/usr/bin/git log -1 --format=%H
+2026-09-06T13:41:14.7356423Z 34c1ef70c61f2f9c160738219cec3f7ca52614e3
+2026-09-06T13:41:14.7367995Z ##[group]Removing auth
+2026-09-06T13:41:14.7369023Z Removing SSH command configuration
+2026-09-06T13:41:14.7372496Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-06T13:41:14.7414586Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-06T13:41:14.7676455Z Removing HTTP extra header
+2026-09-06T13:41:14.7679927Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-06T13:41:14.7728928Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-06T13:41:14.7974287Z Removing includeIf entries pointing to credentials config files
+2026-09-06T13:41:14.7978076Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-06T13:41:14.8014594Z includeif.gitdir:/home/runner/work/pi-lens/pi-lens/.git.path
+2026-09-06T13:41:14.8015719Z includeif.gitdir:/home/runner/work/pi-lens/pi-lens/.git/worktrees/*.path
+2026-09-06T13:41:14.8016520Z includeif.gitdir:/github/workspace/.git.path
+2026-09-06T13:41:14.8017362Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-06T13:41:14.8024605Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/pi-lens/pi-lens/.git.path
+2026-09-06T13:41:14.8056742Z /home/runner/work/_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:14.8067040Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/pi-lens/pi-lens/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-26e86a9f\-666d\-4960\-9028\-c97a8f9e03ce\.config
+2026-09-06T13:41:14.8107878Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/pi-lens/pi-lens/.git/worktrees/*.path
+2026-09-06T13:41:14.8138956Z /home/runner/work/_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:14.8149042Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/pi-lens/pi-lens/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-26e86a9f\-666d\-4960\-9028\-c97a8f9e03ce\.config
+2026-09-06T13:41:14.8189142Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-09-06T13:41:14.8221784Z /github/runner_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:14.8235337Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-26e86a9f\-666d\-4960\-9028\-c97a8f9e03ce\.config
+2026-09-06T13:41:14.8358791Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-06T13:41:14.8360975Z /github/runner_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config
+2026-09-06T13:41:14.8363356Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-26e86a9f\-666d\-4960\-9028\-c97a8f9e03ce\.config
+2026-09-06T13:41:14.8367628Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-06T13:41:14.8609208Z Removing credentials config '/home/runner/work/_temp/git-credentials-26e86a9f-666d-4960-9028-c97a8f9e03ce.config'
+2026-09-06T13:41:14.8617855Z ##[endgroup]
+2026-09-06T13:41:14.8916094Z ##[group]Run actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+2026-09-06T13:41:14.8916793Z with:
+2026-09-06T13:41:14.8917180Z   node-version: 22
+2026-09-06T13:41:14.8917609Z   check-latest: false
+2026-09-06T13:41:14.8920518Z   token: ***
+2026-09-06T13:41:14.8920965Z   package-manager-cache: true
+2026-09-06T13:41:14.8921431Z ##[endgroup]
+2026-09-06T13:41:15.0369815Z Found in cache @ /opt/hostedtoolcache/node/22.23.2/x64
+2026-09-06T13:41:15.0372839Z ##[group]Environment details
+2026-09-06T13:41:15.5063316Z node: v22.23.2
+2026-09-06T13:41:15.5064393Z npm: 10.9.8
+2026-09-06T13:41:15.5064898Z yarn: 1.22.22
+2026-09-06T13:41:15.5065932Z ##[endgroup]
+2026-09-06T13:41:15.5261835Z ##[group]Run npm install --no-audit --no-fund
+2026-09-06T13:41:15.5262301Z [36;1mnpm install --no-audit --no-fund[0m
+2026-09-06T13:41:15.5312084Z shell: /usr/bin/bash -e {0}
+2026-09-06T13:41:15.5312358Z ##[endgroup]
+2026-09-06T13:41:20.7128182Z npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead
+2026-09-06T13:41:26.3254413Z 
+2026-09-06T13:41:26.3255079Z > pi-lens@4.1.3 prepare
+2026-09-06T13:41:26.3256688Z > npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/warm-loader-cache.mjs
+2026-09-06T13:41:26.3257709Z 
+2026-09-06T13:41:26.4384703Z 
+2026-09-06T13:41:26.4385557Z > pi-lens@4.1.3 build:dist
+2026-09-06T13:41:26.4387191Z > node -e "require('fs').rmSync('dist',{recursive:true,force:true})" && npx --yes -p typescript@7.0.2 tsc --project tsconfig.dist.json --noCheck && npm run bundle:dist
+2026-09-06T13:41:26.4388300Z 
+2026-09-06T13:41:28.1816339Z 
+2026-09-06T13:41:28.1817163Z > pi-lens@4.1.3 bundle:dist
+2026-09-06T13:41:28.1817822Z > node scripts/bundle-dist.mjs
+2026-09-06T13:41:28.1818166Z 
+2026-09-06T13:41:28.5474209Z sh: 1: esbuild: not found
+2026-09-06T13:41:28.5603310Z [bundle] esbuild failed: Command failed: /opt/hostedtoolcache/node/22.23.2/x64/bin/node /opt/hostedtoolcache/node/22.23.2/x64/lib/node_modules/npm/bin/npm-cli.js exec --yes --package esbuild@0.28.1 -- esbuild /home/runner/work/pi-lens/pi-lens/dist/index.js --bundle --platform=node --format=esm --external:typebox --external:@earendil-works/pi-tui --external:@earendil-works/pi-coding-agent --external:@ast-grep/napi --external:web-tree-sitter --outfile=/home/runner/work/pi-lens/pi-lens/dist/index.bundled.mjs
+2026-09-06T13:41:28.5832557Z npm error code 1
+2026-09-06T13:41:28.5833350Z npm error path /home/runner/work/pi-lens/pi-lens
+2026-09-06T13:41:28.5834203Z npm error command failed
+2026-09-06T13:41:28.5836397Z npm error command sh -c npm run build:dist && node scripts/download-grammars.js --core --dest grammars && node scripts/setup-git-hooks.mjs && node scripts/warm-loader-cache.mjs
+2026-09-06T13:41:28.5845125Z npm error A complete log of this run can be found in: /home/runner/.npm/_logs/2026-09-06T13_41_15_589Z-debug-0.log
+2026-09-06T13:41:28.6660241Z ##[error]Process completed with exit code 1.
+2026-09-06T13:41:28.6844279Z Post job cleanup.
+2026-09-06T13:41:28.7734231Z [command]/usr/bin/git version
+2026-09-06T13:41:28.7785030Z git version 2.55.0
+2026-09-06T13:41:28.7830111Z Temporarily overriding HOME='/home/runner/work/_temp/7dfd7d92-1f7e-4398-b5e8-e71ca0b952ae' before making global git config changes
+2026-09-06T13:41:28.7831806Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-06T13:41:28.7836562Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/pi-lens/pi-lens
+2026-09-06T13:41:28.7876124Z Removing SSH command configuration
+2026-09-06T13:41:28.7884137Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-06T13:41:28.7927002Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-06T13:41:28.8197928Z Removing HTTP extra header
+2026-09-06T13:41:28.8205490Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-06T13:41:28.8244336Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-06T13:41:28.8505114Z Removing includeIf entries pointing to credentials config files
+2026-09-06T13:41:28.8513662Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-06T13:41:28.8558575Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-06T13:41:28.8987279Z Cleaning up orphan processes
