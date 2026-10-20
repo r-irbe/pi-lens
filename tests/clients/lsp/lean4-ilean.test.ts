@@ -13,6 +13,8 @@ import {
 	lookupItpConceptForLeanDeclaration,
 	readILeanFile,
 	scanAllILeanFiles,
+	findILeanRoots,
+	clearILeanScanCache,
 	auditLeanBlueprintStatus,
 	generatePedagogicalProofWalkthrough,
 } from "../../../clients/lsp/lean4-ilean.js";
@@ -388,6 +390,73 @@ theorem cauchy_schwarz_inequality (u v : Real) : u * v <= u * u + v * v := by
 			);
 			expect(walkthrough?.rendered).toContain("Stage 3: Type De-formalization");
 		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("gates .lake/packages scanning behind LEAN_INDEX_PACKAGES=1 and caches scanAllILeanFiles", () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ilean-pkgs-"),
+		);
+		const prevEnv = process.env.LEAN_INDEX_PACKAGES;
+		try {
+			const mainDir = path.join(tmpDir, ".lake", "build", "lib", "lean", "MyPkg");
+			const pkgDir = path.join(
+				tmpDir,
+				".lake",
+				"packages",
+				"mathlib",
+				".lake",
+				"build",
+				"lib",
+				"lean",
+				"Mathlib",
+			);
+			fs.mkdirSync(mainDir, { recursive: true });
+			fs.mkdirSync(pkgDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(mainDir, "Main.ilean"),
+				JSON.stringify({
+					version: 5,
+					module: "MyPkg.Main",
+					directImports: [],
+					decls: { mainThm: [1, 0, 2, 0, 1, 8, 1, 15] },
+					references: {},
+				}),
+				"utf-8",
+			);
+			fs.writeFileSync(
+				path.join(pkgDir, "Dep.ilean"),
+				JSON.stringify({
+					version: 5,
+					module: "Mathlib.Dep",
+					directImports: [],
+					decls: { depThm: [1, 0, 2, 0, 1, 8, 1, 14] },
+					references: {},
+				}),
+				"utf-8",
+			);
+
+			delete process.env.LEAN_INDEX_PACKAGES;
+			clearILeanScanCache();
+			expect(findILeanRoots(tmpDir)).toHaveLength(1);
+			const defaultFiles = scanAllILeanFiles(tmpDir);
+			expect(defaultFiles).toHaveLength(1);
+			expect(defaultFiles[0]?.module).toBe("MyPkg.Main");
+			// Cached return on repeat call
+			expect(scanAllILeanFiles(tmpDir)).toBe(defaultFiles);
+
+			process.env.LEAN_INDEX_PACKAGES = "1";
+			expect(findILeanRoots(tmpDir)).toHaveLength(2);
+			const allFiles = scanAllILeanFiles(tmpDir);
+			expect(allFiles).toHaveLength(2);
+		} finally {
+			if (prevEnv === undefined) {
+				delete process.env.LEAN_INDEX_PACKAGES;
+			} else {
+				process.env.LEAN_INDEX_PACKAGES = prevEnv;
+			}
+			clearILeanScanCache();
 			removeTempDirSync(tmpDir);
 		}
 	});

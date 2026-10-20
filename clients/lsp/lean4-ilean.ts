@@ -32,7 +32,9 @@ export interface ILeanModuleGraph {
 }
 
 /**
- * Finds all directories containing compiled .ilean artifacts (including external packages).
+ * Finds all directories containing compiled .ilean artifacts.
+ * External `.lake/packages` (e.g. 7,800+ Mathlib `.ilean` files) are gated behind
+ * `process.env.LEAN_INDEX_PACKAGES === "1"` so symbol/module-graph queries remain sub-5ms.
  */
 export function findILeanRoots(workspaceRoot: string): string[] {
 	const roots: string[] = [];
@@ -49,39 +51,41 @@ export function findILeanRoots(workspaceRoot: string): string[] {
 		// does not exist
 	}
 
-	const packagesDir = path.join(workspaceRoot, ".lake", "packages");
-	try {
-		const pkgEntries = fs.readdirSync(packagesDir, { withFileTypes: true });
-		for (const pkg of pkgEntries) {
-			if (pkg.isDirectory()) {
-				const pkgLean = path.join(
-					packagesDir,
-					pkg.name,
-					".lake",
-					"build",
-					"lib",
-					"lean",
-				);
-				const pkgLib = path.join(
-					packagesDir,
-					pkg.name,
-					".lake",
-					"build",
-					"lib",
-				);
-				try {
-					if (fs.statSync(pkgLean).isDirectory()) {
-						roots.push(pkgLean);
-					} else if (fs.statSync(pkgLib).isDirectory()) {
-						roots.push(pkgLib);
+	if (process.env.LEAN_INDEX_PACKAGES === "1") {
+		const packagesDir = path.join(workspaceRoot, ".lake", "packages");
+		try {
+			const pkgEntries = fs.readdirSync(packagesDir, { withFileTypes: true });
+			for (const pkg of pkgEntries) {
+				if (pkg.isDirectory()) {
+					const pkgLean = path.join(
+						packagesDir,
+						pkg.name,
+						".lake",
+						"build",
+						"lib",
+						"lean",
+					);
+					const pkgLib = path.join(
+						packagesDir,
+						pkg.name,
+						".lake",
+						"build",
+						"lib",
+					);
+					try {
+						if (fs.statSync(pkgLean).isDirectory()) {
+							roots.push(pkgLean);
+						} else if (fs.statSync(pkgLib).isDirectory()) {
+							roots.push(pkgLib);
+						}
+					} catch {
+						// package lib not built
 					}
-				} catch {
-					// package lib not built
 				}
 			}
+		} catch {
+			// no packages directory
 		}
-	} catch {
-		// no packages directory
 	}
 
 	return roots;
@@ -149,12 +153,55 @@ export function readILeanFile(ileanPath: string): ILeanData | null {
 	}
 }
 
+interface ILeanScanCacheEntry {
+	rootsKey: string;
+	rootMtimes: string;
+	timestampMs: number;
+	data: ILeanData[];
+}
+
+const ILEAN_SCAN_CACHE_TTL_MS = 10_000;
+const ileanScanCache = new Map<string, ILeanScanCacheEntry>();
+
 /**
- * Recursively scans all .ilean files in a workspace root across all roots.
+ * Clears the in-memory .ilean scan cache (useful for testing).
+ */
+export function clearILeanScanCache(): void {
+	ileanScanCache.clear();
+}
+
+/**
+ * Recursively scans all .ilean files in a workspace root across all roots,
+ * with an in-memory per-workspaceRoot cache keyed by roots + directory mtime + TTL.
  */
 export function scanAllILeanFiles(workspaceRoot: string): ILeanData[] {
-	const roots = findILeanRoots(workspaceRoot);
+	const resolvedWorkspace = path.resolve(workspaceRoot);
+	const roots = findILeanRoots(resolvedWorkspace);
 	if (roots.length === 0) return [];
+
+	const indexPackagesFlag = process.env.LEAN_INDEX_PACKAGES === "1" ? "1" : "0";
+	const cacheKey = `${resolvedWorkspace}::${indexPackagesFlag}`;
+	const rootsKey = roots.join("|");
+	const rootMtimes = roots
+		.map((r) => {
+			try {
+				return `${r}:${fs.statSync(r).mtimeMs}`;
+			} catch {
+				return `${r}:0`;
+			}
+		})
+		.join("|");
+
+	const now = Date.now();
+	const cached = ileanScanCache.get(cacheKey);
+	if (
+		cached &&
+		cached.rootsKey === rootsKey &&
+		cached.rootMtimes === rootMtimes &&
+		now - cached.timestampMs < ILEAN_SCAN_CACHE_TTL_MS
+	) {
+		return cached.data;
+	}
 
 	const results: ILeanData[] = [];
 	const queue = [...roots];
@@ -179,6 +226,13 @@ export function scanAllILeanFiles(workspaceRoot: string): ILeanData[] {
 			}
 		}
 	}
+
+	ileanScanCache.set(cacheKey, {
+		rootsKey,
+		rootMtimes,
+		timestampMs: now,
+		data: results,
+	});
 
 	return results;
 }
