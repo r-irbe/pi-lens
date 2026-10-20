@@ -6,6 +6,7 @@ and LSP extensions without dependencies on the tacit-mui core repository.
 
 ## Contents
 - `master-authority-index.json`: 100 canonical formal concepts across Lean 4, Coq, Isabelle/HOL, HOL Light, and Metamath.
+- `cross-itp-concordance.v1.json`: Cross-prover concept and tactic concordance table.
 - `itp_ontology_graph.db`: Compiled SQLite relational graph database (if present).
 - `book-indexes/`: Author-curated proof assistant textbook index concordances.
 
