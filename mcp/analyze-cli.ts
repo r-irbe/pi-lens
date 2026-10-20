@@ -282,6 +282,21 @@ async function main(): Promise<void> {
 			"analyze-cli: workspace trust belongs to the calling client; pi trust not consulted",
 	});
 
+	if (process.argv.includes("--help") || process.argv.includes("-h")) {
+		process.stdout.write(
+			"usage: pi-lens-analyze [--file=<path>] [--cwd=<dir>] [--lsp] [--hook] [--turn-end]\n" +
+				"\n" +
+				"Options:\n" +
+				"  --file=<path>  File to analyze (or read from Claude Code hook JSON on stdin)\n" +
+				"  --cwd=<dir>    Workspace directory (defaults to current working directory)\n" +
+				"  --lsp          Include LSP diagnostics in cold CLI mode\n" +
+				"  --hook         Emit Claude Code PostToolUse JSON envelope\n" +
+				"  --turn-end     Run turn-end diagnostics against the warm MCP server\n" +
+				"  -h, --help     Show this help message\n",
+		);
+		process.exit(0);
+	}
+
 	const hookMode = process.argv.includes("--hook");
 	const withLsp = process.argv.includes("--lsp");
 	const fileArg = argVal("file");

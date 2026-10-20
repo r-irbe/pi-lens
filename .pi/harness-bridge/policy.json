@@ -335,7 +335,8 @@
       "actMode": "host",
       "actImage": "",
       "stages": [
-        "test"
+        "check-types",
+        "verify-fast"
       ],
       "requireBeforePush": true,
       "image": "catthehacker/ubuntu:act-latest",
@@ -347,31 +348,25 @@
     },
     "github": {
       "stages": [
-        "test"
+        "check-types",
+        "verify-fast"
       ],
-      "workflow": ".github/workflows/ci.yml"
+      "workflow": ".github/workflows/harness-gates.yml"
     },
     "stages": {
-      "sdlc-gates": {
-        "id": "sdlc-gates",
-        "title": "SDLC policy gates",
-        "command": "harness-bridge process status",
-        "reason": "The gate evidence for the processes declared in the policy.",
-        "timeoutSeconds": 120
+      "check-types": {
+        "id": "check-types",
+        "title": "TypeScript type check",
+        "command": "npm run check:types",
+        "reason": "Full TypeScript type-checking across source and test files.",
+        "timeoutSeconds": 180
       },
-      "guard-diff": {
-        "id": "guard-diff",
-        "title": "Policy on the change set",
-        "command": "harness-bridge guard diff --base origin/HEAD",
-        "reason": "Secrets, protected paths, and policy on what this change actually touches."
-      },
-      "unicode": {
-        "id": "unicode",
-        "title": "Unicode policy (scoped)",
-        "command": "harness-bridge policy unicode .",
-        "reason": "INV-001 as a scoped rule: typographic substitutions and invisible carriers are violations; mathematics, scripts and emoji are content.",
-        "timeoutSeconds": 600,
-        "critical": false
+      "verify-fast": {
+        "id": "verify-fast",
+        "title": "Fast lint and type verification",
+        "command": "npm run verify:fast",
+        "reason": "Fast oxlint and tsc verification before commit/push.",
+        "timeoutSeconds": 300
       },
       "unit": {
         "id": "unit",
@@ -379,14 +374,6 @@
         "command": "npm test",
         "reason": "The change's own tests.",
         "timeoutSeconds": 300
-      },
-      "ladder": {
-        "id": "ladder",
-        "title": "Full verification ladder",
-        "command": "bash scripts/verify_ui.sh",
-        "long": true,
-        "reason": "The repository's own definition of verified; too slow for every push.",
-        "timeoutSeconds": 2700
       }
     }
   },

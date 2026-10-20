@@ -18,8 +18,8 @@ esac
 
 echo "local CI: oxlint"
 npm run lint:js
-echo "local CI: tsc --noEmit"
-npx tsc --project tsconfig.json --noEmit
+echo "local CI: check:types"
+npm run check:types
 if [ "$MODE" != "--fast" ]; then
   echo "local CI: npm test"
   npm test

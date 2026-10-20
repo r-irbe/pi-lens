@@ -161,6 +161,15 @@ async function main(): Promise<void> {
 	});
 
 	const command = process.argv[2];
+	if (
+		command === "--help" ||
+		command === "-h" ||
+		process.argv.includes("--help") ||
+		process.argv.includes("-h")
+	) {
+		process.stdout.write("usage: pi-lens build-graph [--cwd <dir>]\n");
+		return;
+	}
 	if (command !== "build-graph") {
 		fail("usage: pi-lens build-graph [--cwd <dir>]");
 	}

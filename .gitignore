@@ -83,6 +83,7 @@ migrate-*.js
 !CONTRIBUTING.md
 !LICENSE
 !SECURITY.md
+!USER_GUIDE.md
 !docs/adr/*.md
 !docs/engineering-principles.md
 !docs/pi-lens-subagent.md
@@ -96,7 +97,6 @@ migrate-*.js
 !docs/merge-queue-rollout.md
 !docs/pi-lens-monitor.md
 !docs/real-harness.md
-!docs/audit1.md
 !docs/agent-guide.md
 !docs/agent-tools.md
 !docs/ast-grep_rules_catalog.md
@@ -107,7 +107,6 @@ migrate-*.js
 !docs/globalconfig.md
 !docs/language-coverage.md
 !docs/tools.md
-!docs/tools_improvement2.md
 !docs/usage.md
 !docs/lsp-capability-matrix.md
 !docs/lsp-latency-benchmark.md
@@ -121,8 +120,6 @@ migrate-*.js
 !docs/subagent-compat.md
 !docs/dispositions.md
 !docs/word-index.md
-!docs/durable-store-audit-1202.md
-!docs/analysisall.md
 !docs/api-ports-inventory.md
 !docs/astplayground.md
 !docs/public-api-stability.md
@@ -154,6 +151,7 @@ BUG_*.md
 *_ANALYSIS.md
 *_STATUS.md
 *_GUIDE.md
+!USER_GUIDE.md
 *_COMPLETE.md
 *_RESULTS.md
 *_SUMMARY.md

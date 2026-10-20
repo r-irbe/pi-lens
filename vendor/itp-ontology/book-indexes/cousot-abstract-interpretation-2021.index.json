@@ -16,7 +16,7 @@
   "publication_year": 2021,
   "edition_or_version": "MIT Press / Now Publishers / Addison-Wesley",
   "index_metadata": {
-    "entry_count": 8,
+    "entry_count": 10,
     "source_page_range": "1-820",
     "has_subterms": true,
     "has_definitive_styling": true,
@@ -252,6 +252,57 @@
           "target_tactic_or_primitive": "EASCI.Foundations.CS.NatInterval.natSubTruncation_cert_sound",
           "mapping_confidence": 0.99,
           "notes": "Surfaced in lean_diagnostics via scanSourceForNatCertificates"
+        }
+      ]
+    },
+    {
+      "term": "octagon domain",
+      "category": "domain",
+      "primary_references": [
+        {
+          "page": 45,
+          "section_anchor": "PELLEAU2015 s2.4 p1",
+          "is_definitive": true,
+          "prover_anchor": "EASCI.Foundations.CS.OctagonBound",
+          "context_note": "Mine (2006) / Pelleau (2015) relational octagon domain +-x_i +- x_j <= c with 2N x 2N coherent DBM and integer strong closure"
+        }
+      ],
+      "cross_references": [
+        "see also zone domain",
+        "see also interval domain"
+      ],
+      "cross_itp_concordance": [
+        {
+          "target_prover": "lean4",
+          "target_term": "OctagonBound.simplex_complement_sound",
+          "target_tactic_or_primitive": "EASCI.Foundations.CS.OctagonBound",
+          "mapping_confidence": 0.99,
+          "notes": "Mechanized in EASCI.Foundations.CS.AbstractInterpretation and crates/lean-analyzer/src/octagon.rs"
+        }
+      ]
+    },
+    {
+      "term": "weak topological ordering",
+      "category": "algorithm",
+      "primary_references": [
+        {
+          "page": 68,
+          "section_anchor": "RIVALYI s5.1 p1",
+          "is_definitive": true,
+          "prover_anchor": "lean_analyzer::wto::WtoOrdering",
+          "context_note": "Bourdoncle (1993) hierarchical SCC decomposition for chaotic iteration with component-head threshold widening and bounded trace partitioning"
+        }
+      ],
+      "cross_references": [
+        "see also widening with thresholds"
+      ],
+      "cross_itp_concordance": [
+        {
+          "target_prover": "lean4",
+          "target_term": "LeanAbstractInterpreter.compute_wto_fixpoint",
+          "target_tactic_or_primitive": "lean_analyzer::wto::WtoOrdering",
+          "mapping_confidence": 0.98,
+          "notes": "Implemented in crates/lean-analyzer/src/wto.rs"
         }
       ]
     }
