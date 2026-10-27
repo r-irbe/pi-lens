@@ -1256,7 +1256,11 @@ export class ClientRegistry {
 		allowInstall: boolean,
 	): Promise<SpawnedServer | undefined> {
 		try {
-			if (server.executesProjectCode === true) {
+			const executesCode =
+				typeof server.executesProjectCode === "function"
+					? server.executesProjectCode(root)
+					: server.executesProjectCode === true;
+			if (executesCode) {
 				refuseUntrustedLspExecution({
 					kind: "project-code-server",
 					serverId: server.id,

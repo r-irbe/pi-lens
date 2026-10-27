@@ -511,7 +511,7 @@ export interface LSPServerInfo {
 	/** True for entries supplied through `lsp.servers.*`, not the built-in table. */
 	custom?: boolean;
 	/** True when startup/indexing can execute project-owned build or plugin code. */
-	executesProjectCode?: boolean;
+	executesProjectCode?: boolean | ((root: string) => boolean);
 	/** Set by compileLspRegistry after the source trust decision is admitted. */
 	trustAllowed?: boolean;
 	/**
@@ -1554,7 +1554,7 @@ interface InteractiveServerSpec {
 	language: string;
 	fallbackFor?: string;
 	requiresProjectRoot?: boolean;
-	executesProjectCode?: boolean;
+	executesProjectCode?: boolean | ((root: string) => boolean);
 	command: string | ((root: string) => string);
 	args?: string[] | ((root: string) => string[]);
 	initialization?:
@@ -3531,6 +3531,13 @@ function resolveLeanAnalyzerBinary(): string | undefined {
 	return existsSync(cand) ? cand : undefined;
 }
 
+export function shouldUseLeanAnalyzerLsp(root: string): boolean {
+	return (
+		(process.env.LEAN_ANALYZER_LSP === "1" || isLeanWorkspaceLocked(root)) &&
+		Boolean(resolveLeanAnalyzerBinary())
+	);
+}
+
 export const LeanServer = createInteractiveServer({
 	id: "lean",
 	name: "Lean 4 Language Server",
@@ -3545,17 +3552,17 @@ export const LeanServer = createInteractiveServer({
 	// the host grants project trust (#4269). When `LEAN_ANALYZER_LSP=1` or an
 	// active `.lake.lock` is detected, `lean-analyzer lsp --mode=auto` serves
 	// lock-safe Mode A without executing project code.
-	executesProjectCode: true,
+	executesProjectCode: (root) => !shouldUseLeanAnalyzerLsp(root),
 	command: (root) => {
-		if (process.env.LEAN_ANALYZER_LSP === "1" || isLeanWorkspaceLocked(root)) {
+		if (shouldUseLeanAnalyzerLsp(root)) {
 			const bin = resolveLeanAnalyzerBinary();
 			if (bin) return bin;
 		}
 		return "lake";
 	},
 	args: (root) => {
-		if (process.env.LEAN_ANALYZER_LSP === "1" || isLeanWorkspaceLocked(root)) {
-			if (resolveLeanAnalyzerBinary()) return ["lsp", "--mode=auto"];
+		if (shouldUseLeanAnalyzerLsp(root)) {
+			return ["lsp", "--mode=auto"];
 		}
 		return ["serve"];
 	},
@@ -3758,19 +3765,7 @@ export const HaskellServer = createInteractiveServer({
 	args: ["--lsp"],
 });
 
-export const Lean4Server = createInteractiveServer({
-	id: "lean4",
-	name: "Lean 4 Language Server",
-	extensions: KIND_EXTENSIONS["lean"],
-	root: RootWithFallback(
-		createRootDetector(["lakefile.lean", "lakefile.toml", "lean-toolchain"]),
-	),
-	language: "lean",
-	command: "lake",
-	args: ["serve"],
-	clientWaitTimeoutMs: 25_000,
-	initializeTimeoutMs: 25_000,
-});
+export const Lean4Server = LeanServer;
 
 export const ElixirServer = createInteractiveServer({
 	id: "elixir",
@@ -4803,7 +4798,6 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	CppServer,
 	ZigServer,
 	HaskellServer,
-	Lean4Server,
 	ElixirServer,
 	ElixirExpertServer,
 	GleamServer,

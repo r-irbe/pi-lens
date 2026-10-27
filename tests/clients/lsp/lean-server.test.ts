@@ -9,7 +9,7 @@ vi.mock("../../../clients/lsp/launch.js", async (importOriginal) => ({
 	launchLSP,
 }));
 
-import { LeanServer, LSP_SERVERS } from "../../../clients/lsp/server.js";
+import { isLeanWorkspaceLocked, LeanServer, LSP_SERVERS } from "../../../clients/lsp/server.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const dirs: string[] = [];
@@ -47,5 +47,50 @@ describe("Lean Lake LSP server", () => {
 		expect(
 			LSP_SERVERS.find((server) => server.id === "lean")?.requiresProjectRoot,
 		).toBe(true);
+	});
+
+	it("detects all 4 workspace lock paths + ancestor .lake/build/.lake.lock and switches to lock-safe Mode A without executing project code", () => {
+		const outer = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lean-lock-"));
+		dirs.push(outer);
+		const sub = path.join(outer, "packages", "subpkg");
+		fs.mkdirSync(sub, { recursive: true });
+		const fakeBin = path.join(outer, "fake-lean-analyzer");
+		fs.writeFileSync(fakeBin, "#!/bin/sh\n");
+		const prevBin = process.env.LEAN_ANALYZER_BIN;
+		process.env.LEAN_ANALYZER_BIN = fakeBin;
+		try {
+			expect(isLeanWorkspaceLocked(sub)).toBe(false);
+			if (typeof LeanServer.executesProjectCode === "function") {
+				expect(LeanServer.executesProjectCode(sub)).toBe(true);
+			}
+
+			// 1. root/lake.lock
+			fs.writeFileSync(path.join(sub, "lake.lock"), "");
+			expect(isLeanWorkspaceLocked(sub)).toBe(true);
+			if (typeof LeanServer.executesProjectCode === "function") {
+				expect(LeanServer.executesProjectCode(sub)).toBe(false);
+			}
+			fs.unlinkSync(path.join(sub, "lake.lock"));
+
+			// 2. root/.lake/lake.lock
+			fs.mkdirSync(path.join(sub, ".lake"), { recursive: true });
+			fs.writeFileSync(path.join(sub, ".lake", "lake.lock"), "");
+			expect(isLeanWorkspaceLocked(sub)).toBe(true);
+			fs.unlinkSync(path.join(sub, ".lake", "lake.lock"));
+
+			// 3. root/.lake/build/.lake.lock
+			fs.mkdirSync(path.join(sub, ".lake", "build"), { recursive: true });
+			fs.writeFileSync(path.join(sub, ".lake", "build", ".lake.lock"), "");
+			expect(isLeanWorkspaceLocked(sub)).toBe(true);
+			fs.unlinkSync(path.join(sub, ".lake", "build", ".lake.lock"));
+
+			// 4. ancestor .lake/build/.lake.lock
+			fs.mkdirSync(path.join(outer, ".lake", "build"), { recursive: true });
+			fs.writeFileSync(path.join(outer, ".lake", "build", ".lake.lock"), "");
+			expect(isLeanWorkspaceLocked(sub)).toBe(true);
+		} finally {
+			if (prevBin === undefined) delete process.env.LEAN_ANALYZER_BIN;
+			else process.env.LEAN_ANALYZER_BIN = prevBin;
+		}
 	});
 });
