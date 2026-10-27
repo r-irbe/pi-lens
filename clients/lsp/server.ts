@@ -3502,6 +3502,35 @@ export const KotlinServer: LSPServerInfo = {
 	},
 };
 
+export function isLeanWorkspaceLocked(root: string): boolean {
+	if (existsSync("/dev/shm/lean_global_workspace.lock")) return true;
+	if (!root) return false;
+	if (
+		existsSync(path.join(root, ".lake", "build", ".lake.lock")) ||
+		existsSync(path.join(root, "lake.lock")) ||
+		existsSync(path.join(root, ".lake", "lake.lock"))
+	) {
+		return true;
+	}
+	let cur = path.resolve(root);
+	while (true) {
+		if (existsSync(path.join(cur, ".lake", "build", ".lake.lock"))) {
+			return true;
+		}
+		const parent = path.dirname(cur);
+		if (parent === cur) break;
+		cur = parent;
+	}
+	return false;
+}
+
+function resolveLeanAnalyzerBinary(): string | undefined {
+	const cand =
+		process.env.LEAN_ANALYZER_BIN ||
+		path.join(os.homedir(), ".local", "bin", "lean-analyzer");
+	return existsSync(cand) ? cand : undefined;
+}
+
 export const LeanServer = createInteractiveServer({
 	id: "lean",
 	name: "Lean 4 Language Server",
@@ -3518,26 +3547,15 @@ export const LeanServer = createInteractiveServer({
 	// lock-safe Mode A without executing project code.
 	executesProjectCode: true,
 	command: (root) => {
-		const locked =
-			Boolean(root && existsSync(path.join(root, ".lake", "build", ".lake.lock"))) ||
-			existsSync("/dev/shm/lean_global_workspace.lock");
-		if (process.env.LEAN_ANALYZER_LSP === "1" || locked) {
-			const cand =
-				process.env.LEAN_ANALYZER_BIN ||
-				path.join(os.homedir(), ".local", "bin", "lean-analyzer");
-			if (existsSync(cand)) return cand;
+		if (process.env.LEAN_ANALYZER_LSP === "1" || isLeanWorkspaceLocked(root)) {
+			const bin = resolveLeanAnalyzerBinary();
+			if (bin) return bin;
 		}
 		return "lake";
 	},
 	args: (root) => {
-		const locked =
-			Boolean(root && existsSync(path.join(root, ".lake", "build", ".lake.lock"))) ||
-			existsSync("/dev/shm/lean_global_workspace.lock");
-		if (process.env.LEAN_ANALYZER_LSP === "1" || locked) {
-			const cand =
-				process.env.LEAN_ANALYZER_BIN ||
-				path.join(os.homedir(), ".local", "bin", "lean-analyzer");
-			if (existsSync(cand)) return ["lsp", "--mode=auto"];
+		if (process.env.LEAN_ANALYZER_LSP === "1" || isLeanWorkspaceLocked(root)) {
+			if (resolveLeanAnalyzerBinary()) return ["lsp", "--mode=auto"];
 		}
 		return ["serve"];
 	},
