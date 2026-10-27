@@ -218,3 +218,6 @@ tests/native-ts7-live-*/
 
 # TLA+ tools jar fetched by scripts/check-tla-models.mjs (#3447)
 /.cache/
+itp_ontology_graph.db
+**/itp_ontology_graph.db
+
