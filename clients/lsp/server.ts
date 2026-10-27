@@ -3513,10 +3513,34 @@ export const LeanServer = createInteractiveServer({
 	requiresProjectRoot: true,
 	// `lake serve` loads and interprets the project's `lakefile.lean` and its
 	// imported build scripts, so it executes project-owned code: refuse it until
-	// the host grants project trust (#4269).
+	// the host grants project trust (#4269). When `LEAN_ANALYZER_LSP=1` or an
+	// active `.lake.lock` is detected, `lean-analyzer lsp --mode=auto` serves
+	// lock-safe Mode A without executing project code.
 	executesProjectCode: true,
-	command: "lake",
-	args: ["serve"],
+	command: (root) => {
+		const locked =
+			Boolean(root && existsSync(path.join(root, ".lake", "build", ".lake.lock"))) ||
+			existsSync("/dev/shm/lean_global_workspace.lock");
+		if (process.env.LEAN_ANALYZER_LSP === "1" || locked) {
+			const cand =
+				process.env.LEAN_ANALYZER_BIN ||
+				path.join(os.homedir(), ".local", "bin", "lean-analyzer");
+			if (existsSync(cand)) return cand;
+		}
+		return "lake";
+	},
+	args: (root) => {
+		const locked =
+			Boolean(root && existsSync(path.join(root, ".lake", "build", ".lake.lock"))) ||
+			existsSync("/dev/shm/lean_global_workspace.lock");
+		if (process.env.LEAN_ANALYZER_LSP === "1" || locked) {
+			const cand =
+				process.env.LEAN_ANALYZER_BIN ||
+				path.join(os.homedir(), ".local", "bin", "lean-analyzer");
+			if (existsSync(cand)) return ["lsp", "--mode=auto"];
+		}
+		return ["serve"];
+	},
 });
 
 export const SwiftServer = createInteractiveServer({
