@@ -114,6 +114,24 @@ function expectUniqueNames(tools: ListedTool[]): void {
 }
 
 describe("tool roster description budget", () => {
+	it.each(["pi", "mcp"] as const)(
+		"keeps the %s baseline aggregates consistent with its per-tool rows",
+		(surface) => {
+			// Recurrence: pi's pinned schema rows summed to 15380 bytes, but its
+			// aggregate still said 15247. No registered tool had changed size.
+			const { tools, descriptionTotal, schemaTotal, budget } =
+				baseline[surface];
+			const rows = Object.values(tools);
+			expect(descriptionTotal).toBe(
+				rows.reduce((sum, tool) => sum + tool.description, 0),
+			);
+			expect(schemaTotal).toBe(
+				rows.reduce((sum, tool) => sum + tool.schema, 0),
+			);
+			expect(budget).toBe(Math.ceil((descriptionTotal + schemaTotal) * 1.1));
+		},
+	);
+
 	let piTools: ListedTool[];
 	let mcp: McpHarness;
 	let mcpTools: ListedTool[];

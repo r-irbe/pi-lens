@@ -357,8 +357,9 @@ pi-lens hooks run on pi's event loop. Read the "Performance" section of `AGENTS.
   starved budgets, mid-seam session resets), use `tests/support/fault-injection.ts`
   (#1838) instead of rebuilding those fixtures per suite.
 - For suspension/interleaving control over a mocked seam, use `tests/clients/interleaving-kit.ts`.
-- Many tests import compiled `.js`. After editing `.ts`, run `npm run build` before `npm test`.
-- The build-freshness guard (`tests/support/check-build-freshness.ts`) will fail fast if source `.ts` is newer than its `.js`.
+- Many tests import compiled `.js`. After editing `.ts`, run `npm run build` before `npm test`. Its `tsconfig.build.json` emits adjacent JavaScript (also used by ordinary TS mutations), excluding `tests/` and `dist/`.
+- `npm run build:dist` is the separate packaging build: `tsconfig.dist.json` explicitly emits into `dist/` before bundling. It does not replace the adjacent runtime required by tests.
+- The build-freshness guard (`tests/support/check-build-freshness.ts`) will fail fast if source `.ts` is newer than its `.js`. `tests/config/tsconfig-build.test.ts` pins the development/distribution output contract.
 - For extension wiring tests, use `tests/support/pi-mock.ts`.
 - For live tool/LSP validation, use `scripts/smoke-tools.mjs` (opt-in, not a per-PR gate).
 - Walk/profile reach (what percent of the hot-path clients a representative tree actually executes) lives in `tests/clients/profiling-coverage.test.ts`, using `tests/support/v8-coverage.ts`. Occupancy tests still own event-loop stalls; do not fold this into `timingSensitiveInclude` unless it starts sampling `measureMaxSyncBlockMs` / `process.cpuUsage`.

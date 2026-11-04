@@ -102,6 +102,13 @@ import {
 	type Provenance,
 } from "../config-core/provenance.js";
 import { resolveToolCwd } from "../tool-cwd.js";
+import { safeSpawnAsync } from "../safe-spawn.js";
+import {
+	leanContextEnv,
+	validateLeanContext,
+	verifyLeanContext,
+	type LeanContext,
+} from "../lean-context.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { launchLSP } from "./launch.js";
 import {
@@ -114,6 +121,8 @@ import {
 	LSP_SERVERS,
 	resetLSPCaseSensitivityState,
 	resolveLspServerCwd,
+	isLeanWorkspaceLocked,
+	shouldUseLeanAnalyzerLsp,
 	type LSPServerInfo,
 	type LspRootFallback,
 } from "./server.js";
@@ -156,6 +165,10 @@ export interface CustomServerConfig {
 export interface ServerInitOverride {
 	command?: string | string[];
 	env?: Record<string, string>;
+	/** Experimental exact Lean compiler context; executable trust admission applies. */
+	leanContext?: LeanContext;
+	/** Registry-owned refusal; never admitted from a config document. */
+	leanContextUnavailable?: string;
 	/**
 	 * Deep-merged onto the server's built-in initializationOptions defaults.
 	 * User values win on key conflicts at every nesting level.
@@ -177,6 +190,9 @@ export interface LSPConfig {
 	warmFiles?: string[];
 	/** Non-enumerable source map attached by loadLSPConfig. */
 	readonly __provenance?: ProvenanceMap;
+	/** Presence only, retained when schema rejection removes a requested context. */
+	readonly __leanContextRequested?: boolean;
+	readonly __leanContextRejection?: import("../config-resolve.js").LeanContextRejection;
 }
 
 /**
@@ -487,6 +503,18 @@ export async function loadLSPConfig(
 	// resolution's records and the covers records report here, once, together.
 	const coversProblems = newCoversClaimProblems();
 	const config = lspConfigOf(resolution.value, coversProblems);
+	Object.defineProperty(config, "__leanContextRejection", {
+		value: resolution.leanContextRejection,
+		enumerable: false,
+	});
+	Object.defineProperty(config, "__leanContextRequested", {
+		value: resolution.documents.some((document) => {
+			const section = lspSectionOf(asRecord(document.value) ?? {});
+			const lean = asRecord(asRecord(section.serverOverrides)?.lean);
+			return lean !== undefined && Object.hasOwn(lean, "leanContext");
+		}),
+		enumerable: false,
+	});
 	// Preserve the source map for the registry compiler without changing the
 	// enumerable loader projection consumed by existing callers.
 	Object.defineProperty(config, "__provenance", {
@@ -1003,12 +1031,64 @@ export function compileLspRegistry(
 	}
 
 	const serverOverrides = new Map<string, ServerInitOverride>();
+	if (config.__leanContextRejection) {
+		const source = config.__leanContextRejection;
+		const reason = `environment_unavailable: malformed leanContext contribution in ${source.file ?? source.tier} at /lsp/serverOverrides/lean/leanContext${source.key ? `/${source.key}` : ""}; correct the contribution or explicitly override it with valid higher-priority fields`;
+		serverOverrides.set("lean", { leanContextUnavailable: reason });
+		recordDegradationOnce({
+			kind: "lsp-registry-decision",
+			subject: "lean:leanContext:contribution",
+			reason,
+		});
+	} else if (
+		config.__leanContextRequested &&
+		config.serverOverrides?.lean?.leanContext === undefined
+	) {
+		serverOverrides.set("lean", {
+			leanContextUnavailable:
+				"environment_unavailable: explicitly requested leanContext was rejected by the configuration schema",
+		});
+	}
 	if (config.serverOverrides) {
 		for (const [id, entry] of Object.entries(config.serverOverrides)) {
 			if (entry && typeof entry === "object" && !Array.isArray(entry)) {
 				const initOpts = (entry as Record<string, unknown>)
 					.initializationOptions;
 				const command = (entry as ServerInitOverride).command;
+				const requestedContext =
+					id === "lean" ? (entry as ServerInitOverride).leanContext : undefined;
+				let leanContext: LeanContext | undefined;
+				let leanContextUnavailable =
+					serverOverrides.get(id)?.leanContextUnavailable;
+				if (requestedContext !== undefined && !leanContextUnavailable) {
+					const pointer = `/lsp/serverOverrides/${id}/leanContext`;
+					const sources = [
+						pointer,
+						...["compilerPath", "targetVersion", "moduleRoots"].map(
+							(key) => `${pointer}/${key}`,
+						),
+					].map((key) => sourceFor(provenance, key));
+					const denied = sources.find(
+						(source) => !executableAllowed(source, trust),
+					);
+					if (denied) {
+						registryDecision(id, "leanContext", denied, trust, false);
+						leanContextUnavailable =
+							"environment_unavailable: project leanContext requires pi project trust";
+					} else {
+						try {
+							leanContext = validateLeanContext(requestedContext);
+						} catch {
+							leanContextUnavailable =
+								"environment_unavailable: invalid leanContext; admit existing exact compilerPath, targetVersion and moduleRoots";
+							recordDegradationOnce({
+								kind: "lsp-registry-decision",
+								subject: "lean:leanContext:invalid",
+								reason: leanContextUnavailable,
+							});
+						}
+					}
+				}
 				const commandSource = sourceFor(
 					provenance,
 					`/lsp/serverOverrides/${id}/command`,
@@ -1040,6 +1120,8 @@ export function compileLspRegistry(
 					overrideInitAllowed,
 				);
 				if (
+					requestedContext !== undefined ||
+					leanContextUnavailable !== undefined ||
 					command !== undefined ||
 					(entry as ServerInitOverride).env !== undefined ||
 					(initOpts !== undefined &&
@@ -1048,6 +1130,8 @@ export function compileLspRegistry(
 						!Array.isArray(initOpts))
 				) {
 					serverOverrides.set(id, {
+						...(leanContext ? { leanContext } : {}),
+						...(leanContextUnavailable ? { leanContextUnavailable } : {}),
 						...(overrideInitAllowed && initOpts !== undefined
 							? { initializationOptions: initOpts as Record<string, unknown> }
 							: {}),
@@ -1063,6 +1147,33 @@ export function compileLspRegistry(
 
 	const overriddenBuiltins = LSP_SERVERS.map((server) => {
 		const override = serverOverrides.get(server.id);
+		if (
+			server.id === "lean" &&
+			(override?.leanContext || override?.leanContextUnavailable)
+		) {
+			return {
+				...server,
+				async spawn(root: string) {
+					if (override.leanContextUnavailable)
+						throw new Error(override.leanContextUnavailable);
+					if (isLeanWorkspaceLocked(root) || shouldUseLeanAnalyzerLsp(root))
+						throw new Error(
+							"environment_unavailable: exact leanContext cannot bypass analyzer mode or a workspace build lock",
+						);
+					if (override.command || override.env)
+						throw new Error(
+							"environment_unavailable: leanContext cannot be combined with command or env overrides",
+						);
+					const context = override.leanContext!;
+					await verifyLeanContext(context, root, safeSpawnAsync);
+					const proc = await launchLSP(context.compilerPath, ["--server"], {
+						cwd: root,
+						env: leanContextEnv(context),
+					});
+					return { process: proc, source: "direct" as const };
+				},
+			};
+		}
 		if (!override?.command) return { ...server };
 		const argv = Array.isArray(override.command)
 			? override.command

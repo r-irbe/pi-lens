@@ -4,6 +4,9 @@ import { pathsEqual } from "../../path-utils.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { probeToolAsync } from "../../tool-probe.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
+import { getServerInitOverride } from "../../lsp/config.js";
+import { resolveLeanIncludeFlags } from "../../lean-context.js";
+import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -217,6 +220,29 @@ function parseMsvcOutput(
 	return diagnostics;
 }
 
+function beginsWithLeanRuntimeInclude(content: string): boolean {
+	// C splices backslash-newline before recognizing comments/directives. Only
+	// the generated header's literal logical directive is supported, not macros.
+	const logical = content.replace(/\\\r?\n/g, "");
+	const trivia = /[ \t\v\f\r\n]+|\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\//y;
+	let offset = 0;
+	while (trivia.exec(logical)) offset = trivia.lastIndex;
+	const include =
+		/^#[ \t\v\f]*include[ \t\v\f]*(?:<lean\/lean\.h>|"lean\/lean\.h")/.exec(
+			logical.slice(offset),
+		);
+	if (!include) return false;
+	let end = offset + include[0].length;
+	const trailing = /[ \t\v\f]+|\/\*[^\r\n]*?\*\//y;
+	trailing.lastIndex = end;
+	while (trailing.exec(logical)) end = trailing.lastIndex;
+	return (
+		end === logical.length ||
+		/[\r\n]/.test(logical[end]) ||
+		logical.startsWith("//", end)
+	);
+}
+
 const cppCheckRunner: RunnerDefinition = {
 	id: "cpp-check",
 	appliesTo: ["cxx"],
@@ -226,15 +252,79 @@ const cppCheckRunner: RunnerDefinition = {
 	async run(ctx: DispatchContext): Promise<RunnerResult> {
 		const cwd = resolveRunnerCwd(ctx, "cpp-check");
 		const absPath = path.resolve(cwd, ctx.filePath);
+		let content = ctx.facts.getFileFact<string | null>(
+			ctx.filePath,
+			"file.content",
+		);
+		if (content === undefined) {
+			try {
+				content = fs.readFileSync(absPath, "utf8");
+			} catch {
+				content = "";
+			} // Preserve the ordinary compiler's unreadable-file verdict.
+		}
+		let leanIncludeFlags: string[] = [];
+		if (beginsWithLeanRuntimeInclude(content ?? "")) {
+			try {
+				const override = getServerInitOverride("lean", absPath);
+				if (override?.leanContextUnavailable)
+					throw new Error(override.leanContextUnavailable);
+				if (!override?.leanContext)
+					throw new Error(
+						"environment_unavailable: generated Lean C requires an admitted lsp.serverOverrides.lean.leanContext for matching runtime headers",
+					);
+				leanIncludeFlags = await resolveLeanIncludeFlags(
+					override.leanContext,
+					cwd,
+					safeSpawnAsync,
+				);
+			} catch (error) {
+				const message =
+					error instanceof Error
+						? error.message
+						: "environment_unavailable: cannot resolve the admitted Lean runtime headers";
+				incrementDegradationCount({
+					kind: "runner-empty-result",
+					subject: "cpp-check",
+					reason: message,
+					metadata: { mode: "lean-context-unavailable" },
+				});
+				return {
+					status: "failed",
+					failureKind: "unavailable",
+					failureMessage: message,
+					semantic: "warning",
+					diagnostics: [
+						{
+							id: "cpp-check-environment-unavailable",
+							filePath: ctx.filePath,
+							tool: "cpp-check",
+							rule: "environment-unavailable",
+							severity: "warning",
+							semantic: "warning",
+							message,
+						},
+					],
+				};
+			}
+		}
 		const compiler = await resolveCompiler(absPath, cwd);
 		if (!compiler) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
-		const result = await safeSpawnAsync(compiler.command, compiler.args, {
-			cwd,
-			timeout: 30000,
-		});
+		const includeArgs =
+			compiler.flavor === "msvc"
+				? leanIncludeFlags.map((flag) => `/I${flag.slice(2)}`)
+				: leanIncludeFlags;
+		const result = await safeSpawnAsync(
+			compiler.command,
+			[...includeArgs, ...compiler.args],
+			{
+				cwd,
+				timeout: 30000,
+			},
+		);
 		const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
 		const parsed = parseToolRun(
 			"cpp-check",

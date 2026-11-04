@@ -145,6 +145,31 @@ describe("#4350 one SHA per action repository across the workflow tree", () => {
 		expect(pinSplits(pins)).toEqual([]);
 	});
 
+	it("includes adapted harness steps in the host checkout and setup-node pin agreement", async () => {
+		// The generated harness workflow retained v4 refs after host workflows
+		// moved on. Keep its steps in the scan and compare every occurrence,
+		// not only the first checkout/setup-node pair in a representative job.
+		const { pins } = await treeScan();
+		const host = ".github/workflows/action-pins.yml";
+		const harness = ".github/workflows/harness-gates.yml";
+		for (const action of ["actions/checkout", "actions/setup-node"]) {
+			const reference = pins.filter(
+				(pin) => pin.file === host && pin.action === action,
+			);
+			expect(reference).toHaveLength(1);
+			const occurrences = pins.filter((pin) => repoOf(pin.action) === action);
+			expect(occurrences.filter((pin) => pin.file === harness)).toHaveLength(1);
+			for (const pin of occurrences) {
+				expect(pin.sha, `${pin.file}:${pin.line}: ${pin.action}`).toBe(
+					reference[0].sha,
+				);
+				expect(pin.tag, `${pin.file}:${pin.line}: version comment`).toBe(
+					reference[0].tag,
+				);
+			}
+		}
+	});
+
 	it("reports a subpath split within one repository and not across repositories", () => {
 		const a = "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2";
 		const b = "24c54180a607b1449ed407dd24f251e4e9147c8d";

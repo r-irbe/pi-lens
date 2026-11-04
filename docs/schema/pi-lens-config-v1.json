@@ -99,6 +99,35 @@
             "additionalProperties": true,
             "x-stability": "experimental",
             "properties": {
+              "leanContext": {
+                "type": "object",
+                "additionalProperties": false,
+                "x-stability": "experimental",
+                "properties": {
+                  "compilerPath": {
+                    "type": "string",
+                    "x-stability": "experimental"
+                  },
+                  "targetVersion": {
+                    "type": "string",
+                    "x-stability": "experimental"
+                  },
+                  "moduleRoots": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "x-stability": "experimental"
+                    },
+                    "x-stability": "experimental"
+                  }
+                },
+                "required": [
+                  "compilerPath",
+                  "targetVersion",
+                  "moduleRoots"
+                ]
+              },
               "command": { "x-stability": "experimental" },
               "env": {
                 "type": "object",

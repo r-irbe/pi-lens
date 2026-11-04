@@ -1187,6 +1187,10 @@ for a workflow with no `workflow_dispatch` trigger or an edit of comments and
 blank lines, verified against the merge base (#3085). The run id is quoted
 evidence, not verified provenance.
 
+`npm run build` (`tsconfig.build.json`) emits adjacent JavaScript for tests and
+ordinary TS mutations; it excludes `tests/` and `dist/`. `build:dist` uses
+`tsconfig.dist.json`'s explicit `outDir` for packaging. The layout contract is
+pinned by `tests/config/tsconfig-build.test.ts`.
 The stale-build guard rejects a missing or older compiled twin. Pre-push and
 `lane:check` also rebuild the bounded `dist/` dependency population before
 governance suites when a bundled file is missing or older than its source.

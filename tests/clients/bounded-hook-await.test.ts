@@ -30,36 +30,6 @@ function summaryFor(kind: string) {
 }
 
 /**
- * How many COMPOSITE signals `signal` is keeping alive, or `undefined` when
- * none has ever been registered on it.
- *
- * `AbortSignal.any([source, ...])` does NOT add an `abort` listener to
- * `source` — it appends the composite to an internal dependant list on it, so
- * `getEventListeners(source, "abort")` stays 0 forever and a
- * `removeEventListener` on the COMPOSITE (which is what the round-1
- * implementation's `finally` did) removes nothing from the source. The list is
- * reachable only through the internal symbol, so {@link dependantCount} reads
- * it by description — and every test that uses it arms a POSITIVE CONTROL
- * first, so a Node release that renames the symbol makes the probe fail loudly
- * instead of passing blind (#1755 F4's "a scan that finds nothing is dead, not
- * clean").
- */
-function dependantCount(signal: AbortSignal): number | undefined {
-	const symbol = Object.getOwnPropertySymbols(signal).find((s) =>
-		String(s).includes("kDependantSignals"),
-	);
-	if (!symbol) return undefined;
-	const list = (signal as unknown as Record<symbol, unknown>)[symbol];
-	// Duck-typed on `size`, NOT `instanceof Set`: Node stores this in a
-	// `SafeSet` from its primordials, whose prototype chain is deliberately
-	// detached from the global `Set`, so `instanceof` is false and an
-	// `instanceof` probe reports "no list" on a list that is really there.
-	const size = (list as { size?: unknown } | undefined)?.size;
-	if (typeof size === "number") return size;
-	return Array.isArray(list) ? list.length : undefined;
-}
-
-/**
  * Never CALLED — only type-checked. `@ts-expect-error` is a compile-time
  * assertion, and executing a one-bound call would run code the type forbids
  * (a `ms: undefined` reaches `AbortSignal.timeout(NaN)`), which is a property
@@ -393,45 +363,69 @@ describe("#2523 AC2 bounded() requires BOTH bounds", () => {
 	});
 
 	it("leaves neither a listener nor a composite behind on the hook signal", async () => {
-		// Review round 2 (F2). The hook's signal outlives one await by a whole
-		// turn, so a handler that awaits N times must leave NOTHING behind on
-		// it. Round 1's version of this test asserted on
-		// `signal.listenerCount`, which does not exist on Node 24 (`typeof` is
-		// `"undefined"`), so its one assertion sat inside an `if` that never
-		// ran and deleting the cleanup left it 12/12 green — while the real
-		// leak grew unobserved: `AbortSignal.any` appends its composite to the
-		// SOURCE signal's dependant list, and the `finally` removed a listener
-		// from the throwaway composite instead.
-		const controller = new AbortController();
-		const signal = controller.signal;
+		// Node >=22.19 supports AbortSignal.any, but its dependant storage is
+		// private and not consistently exposed as an own symbol (Node 26 hides
+		// it). Observe REAL composites through a call-through spy, retaining
+		// them until source abort instead of depending on storage layout or GC.
+		// No mock implementation: native cancellation must remain load-bearing.
+		const any = vi.spyOn(AbortSignal, "any");
+		try {
+			const controller = new AbortController();
+			const shutdown = new AbortController();
+			const unrelated = new AbortController();
+			const signal = controller.signal;
 
-		// POSITIVE CONTROL, first: this probe must be able to SEE the mechanism
-		// it goes on to assert the absence of. If a Node release renames the
-		// internal list, these two lines red rather than letting the assertions
-		// below pass vacuously — the failure mode that made round 1's test
-		// worthless.
-		expect(dependantCount(signal)).toBeUndefined();
-		AbortSignal.any([signal, new AbortController().signal]);
-		expect(dependantCount(signal)).toBe(1);
+			// Positive controls: public listener introspection sees an actual
+			// listener, and the recorder sees an actual native composite.
+			const onAbort = () => {};
+			expect(getEventListeners(signal, "abort")).toHaveLength(0);
+			signal.addEventListener("abort", onAbort);
+			expect(getEventListeners(signal, "abort")).toHaveLength(1);
+			signal.removeEventListener("abort", onAbort);
+			expect(getEventListeners(signal, "abort")).toHaveLength(0);
+			const positive = AbortSignal.any([signal, new AbortController().signal]);
+			expect(any).toHaveBeenCalledTimes(1);
+			expect(any.mock.results[0]?.value).toBe(positive);
+			let positiveAborts = 0;
+			positive.addEventListener("abort", () => positiveAborts++);
+			expect(positive.aborted).toBe(false);
+			// Negative control: an unrelated abort must not trip the witness.
+			unrelated.abort();
+			expect(positive.aborted).toBe(false);
+			expect(positiveAborts).toBe(0);
 
-		const listenersBefore = getEventListeners(signal, "abort").length;
-		const dependantsBefore = dependantCount(signal);
+			for (let i = 0; i < 200; i++) {
+				await bounded(Promise.resolve(i), {
+					ms: 1000,
+					signal,
+					shutdownSignal: shutdown.signal,
+					hook: "session_start",
+					label: "loop",
+				});
+			}
+			expect(getEventListeners(signal, "abort")).toHaveLength(0);
+			expect(getEventListeners(shutdown.signal, "abort")).toHaveLength(0);
 
-		const calls = 200;
-		for (let i = 0; i < calls; i++) {
-			await bounded(Promise.resolve(i), {
-				ms: 1000,
-				signal,
-				hook: "session_start",
-				label: "loop",
+			// A completed await must leave no composite still linked to either
+			// long-lived source. Keeping returned composites alive makes the
+			// historical any-per-call regression observable without forcing GC.
+			const composites = any.mock.results.slice(1).map((result) => {
+				expect(result.type).toBe("return");
+				return result.value as AbortSignal;
 			});
+			const reason = new Error("hook finished");
+			controller.abort(reason);
+			shutdown.abort(reason);
+			expect(positive.aborted).toBe(true);
+			expect(positive.reason).toBe(reason);
+			expect(positiveAborts).toBe(1);
+			expect(composites.filter((composite) => composite.aborted)).toEqual([]);
+			// Also catch unlinked throwaway composites: bounded's one-timer,
+			// direct-source-listener contract needs no composite at all.
+			expect(any).toHaveBeenCalledTimes(1);
+		} finally {
+			any.mockRestore();
 		}
-
-		// Measured on the round-1 implementation: 200 calls took the dependant
-		// list from 1 to 201, one permanent entry per call, and 20 000 calls on
-		// one hook signal took it to 20 000.
-		expect(dependantCount(signal)).toBe(dependantsBefore);
-		expect(getEventListeners(signal, "abort").length).toBe(listenersBefore);
 	});
 
 	it("arms exactly ONE setTimeout per call, through the real global timer", async () => {

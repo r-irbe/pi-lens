@@ -1,8 +1,8 @@
 {
 	"pi": {
-		"budget": 20444,
+		"budget": 20590,
 		"descriptionTotal": 3338,
-		"schemaTotal": 15247,
+		"schemaTotal": 15380,
 		"tools": {
 			"ast_grep_outline": {
 				"description": 269,
