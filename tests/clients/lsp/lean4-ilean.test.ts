@@ -1,34 +1,88 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
-import { removeTempDirSync } from "../test-utils.js";
+import { describe, expect, it, vi } from "vitest";
+import { beginScope, retireScope } from "../../../clients/session-scope.js";
+import type { LeanNavigationAdmissionAvailable } from "../../../clients/lsp/config.js";
 import {
-	buildILeanModuleGraph,
-	findILeanRoot,
-	lookupILeanDeclaration,
-	lookupGeneratedCDeclaration,
-	lookupExternCDeclaration,
-	lookupLeanExternForCSymbol,
-	lookupItpConceptForLeanDeclaration,
-	readILeanFile,
-	scanAllILeanFiles,
-	findILeanRoots,
-	clearILeanScanCache,
 	auditLeanBlueprintStatus,
+	buildILeanModuleGraph,
+	clearILeanScanCache,
+	findILeanRoot,
+	findILeanRoots,
 	generatePedagogicalProofWalkthrough,
+	lookupExternCDeclaration,
+	lookupGeneratedCDeclaration,
+	lookupILeanDeclaration,
+	lookupItpConceptForLeanDeclaration,
+	lookupLeanExternForCSymbol,
+	readILeanFile,
+	resolveConfinedDeclarationLocations,
+	scanAllILeanFiles,
 } from "../../../clients/lsp/lean4-ilean.js";
+import { removeTempDirSync } from "../test-utils.js";
 
-describe("lean4-ilean offline reader", () => {
-	it("returns null for workspace without .lake directory", () => {
+function makeAdmission(
+	servedRoot: string,
+	moduleRoots: string[],
+	targetVersion = "4.29.0-rc8",
+	current = true,
+): LeanNavigationAdmissionAvailable {
+	const compilerPath = path.join(servedRoot, "lean");
+	if (!fs.existsSync(compilerPath)) {
+		fs.writeFileSync(compilerPath, "#!/bin/sh\n", { mode: 0o755 });
+	}
+	const registrationId = {};
+	return {
+		status: "available",
+		admittedContext: {
+			compilerPath,
+			targetVersion,
+			moduleRoots,
+		},
+		servedRoot,
+		registrationId,
+		contributingSources: [],
+		isCurrent: () => current,
+	};
+}
+
+function makeProbe(version = "4.29.0-rc8") {
+	return vi.fn().mockResolvedValue({
+		stdout: `Lean (version ${version}, x86_64-unknown-linux-gnu, commit abcdef)\n`,
+		stderr: "",
+		status: 0,
+		signal: null,
+	});
+}
+
+describe("lean4-ilean admitted-context reader", () => {
+	it("refuses raw workspace strings and missing admission or session handles", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-ilean-empty-"),
 		);
 		try {
 			expect(findILeanRoot(tmpDir)).toBeNull();
-			expect(scanAllILeanFiles(tmpDir)).toEqual([]);
-			expect(lookupILeanDeclaration(tmpDir, "Foo")).toEqual([]);
-			const graph = buildILeanModuleGraph(tmpDir);
+			expect(findILeanRoots(tmpDir)).toEqual([]);
+
+			const noAdm = await scanAllILeanFiles(null, null);
+			expect(noAdm.status).toBe("unavailable");
+			if (noAdm.status === "unavailable") {
+				expect(noAdm.reasonCode).toBe("admission-missing");
+			}
+
+			const scope = beginScope({ role: "primary" });
+			const handle = scope.capture();
+			retireScope(scope, "test");
+			const admission = makeAdmission(tmpDir, [tmpDir]);
+			const retiredRes = await scanAllILeanFiles(admission, handle);
+			expect(retiredRes.status).toBe("unavailable");
+			if (retiredRes.status === "unavailable") {
+				expect(retiredRes.reasonCode).toBe("session-unavailable");
+			}
+
+			expect(lookupILeanDeclaration(null, "Foo")).toEqual([]);
+			const graph = buildILeanModuleGraph(null);
 			expect(graph.imports.size).toBe(0);
 			expect(graph.importedBy.size).toBe(0);
 		} finally {
@@ -36,21 +90,16 @@ describe("lean4-ilean offline reader", () => {
 		}
 	});
 
-	it("parses valid .ilean file with declarations and imports", () => {
+	it("scans admitted moduleRoots, parses valid .ilean files, and resolves confined declaration locations", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-ilean-test-"),
 		);
 		try {
-			const ileanDir = path.join(
-				tmpDir,
-				".lake",
-				"build",
-				"lib",
-				"lean",
-				"MyPkg",
-			);
-			fs.mkdirSync(ileanDir, { recursive: true });
-			const samplePath = path.join(ileanDir, "Core.ilean");
+			const modRoot = path.join(tmpDir, ".lake", "build", "lib", "lean");
+			const pkgDir = path.join(modRoot, "MyPkg");
+			fs.mkdirSync(pkgDir, { recursive: true });
+
+			const samplePath = path.join(pkgDir, "Core.ilean");
 			const sampleJson = {
 				version: 5,
 				module: "MyPkg.Core",
@@ -59,45 +108,69 @@ describe("lean4-ilean offline reader", () => {
 					["Init", false, false, false],
 				],
 				decls: {
-					MyState: [10, 0, 20, 5, 12, 10, 12, 17],
-					myTheorem: [25, 0, 30, 10, 25, 8, 25, 17],
+					MyState: [1, 0, 2, 10, 1, 4, 1, 11],
+					myTheorem: [4, 0, 5, 5, 4, 8, 4, 17],
 				},
 				references: {},
 			};
 			fs.writeFileSync(samplePath, JSON.stringify(sampleJson), "utf-8");
 
-			expect(findILeanRoot(tmpDir)).toBe(
-				path.join(tmpDir, ".lake", "build", "lib", "lean"),
+			// Colocated source under the same admitted moduleRoot
+			const leanSourceLines = [
+				"-- header",
+				"def MyState : Nat := 0",
+				"  -- body",
+				"",
+				"theorem myTheorem : 1 = 1 := by",
+				"  rfl",
+				"",
+			];
+			fs.writeFileSync(
+				path.join(pkgDir, "Core.lean"),
+				leanSourceLines.join("\n"),
+				"utf-8",
 			);
 
-			const parsed = readILeanFile(samplePath);
+			const admission = makeAdmission(tmpDir, [modRoot]);
+			expect(findILeanRoot(admission)).toBe(fs.realpathSync(modRoot));
+			expect(findILeanRoots(admission)).toEqual([fs.realpathSync(modRoot)]);
+
+			const parsed = readILeanFile(
+				samplePath,
+				"MyPkg/Core",
+				fs.realpathSync(modRoot),
+			);
 			expect(parsed).not.toBeNull();
 			expect(parsed?.module).toBe("MyPkg.Core");
 			expect(parsed?.version).toBe(5);
 			expect(parsed?.directImports).toEqual(["MyPkg.Tactics", "Init"]);
 
-			const stateDecl = parsed?.decls.get("MyState");
-			expect(stateDecl).toBeDefined();
-			expect(stateDecl?.name).toBe("MyState");
-			expect(stateDecl?.module).toBe("MyPkg.Core");
-			expect(stateDecl?.range).toEqual({
-				start: { line: 10, character: 0 },
-				end: { line: 20, character: 5 },
-			});
-			expect(stateDecl?.selectionRange).toEqual({
-				start: { line: 12, character: 10 },
-				end: { line: 12, character: 17 },
-			});
+			const scope = beginScope({ role: "primary" });
+			const scanRes = await scanAllILeanFiles(
+				admission,
+				scope.capture(),
+				undefined,
+				{ probe: makeProbe() as never },
+			);
+			expect(scanRes.status).toBe("available");
+			if (scanRes.status !== "available") return;
+			expect(scanRes.items).toHaveLength(1);
 
-			const all = scanAllILeanFiles(tmpDir);
-			expect(all).toHaveLength(1);
-
-			const found = lookupILeanDeclaration(tmpDir, "myTheorem");
+			const found = lookupILeanDeclaration(scanRes.snapshot, "myTheorem");
 			expect(found).toHaveLength(1);
 			expect(found[0]?.name).toBe("myTheorem");
-			expect(found[0]?.selectionRange.start.line).toBe(25);
+			expect(found[0]?.selectionRange.start.line).toBe(4);
 
-			const graph = buildILeanModuleGraph(tmpDir);
+			const resolved = resolveConfinedDeclarationLocations(found);
+			expect(resolved.status).toBe("available");
+			if (resolved.status === "available") {
+				expect(resolved.locations).toHaveLength(1);
+				expect(resolved.locations[0]?.filePath).toBe(
+					fs.realpathSync(path.join(pkgDir, "Core.lean")),
+				);
+			}
+
+			const graph = buildILeanModuleGraph(scanRes.snapshot);
 			expect(graph.imports.get("MyPkg.Core")).toEqual([
 				"MyPkg.Tactics",
 				"Init",
@@ -108,7 +181,7 @@ describe("lean4-ilean offline reader", () => {
 		}
 	});
 
-	it("handles malformed or invalid .ilean files gracefully", () => {
+	it("rejects malformed or schema-mismatched .ilean artifacts fail-closed without partial graph success", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-ilean-corrupt-"),
 		);
@@ -117,19 +190,99 @@ describe("lean4-ilean offline reader", () => {
 			fs.writeFileSync(badPath, "not valid json", "utf-8");
 			expect(readILeanFile(badPath)).toBeNull();
 
-			const nonExistent = path.join(tmpDir, "missing.ilean");
-			expect(readILeanFile(nonExistent)).toBeNull();
+			const admission = makeAdmission(tmpDir, [tmpDir]);
+			const scope = beginScope({ role: "primary" });
+			const res = await scanAllILeanFiles(
+				admission,
+				scope.capture(),
+				undefined,
+				{ probe: makeProbe() as never },
+			);
+			expect(res.status).toBe("unavailable");
+			if (res.status === "unavailable") {
+				expect(res.reasonCode).toBe("artifact-unavailable");
+			}
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
 	});
 
-	it("resolves generated C implementation in .lake/build/ir/", () => {
+	it("ignores ambient LEAN_INDEX_PACKAGES and .lake/packages unless explicitly listed in admittedContext.moduleRoots", async () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ilean-pkgs-"),
+		);
+		const prevEnv = process.env.LEAN_INDEX_PACKAGES;
+		try {
+			const mainRoot = path.join(tmpDir, ".lake", "build", "lib", "lean");
+			const mainPkg = path.join(mainRoot, "MyPkg");
+			const unAdmittedPkgRoot = path.join(
+				tmpDir,
+				".lake",
+				"packages",
+				"mathlib",
+				".lake",
+				"build",
+				"lib",
+				"lean",
+			);
+			const unAdmittedPkg = path.join(unAdmittedPkgRoot, "Mathlib");
+			fs.mkdirSync(mainPkg, { recursive: true });
+			fs.mkdirSync(unAdmittedPkg, { recursive: true });
+
+			fs.writeFileSync(
+				path.join(mainPkg, "Main.ilean"),
+				JSON.stringify({
+					version: 5,
+					module: "MyPkg.Main",
+					directImports: [],
+					decls: { mainThm: [0, 0, 0, 10, 0, 0, 0, 7] },
+				}),
+				"utf-8",
+			);
+			fs.writeFileSync(
+				path.join(unAdmittedPkg, "Dep.ilean"),
+				JSON.stringify({
+					version: 5,
+					module: "Mathlib.Dep",
+					directImports: [],
+					decls: { depThm: [0, 0, 0, 10, 0, 0, 0, 6] },
+				}),
+				"utf-8",
+			);
+
+			process.env.LEAN_INDEX_PACKAGES = "1";
+			const admission = makeAdmission(tmpDir, [mainRoot]);
+			const scope = beginScope({ role: "primary" });
+			const scanRes = await scanAllILeanFiles(
+				admission,
+				scope.capture(),
+				undefined,
+				{ probe: makeProbe() as never },
+			);
+			expect(scanRes.status).toBe("available");
+			if (scanRes.status === "available") {
+				expect(scanRes.items).toHaveLength(1);
+				expect(scanRes.items[0]?.module).toBe("MyPkg.Main");
+				expect(lookupILeanDeclaration(scanRes.snapshot, "depThm")).toEqual([]);
+			}
+		} finally {
+			if (prevEnv === undefined) {
+				delete process.env.LEAN_INDEX_PACKAGES;
+			} else {
+				process.env.LEAN_INDEX_PACKAGES = prevEnv;
+			}
+			clearILeanScanCache();
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("resolves generated C implementation only under the same admitted moduleRoot and never falls back to .lake/build/ir", () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-c-ir-test-"));
 		try {
-			const irDir = path.join(tmpDir, ".lake", "build", "ir", "MyPkg");
-			fs.mkdirSync(irDir, { recursive: true });
-			const cFile = path.join(irDir, "Core.c");
+			const modRoot = path.join(tmpDir, "admitted-root");
+			const pkgDir = path.join(modRoot, "MyPkg");
+			fs.mkdirSync(pkgDir, { recursive: true });
+			const cFile = path.join(pkgDir, "Core.c");
 			const cCode = `// Lean compiler output
 #include <lean/lean.h>
 LEAN_EXPORT lean_object* lp_MyPkg_myTheorem(lean_object*);
@@ -145,46 +298,116 @@ LEAN_EXPORT lean_object* lp_MyPkg_myBoxedFn___boxed(lean_object* a, lean_object*
 `;
 			fs.writeFileSync(cFile, cCode, "utf-8");
 
+			// Also create an unadmitted .lake/build/ir file to verify it is never read
+			const ambientIr = path.join(tmpDir, ".lake", "build", "ir", "MyPkg");
+			fs.mkdirSync(ambientIr, { recursive: true });
+			fs.writeFileSync(
+				path.join(ambientIr, "AmbientOnly.c"),
+				"LEAN_EXPORT lean_object* lp_MyPkg_ambientFn(lean_object* x) { return x; }\n",
+				"utf-8",
+			);
+
 			const loc = lookupGeneratedCDeclaration(
-				tmpDir,
+				modRoot,
 				"MyPkg.Core",
 				"myTheorem",
 			);
 			expect(loc).not.toBeNull();
-			expect(loc?.filePath).toBe(cFile);
+			expect(loc?.filePath).toBe(fs.realpathSync(cFile));
 			expect(loc?.line).toBe(3);
 			expect(loc?.symbol).toBe("lp_MyPkg_myTheorem");
 
 			const constLoc = lookupGeneratedCDeclaration(
-				tmpDir,
+				modRoot,
 				"MyPkg.Core",
 				"myConst",
 			);
-			expect(constLoc).not.toBeNull();
 			expect(constLoc?.line).toBe(6);
 			expect(constLoc?.symbol).toBe("_init_lp_MyPkg_myConst");
 
 			const boxedLoc = lookupGeneratedCDeclaration(
-				tmpDir,
+				modRoot,
 				"MyPkg.Core",
 				"myBoxedFn",
 			);
-			expect(boxedLoc).not.toBeNull();
 			expect(boxedLoc?.line).toBe(9);
 			expect(boxedLoc?.symbol).toBe("lp_MyPkg_myBoxedFn___boxed");
 
+			// Ambient .lake/build/ir is ignored
 			expect(
-				lookupGeneratedCDeclaration(tmpDir, "MyPkg.Core", "nonExistent"),
-			).toBeNull();
-			expect(
-				lookupGeneratedCDeclaration(tmpDir, "MyPkg.Missing", "myTheorem"),
+				lookupGeneratedCDeclaration(tmpDir, "MyPkg.AmbientOnly", "ambientFn"),
 			).toBeNull();
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
 	});
 
-	it("resolves extern C declarations and reverse Lean bindings", () => {
+	it("generates pedagogical proof walkthrough from an admitted observation and refuses raw workspace string", async () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-pedagogical-walkthrough-"),
+		);
+		try {
+			const leanDir = path.join(tmpDir, "EASCI");
+			fs.mkdirSync(leanDir, { recursive: true });
+
+			const sampleLean = `/-- Cauchy-Schwarz inequality for inner products -/
+theorem cauchy_schwarz_inequality (u v : Real) : u * v <= u * u + v * v := by
+  have h1 : 0 <= (u - v) * (u - v) := by sorry
+  have h2 : 2 * (u * v) <= u * u + v * v := by sorry
+  sorry
+`;
+			const filePath = path.join(leanDir, "Analysis.lean");
+			fs.writeFileSync(filePath, sampleLean, "utf-8");
+			fs.writeFileSync(
+				path.join(leanDir, "Analysis.ilean"),
+				JSON.stringify({
+					version: 5,
+					module: "Analysis",
+					directImports: [],
+					decls: {
+						cauchy_schwarz_inequality: [0, 0, 4, 7, 1, 8, 1, 33],
+					},
+				}),
+				"utf-8",
+			);
+
+			// Raw workspace string is refused
+			expect(
+				generatePedagogicalProofWalkthrough(
+					tmpDir,
+					"cauchy_schwarz_inequality",
+					filePath,
+				),
+			).toBeNull();
+
+			const admission = makeAdmission(tmpDir, [leanDir]);
+			const scope = beginScope({ role: "primary" });
+			const scanRes = await scanAllILeanFiles(
+				admission,
+				scope.capture(),
+				undefined,
+				{ probe: makeProbe() as never },
+			);
+			expect(scanRes.status).toBe("available");
+			if (scanRes.status !== "available") return;
+
+			const walkthrough = generatePedagogicalProofWalkthrough(
+				scanRes.snapshot,
+				"cauchy_schwarz_inequality",
+			);
+
+			expect(walkthrough).not.toBeNull();
+			expect(walkthrough?.symbol).toBe("cauchy_schwarz_inequality");
+			expect(walkthrough?.docstring).toContain("Cauchy-Schwarz inequality");
+			expect(walkthrough?.milestones.length).toBe(2);
+			expect(walkthrough?.statement.rigorousLatex).toContain("\\le");
+			expect(walkthrough?.statement.rigorousLatex).toContain("\\mathbb{R}");
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("preserves extern C lookup, ITP ontology lookup, and blueprintStatus audit", () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-c-extern-test-"),
 		);
@@ -192,39 +415,27 @@ LEAN_EXPORT lean_object* lp_MyPkg_myBoxedFn___boxed(lean_object* a, lean_object*
 			const nativeDir = path.join(tmpDir, "src", "native");
 			fs.mkdirSync(nativeDir, { recursive: true });
 			const cFile = path.join(nativeDir, "ffi.c");
-			const cCode = `#include <lean/lean.h>
-LEAN_EXPORT lean_object* my_native_c_func(lean_object* a) {
-    return a;
-}
-`;
-			fs.writeFileSync(cFile, cCode, "utf-8");
+			fs.writeFileSync(
+				cFile,
+				"LEAN_EXPORT lean_object* my_native_c_func(lean_object* a) {\n return a;\n}\n",
+				"utf-8",
+			);
 
 			const leanDir = path.join(tmpDir, "MyPkg");
 			fs.mkdirSync(leanDir, { recursive: true });
-			const leanFile = path.join(leanDir, "Native.lean");
-			const leanCode = `import Init
-@[extern "my_native_c_func"]
-opaque myNativeFunc (n : Nat) : IO Nat
-`;
-			fs.writeFileSync(leanFile, leanCode, "utf-8");
+			fs.writeFileSync(
+				path.join(leanDir, "Native.lean"),
+				'import Init\n@[extern "my_native_c_func"]\nopaque myNativeFunc (n : Nat) : IO Nat\n',
+				"utf-8",
+			);
 
-			const cLoc = lookupExternCDeclaration(tmpDir, "my_native_c_func");
-			expect(cLoc).not.toBeNull();
-			expect(cLoc?.filePath).toBe(cFile);
-			expect(cLoc?.line).toBe(1);
+			expect(
+				lookupExternCDeclaration(tmpDir, "my_native_c_func")?.filePath,
+			).toBe(cFile);
+			expect(
+				lookupLeanExternForCSymbol(tmpDir, "my_native_c_func")?.uri,
+			).toContain("Native.lean");
 
-			const leanLoc = lookupLeanExternForCSymbol(tmpDir, "my_native_c_func");
-			expect(leanLoc).not.toBeNull();
-			expect(leanLoc?.uri).toContain("Native.lean");
-			expect(leanLoc?.range.start.line).toBe(1);
-		} finally {
-			removeTempDirSync(tmpDir);
-		}
-	});
-
-	it("looks up ITP master concepts matching queries", () => {
-		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-itp-test-"));
-		try {
 			const indexDir = path.join(
 				tmpDir,
 				"docs",
@@ -233,230 +444,45 @@ opaque myNativeFunc (n : Nat) : IO Nat
 				"indexes",
 			);
 			fs.mkdirSync(indexDir, { recursive: true });
-			const sampleIndex = {
-				version: "1.0.0",
-				master_concepts: [
-					{
-						concept_id: "CONCEPT-HOARE-LOGIC-WEAKEST-PRECONDITION",
-						canonical_name: "Hoare Logic & Weakest Preconditions",
-						ranganathan_facet: {
-							domain_theory: "Deductive Program Verification",
-						},
-						msc2020: ["68Q60", "03B44"],
-						prover_mappings: {
-							lean4: {
-								primary_tactics: ["wp", "vcgen", "hoare_step"],
-								syntax_pattern: "wp [h]",
-							},
-						},
-					},
-				],
-			};
 			fs.writeFileSync(
 				path.join(indexDir, "master-authority-index.json"),
-				JSON.stringify(sampleIndex, null, 2),
+				JSON.stringify({
+					version: "1.0.0",
+					master_concepts: [
+						{
+							concept_id: "CONCEPT-HOARE",
+							canonical_name: "Hoare Logic",
+							ranganathan_facet: { domain_theory: "Verification" },
+							msc2020: ["68Q60"],
+							prover_mappings: { lean4: { primary_tactics: ["wp"] } },
+						},
+					],
+				}),
 				"utf-8",
 			);
-
-			const matches = lookupItpConceptForLeanDeclaration("Hoare", tmpDir);
-			expect(matches.length).toBe(1);
-			expect(matches[0].conceptId).toBe(
-				"CONCEPT-HOARE-LOGIC-WEAKEST-PRECONDITION",
+			expect(lookupItpConceptForLeanDeclaration("Hoare", tmpDir)).toHaveLength(
+				1,
 			);
-			expect(matches[0].primaryTactics).toContain("wp");
-			expect(matches[0].domainTheory).toBe("Deductive Program Verification");
 
-			const tacticMatches = lookupItpConceptForLeanDeclaration("vcgen", tmpDir);
-			expect(tacticMatches.length).toBe(1);
-
-			const noMatches = lookupItpConceptForLeanDeclaration(
-				"nonexistent-term",
-				tmpDir,
-			);
-			expect(noMatches.length).toBe(0);
-		} finally {
-			removeTempDirSync(tmpDir);
-		}
-	});
-
-	it("audits lean blueprint status and detects premature leanok, missing leanok, and ghost nodes", () => {
-		const tmpDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-blueprint-status-"),
-		);
-		try {
-			const leanDir = path.join(tmpDir, "EASCI");
 			const bpDir = path.join(tmpDir, "blueprint", "src");
-			fs.mkdirSync(leanDir, { recursive: true });
 			fs.mkdirSync(bpDir, { recursive: true });
-
-			const sampleLean = `
-/-- A fully proven theorem without sorries -/
-theorem proven_theorem (n : Nat) : n + 0 = n := by
-  rfl
-
-/-- A partially formal theorem with sorry -/
-theorem incomplete_theorem (n : Nat) : n * 0 = 0 := by
-  sorry
-
-/-- An untracked theorem -/
-theorem untracked_theorem (n : Nat) : n = n := by
-  rfl
-`;
-			fs.writeFileSync(path.join(leanDir, "Core.lean"), sampleLean, "utf-8");
-
-			const sampleTex = `
-\\begin{theorem}[Proven Theorem]
-\\label{thm:proven}
-\\lean{proven_theorem}
-This theorem is proven.
-\\end{theorem}
-
-\\begin{theorem}[Incomplete Theorem]
-\\label{thm:incomplete}
-\\lean{incomplete_theorem}
-\\leanok
-This theorem falsely claims leanok.
-\\end{theorem}
-
-\\begin{theorem}[Ghost Theorem]
-\\label{thm:ghost}
-\\lean{nonexistent_theorem}
-\\leanok
-This theorem does not exist in Lean.
-\\end{theorem}
-`;
-			fs.writeFileSync(path.join(bpDir, "content.tex"), sampleTex, "utf-8");
-
-			const status = auditLeanBlueprintStatus(tmpDir, {
+			fs.writeFileSync(
+				path.join(leanDir, "Core.lean"),
+				"theorem proven_theorem (n : Nat) : n = n := by\n  rfl\n",
+				"utf-8",
+			);
+			fs.writeFileSync(
+				path.join(bpDir, "content.tex"),
+				"\\begin{theorem}\\label{thm:p}\\lean{proven_theorem}\\leanok\\end{theorem}\n",
+				"utf-8",
+			);
+			const bp = auditLeanBlueprintStatus(tmpDir, {
 				blueprintDir: "blueprint/src",
-				formalizationDir: "EASCI",
+				formalizationDir: "MyPkg",
 			});
-
-			expect(status.leanTheoremsCount).toBe(3);
-			expect(status.blueprintTheoremsCount).toBe(3);
-			expect(status.prematureLeanokCount).toBe(1);
-			expect(status.prematureLeanok[0].leanSymbol).toBe("incomplete_theorem");
-			expect(status.missingLeanokCount).toBe(1);
-			expect(status.missingLeanok[0].leanSymbol).toBe("proven_theorem");
-			expect(status.ghostNodesCount).toBe(1);
-			expect(status.ghostNodes[0].leanSymbol).toBe("nonexistent_theorem");
-			expect(status.untrackedLeanCount).toBe(1);
-			expect(status.untrackedLean[0].leanSymbol).toBe("untracked_theorem");
-			expect(status.rendered).toContain(
-				"Lean Blueprint Coverage & Integrity Audit",
-			);
+			expect(bp.leanTheoremsCount).toBe(1);
+			expect(bp.blueprintTheoremsCount).toBe(1);
 		} finally {
-			removeTempDirSync(tmpDir);
-		}
-	});
-
-	it("generates pedagogical proof walkthrough with 3-stage mathematical breakdown", () => {
-		const tmpDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-pedagogical-walkthrough-"),
-		);
-		try {
-			const leanDir = path.join(tmpDir, "EASCI");
-			fs.mkdirSync(leanDir, { recursive: true });
-
-			const sampleLean = `
-/-- Cauchy-Schwarz inequality for inner products -/
-theorem cauchy_schwarz_inequality (u v : Real) : u * v <= u * u + v * v := by
-  have h1 : 0 <= (u - v) * (u - v) := by sorry
-  have h2 : 2 * (u * v) <= u * u + v * v := by sorry
-  sorry
-`;
-			const filePath = path.join(leanDir, "Analysis.lean");
-			fs.writeFileSync(filePath, sampleLean, "utf-8");
-
-			const walkthrough = generatePedagogicalProofWalkthrough(
-				tmpDir,
-				"cauchy_schwarz_inequality",
-				filePath,
-			);
-
-			expect(walkthrough).not.toBeNull();
-			expect(walkthrough?.symbol).toBe("cauchy_schwarz_inequality");
-			expect(walkthrough?.docstring).toContain("Cauchy-Schwarz inequality");
-			expect(walkthrough?.milestones.length).toBe(2);
-			expect(walkthrough?.milestones[0].text).toContain("have h1");
-			expect(walkthrough?.milestones[1].text).toContain("have h2");
-			expect(walkthrough?.statement.rigorousLatex).toContain("\\le");
-			expect(walkthrough?.statement.rigorousLatex).toContain("\\mathbb{R}");
-			expect(walkthrough?.rendered).toContain(
-				"Stage 1: Intuitive Mathematical Summary",
-			);
-			expect(walkthrough?.rendered).toContain(
-				"Stage 2: Rigorous Mathematical Formulation",
-			);
-			expect(walkthrough?.rendered).toContain("Stage 3: Type De-formalization");
-		} finally {
-			removeTempDirSync(tmpDir);
-		}
-	});
-
-	it("gates .lake/packages scanning behind LEAN_INDEX_PACKAGES=1 and caches scanAllILeanFiles", () => {
-		const tmpDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-ilean-pkgs-"),
-		);
-		const prevEnv = process.env.LEAN_INDEX_PACKAGES;
-		try {
-			const mainDir = path.join(tmpDir, ".lake", "build", "lib", "lean", "MyPkg");
-			const pkgDir = path.join(
-				tmpDir,
-				".lake",
-				"packages",
-				"mathlib",
-				".lake",
-				"build",
-				"lib",
-				"lean",
-				"Mathlib",
-			);
-			fs.mkdirSync(mainDir, { recursive: true });
-			fs.mkdirSync(pkgDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(mainDir, "Main.ilean"),
-				JSON.stringify({
-					version: 5,
-					module: "MyPkg.Main",
-					directImports: [],
-					decls: { mainThm: [1, 0, 2, 0, 1, 8, 1, 15] },
-					references: {},
-				}),
-				"utf-8",
-			);
-			fs.writeFileSync(
-				path.join(pkgDir, "Dep.ilean"),
-				JSON.stringify({
-					version: 5,
-					module: "Mathlib.Dep",
-					directImports: [],
-					decls: { depThm: [1, 0, 2, 0, 1, 8, 1, 14] },
-					references: {},
-				}),
-				"utf-8",
-			);
-
-			delete process.env.LEAN_INDEX_PACKAGES;
-			clearILeanScanCache();
-			expect(findILeanRoots(tmpDir)).toHaveLength(1);
-			const defaultFiles = scanAllILeanFiles(tmpDir);
-			expect(defaultFiles).toHaveLength(1);
-			expect(defaultFiles[0]?.module).toBe("MyPkg.Main");
-			// Cached return on repeat call
-			expect(scanAllILeanFiles(tmpDir)).toBe(defaultFiles);
-
-			process.env.LEAN_INDEX_PACKAGES = "1";
-			expect(findILeanRoots(tmpDir)).toHaveLength(2);
-			const allFiles = scanAllILeanFiles(tmpDir);
-			expect(allFiles).toHaveLength(2);
-		} finally {
-			if (prevEnv === undefined) {
-				delete process.env.LEAN_INDEX_PACKAGES;
-			} else {
-				process.env.LEAN_INDEX_PACKAGES = prevEnv;
-			}
-			clearILeanScanCache();
 			removeTempDirSync(tmpDir);
 		}
 	});

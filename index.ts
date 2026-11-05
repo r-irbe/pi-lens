@@ -257,6 +257,7 @@ import {
 	runQuietWindow,
 } from "./clients/quiet-window.js";
 import { setAmbientAbortSignal } from "./clients/safe-spawn.js";
+import { invalidateILeanScans } from "./clients/lean-context.js";
 import { initI18n, t } from "./i18n.js";
 import {
 	createActivateToolsTool,
@@ -1943,12 +1944,16 @@ function activateExtension(hostPi: ExtensionAPI) {
 			runtime.captureSessionGeneration(),
 		),
 		createAstGrepOutlineTool(astGrepClient),
-		createLspNavigationTool((name, cwd) => getLensFlag(name, cwd), {
-			runtime,
-			cacheManager,
-			readGuard: runtime.readGuard,
-			dbg,
-		}),
+		createLspNavigationTool(
+			(name, cwd) => getLensFlag(name, cwd),
+			{
+				runtime,
+				cacheManager,
+				readGuard: runtime.readGuard,
+				dbg,
+			},
+			() => scope?.capture(),
+		),
 		createLensDiagnosticMarkTool(
 			() => runtime.projectRoot,
 			() => ({
@@ -3895,6 +3900,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		sessionId: string | undefined,
 	): void => {
 		if (!scope) return;
+		invalidateILeanScans(scope.scopeId);
 		retireScope(scope, reason);
 		logScopeTransition(scope, {
 			transition: "shutdown",

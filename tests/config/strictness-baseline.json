@@ -6,17 +6,17 @@
 		"clients/dispatch/rules": 12,
 		"clients/dispatch/runners": 82,
 		"clients/dispatch/runners/utils": 3,
-		"clients/lsp": 52,
+		"clients/lsp": 45,
 		"clients/lsp/wait-policy": 1,
 		"clients/project-diagnostics/runner-adapters": 1,
 		"clients/redact": 16,
 		"clients/review-graph": 18,
 		"mcp": 1,
 		"scripts": 1,
-		"tools": 5
+		"tools": 4
 	},
 	"tsconfig.strict-optional.json": {
-		"clients": 344,
+		"clients": 346,
 		"clients/config-core": 1,
 		"clients/dispatch": 20,
 		"clients/dispatch/facts": 1,
@@ -24,7 +24,7 @@
 		"clients/dispatch/runners/utils": 9,
 		"clients/dispatch/utils": 2,
 		"clients/installer": 25,
-		"clients/lsp": 59,
+		"clients/lsp": 61,
 		"clients/mcp": 7,
 		"clients/project-diagnostics": 3,
 		"clients/project-diagnostics/runner-adapters": 3,
@@ -32,6 +32,6 @@
 		"clients/review-graph": 42,
 		"mcp": 10,
 		"scripts": 1,
-		"tools": 48
+		"tools": 49
 	}
 }

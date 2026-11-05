@@ -1,3 +1,4 @@
+// flake-shape: in-process-mock — launchLSP and safeSpawnAsync are mocked to observe compiler/Lean-context invocation arguments without spawning external compilers
 // Review 831: raw contributions, real content sentinels and lexical boundaries.
 import { ok } from "node:assert/strict";
 import * as fs from "node:fs";
@@ -9,11 +10,18 @@ const { safeSpawnAsync, launchLSP } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	launchLSP: vi.fn(),
 }));
-vi.mock("../../../../clients/safe-spawn.js", async (original) => ({
-	...(await original<typeof import("../../../../clients/safe-spawn.js")>()),
+vi.mock("../../../../clients/safe-spawn.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/safe-spawn.js")
+	>()),
 	safeSpawnAsync,
 }));
-vi.mock("../../../../clients/lsp/launch.js", () => ({ launchLSP }));
+vi.mock("../../../../clients/lsp/launch.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../../clients/lsp/launch.js")
+	>()),
+	launchLSP,
+}));
 import runner from "../../../../clients/dispatch/runners/cpp-check.js";
 import {
 	loadLSPConfig,

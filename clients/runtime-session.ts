@@ -133,6 +133,7 @@ import { resetZizmorTokenAvailability } from "./zizmor-config.js";
 import { resetSpawnTimeoutCooldowns } from "./spawn-timeout-cooldown.js";
 import { resetTestRunnerDelivery } from "./test-runner-delivery.js";
 import { resetLspMutationNoBridgeDbgLatch } from "./lsp-mutation.js";
+import { invalidateILeanScans } from "./lean-context.js";
 import type {
 	ClassificationBasis,
 	SessionStartClassification,
@@ -2647,6 +2648,7 @@ export async function handleSessionStart(
 	// outstanding touches and misattributed a stray expiry/eviction to the
 	// next session's first reconcile gauge.
 	resetCascadeTierSessionState();
+	invalidateILeanScans(runtime.sessionScope.scopeId);
 	runtime.resetForSession(sessionStartMs);
 	sessionGenerationAtStart = runtime.sessionGeneration;
 	logLatency({

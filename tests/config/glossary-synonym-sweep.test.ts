@@ -974,7 +974,8 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
-		"clients/lsp/server.ts": 130,
+		// 130 -> 137: canonical path namespace calls in resolveLeanFallbackFlags.
+		"clients/lsp/server.ts": 137,
 		"clients/lsp/session-roots.ts": 6,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
@@ -1246,7 +1247,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/actionlint.ts": 2,
 		"clients/dispatch/runners/ast-grep-napi.ts": 11,
 		"clients/dispatch/runners/biome-check.ts": 10,
-		"clients/dispatch/runners/cpp-check.ts": 3,
+		"clients/dispatch/runners/cpp-check.ts": 4,
 		"clients/dispatch/runners/credo.ts": 2,
 		"clients/dispatch/runners/cue-vet.ts": 8,
 		"clients/dispatch/runners/dart-analyze.ts": 1,

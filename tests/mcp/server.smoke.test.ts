@@ -1515,7 +1515,7 @@ describe("non-pi workspace trust (#4300)", () => {
 		}
 	}, 60_000);
 
-	it("admits Lean's code-running server through the real MCP spawn gate", async () => {
+	it("admits Lean's code-running server through the real MCP spawn gate while gating unverified pilens_lsp_navigation", async () => {
 		const env = setupTestEnvironment("pi-lens-mcp-trust-lean-");
 		const home = path.join(env.tmpDir, "home");
 		fs.mkdirSync(home);
@@ -1539,9 +1539,24 @@ describe("non-pi workspace trust (#4300)", () => {
 			env: { PI_LENS_HOME: home, PI_LENS_TEST_MODE: "0" },
 		});
 		try {
-			await child.request(4302, "tools/call", {
+			// 1. pilens_lsp_navigation refuses pre-execution before ensureReady or Lean spawn
+			const navRes = await child.request(4302, "tools/call", {
 				name: "pilens_lsp_navigation",
 				arguments: { operation: "documentSymbol", path: file },
+			});
+			const navResult = navRes.result as {
+				isError?: boolean;
+				content: Array<{ text: string }>;
+			};
+			expect(navResult.isError).toBe(true);
+			expect(fs.existsSync(marker), "navigation gated before Lean spawn").toBe(
+				false,
+			);
+
+			// 2. pilens_diagnostics crosses the real MCP spawn gate for the configured Lean server
+			await child.request(4303, "tools/call", {
+				name: "pilens_diagnostics",
+				arguments: { paths: [file], source: "lsp" },
 			});
 			expect(fs.existsSync(marker), "Lean crossed the project-code gate").toBe(
 				true,
@@ -1564,4 +1579,94 @@ describe("non-pi workspace trust (#4300)", () => {
 			env.cleanup();
 		}
 	}, 60_000);
+
+	it("does not trigger maybeAutoSessionStart or ensureReady before pilens_lsp_navigation on Lean or pathless calls", async () => {
+		const env = setupTestEnvironment("pi-lens-mcp-nav-host-boundary-");
+		const home = path.join(env.tmpDir, "home");
+		fs.mkdirSync(home);
+		const unservedDir = path.join(env.tmpDir, "unserved-lean");
+		fs.mkdirSync(unservedDir, { recursive: true });
+		const badConfigMarker = path.join(unservedDir, ".pi-lens", "lsp.json");
+		fs.mkdirSync(path.dirname(badConfigMarker), { recursive: true });
+		fs.writeFileSync(badConfigMarker, "{ invalid json", "utf8");
+		const leanFile = path.join(unservedDir, "Theorem.lean");
+		fs.writeFileSync(leanFile, "theorem t : 1 = 1 := rfl\n", "utf8");
+
+		const child = new McpHarness({
+			cwd: env.tmpDir,
+			env: {
+				PI_LENS_HOME: home,
+				PI_LENS_MCP_AUTO_SESSION: "1",
+			},
+		});
+		try {
+			// Skip initialize so autoSessionState.attempted starts false while PI_LENS_MCP_AUTO_SESSION=1 is eligible
+			const navLean = await child.request(4401, "tools/call", {
+				name: "pilens_lsp_navigation",
+				arguments: {
+					operation: "definition",
+					path: leanFile,
+					line: 1,
+					character: 9,
+					cwd: unservedDir,
+				},
+			});
+			const navLeanResult = navLean.result as {
+				isError?: boolean;
+				content: Array<{ text: string }>;
+			};
+			expect(navLeanResult.isError).toBe(true);
+			expect(navLeanResult.content[0]?.text).toContain("session-unavailable");
+
+			const navPathless = await child.request(4402, "tools/call", {
+				name: "pilens_lsp_navigation",
+				arguments: {
+					operation: "workspaceSymbol",
+					query: "Theorem",
+					cwd: unservedDir,
+				},
+			});
+			const navPathlessResult = navPathless.result as {
+				isError?: boolean;
+				content: Array<{ text: string }>;
+			};
+			expect(navPathlessResult.isError).toBe(true);
+
+			// Verify neither Lean nor pathless navigation triggered maybeAutoSessionStart() or ensureReady(unservedDir):
+			// unservedDir/.pi-lens/lsp.json has invalid JSON that ensureReady -> initLSPConfig would record as PILENS_CFG_0001
+			await child.closeInput();
+			const logPath = path.join(home, "extension.log");
+			const logContent = fs.existsSync(logPath)
+				? fs.readFileSync(logPath, "utf8")
+				: "";
+			expect(logContent).not.toContain("PILENS_CFG_0001");
+			expect(logContent).not.toContain("auto session_start");
+		} finally {
+			child.dispose();
+			env.cleanup();
+		}
+	}, 60_000);
+
+	it("prevents an in-flight MCP bootstrap interrupted by _resetMcpSessionContext from republishing resolvedRuntime and succeeds on successor bootstrap", async () => {
+		const sessionMod = await import("../../clients/mcp/session.js");
+		sessionMod._resetMcpSessionContext();
+		try {
+			const pending = sessionMod.getMcpSessionContext();
+			expect(sessionMod.peekMcpSessionRuntime()).toBeUndefined();
+
+			// Interrupt the in-flight bootstrap before it resolves
+			sessionMod._resetMcpSessionContext();
+			await expect(pending).rejects.toThrow(
+				/MCP session context reset during bootstrap/,
+			);
+			expect(sessionMod.peekMcpSessionRuntime()).toBeUndefined();
+
+			// Successor bootstrap completes and publishes a live runtime
+			const next = await sessionMod.getMcpSessionContext();
+			expect(sessionMod.peekMcpSessionRuntime()).toBe(next.runtime);
+			expect(next.runtime.captureSessionGeneration().isCurrent()).toBe(true);
+		} finally {
+			sessionMod._resetMcpSessionContext();
+		}
+	});
 });

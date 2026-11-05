@@ -1903,15 +1903,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"whole files rather than walking reachability.",
 		owner: "#2523 slice 2",
 	},
-	"mcp/server.ts#callTool:d0096ea8~3ba64d0e": {
-		family: "hook-await",
-		site: "off-hook",
-		reason:
-			"MCP tool-request handler (LSP navigation/diagnostics) and the " +
-			"request dispatcher itself. An agent is waiting on its own " +
-			"request; no pi hook budget applies.",
-		owner: "#2523 slice 2",
-	},
 	"mcp/server.ts#callTool:d0096ea8~47b872f7": {
 		family: "hook-await",
 		site: "off-hook",
@@ -1928,6 +1919,15 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 		reason:
 			"`pilens_turn_end` tool request: the MCP mirror of the turn_end " +
 			"hook (AC8), unbounded exactly like its index.ts twin.",
+		owner: "#2523 slice 2",
+	},
+	"mcp/server.ts#callTool:d0096ea8~8ef03872": {
+		family: "hook-await",
+		site: "off-hook",
+		reason:
+			"MCP tool-request handler (LSP navigation/diagnostics) and the " +
+			"request dispatcher itself. An agent is waiting on its own " +
+			"request; no pi hook budget applies.",
 		owner: "#2523 slice 2",
 	},
 	"mcp/server.ts#callTool:d0096ea8~ba799d41": {
@@ -2380,12 +2380,13 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// threads it.
 	"clients/instance-registry.ts": 37,
 	"clients/language-profile.ts": 3,
+	"clients/lean-context.ts": 3,
 	"clients/lens-engine.ts": 1,
 	"clients/lens-map.ts": 2,
 	"clients/lsp-budget.ts": 1,
 	"clients/lsp-document-symbols.ts": 2,
 	"clients/lsp/cascade-tier.ts": 2,
-	"clients/lsp/config.ts": 4,
+	"clients/lsp/config.ts": 5,
 	// #2817 round 2 F5: Git recovery now awaits the existing drift scheduler
 	// and its per-server root resolution. This remains an intentionally
 	// unbounded helper count until #2523 AC4 threads hook signals into the LSP
@@ -2498,7 +2499,7 @@ const HELPER_UNBOUNDED: Readonly<Record<string, number>> = {
 	// arm — the fallback for "a service shape without touchFile", which the
 	// real `LSPService` never was.
 	"tools/lsp-diagnostics.ts": 29,
-	"tools/lsp-navigation.ts": 34,
+	"tools/lsp-navigation.ts": 37,
 	"tools/module-report.ts": 3,
 	"tools/project-report.ts": 1,
 	"tools/symbol-search.ts": 1,

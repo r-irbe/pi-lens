@@ -6,7 +6,10 @@ import { probeToolAsync } from "../../tool-probe.js";
 import { resolveRunnerCwd } from "../../tool-cwd.js";
 import { getServerInitOverride } from "../../lsp/config.js";
 import { resolveLeanIncludeFlags } from "../../lean-context.js";
-import { incrementDegradationCount } from "../../degradation-ledger.js";
+import {
+	classifyLeanContextFailureMessage,
+	recordLeanContextUnavailable,
+} from "../../lean-context-unavailable.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -236,9 +239,10 @@ function beginsWithLeanRuntimeInclude(content: string): boolean {
 	const trailing = /[ \t\v\f]+|\/\*[^\r\n]*?\*\//y;
 	trailing.lastIndex = end;
 	while (trailing.exec(logical)) end = trailing.lastIndex;
+	const nextChar = logical[end];
 	return (
 		end === logical.length ||
-		/[\r\n]/.test(logical[end]) ||
+		(nextChar !== undefined && /[\r\n]/.test(nextChar)) ||
 		logical.startsWith("//", end)
 	);
 }
@@ -265,10 +269,13 @@ const cppCheckRunner: RunnerDefinition = {
 		}
 		let leanIncludeFlags: string[] = [];
 		if (beginsWithLeanRuntimeInclude(content ?? "")) {
+			let rejectedByConfig = false;
 			try {
 				const override = getServerInitOverride("lean", absPath);
-				if (override?.leanContextUnavailable)
+				if (override?.leanContextUnavailable) {
+					rejectedByConfig = true;
 					throw new Error(override.leanContextUnavailable);
+				}
 				if (!override?.leanContext)
 					throw new Error(
 						"environment_unavailable: generated Lean C requires an admitted lsp.serverOverrides.lean.leanContext for matching runtime headers",
@@ -278,16 +285,18 @@ const cppCheckRunner: RunnerDefinition = {
 					cwd,
 					safeSpawnAsync,
 				);
-			} catch (error) {
+			} catch (thrown) {
 				const message =
-					error instanceof Error
-						? error.message
+					thrown instanceof Error
+						? thrown.message
 						: "environment_unavailable: cannot resolve the admitted Lean runtime headers";
-				incrementDegradationCount({
-					kind: "runner-empty-result",
-					subject: "cpp-check",
+				recordLeanContextUnavailable({
+					caller: "cpp-check",
+					reasonCode: classifyLeanContextFailureMessage(
+						message,
+						rejectedByConfig,
+					),
 					reason: message,
-					metadata: { mode: "lean-context-unavailable" },
 				});
 				return {
 					status: "failed",

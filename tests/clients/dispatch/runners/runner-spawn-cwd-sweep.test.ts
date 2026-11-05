@@ -144,7 +144,7 @@ const POPULATION_FILES = [
  * `probeToolAsync`, where this file admits it by name.
  */
 const EXPECTED_FILES = 79;
-const EXPECTED_DIRECT_SITES = 132;
+const EXPECTED_DIRECT_SITES = 133;
 /**
  * Every same-file spawn-routing wrapper call site the scan discovers. Pinned
  * as a LIST, not a count, because the list is the part round 2 got wrong: it
@@ -440,6 +440,10 @@ const ORIGIN_ADMISSION_ROWS: ReadonlyArray<readonly [string, string]> = [
 	[
 		"clients/lsp/launch.ts#launchLSP:e7df4bb9~3f60133c",
 		"launchLSP forwards its caller-provided cwd through trySpawn",
+	],
+	[
+		"clients/lsp/server.ts#resolveLeanFallbackFlags:9dae9f20~1167a91f",
+		"cwd is resolveLeanFallbackFlags's own root parameter, resolved at the LSP server launch boundary",
 	],
 	[
 		"clients/biome-client.ts#BiomeClient.spawnBiomeAsync:710974ec~dbf27697",

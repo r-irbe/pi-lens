@@ -264,6 +264,24 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 			reason:
 				"the defect is wall-clock only (2^N globstar backtracking); a fake clock measures nothing",
 		},
+	"in-process-mock:clients/dispatch/runners/cpp-check-review831.test.ts::clients/lsp/launch":
+		{
+			detector: "in-process-mock",
+			reason:
+				"launchLSP is mocked alongside safeSpawnAsync to observe Lean-context launch arguments without spawning an external server",
+		},
+	"in-process-mock:clients/lsp/lean4-ilean-lifecycle.test.ts::clients/bootstrap":
+		{
+			detector: "in-process-mock",
+			reason:
+				"loadBootstrapClients is intercepted so MCP session_start lifecycle tests stay offline without spawning ambient analyzers",
+		},
+	"in-process-mock:tools/lsp-navigation-admitted-context.test.ts::clients/lsp/capabilities":
+		{
+			detector: "in-process-mock",
+			reason:
+				"getLSPService and peekLSPService return the shared makeLspServiceDouble to test offline route gating and warm-route binding without spawning lean",
+		},
 	"never-settling-wait:scripts/mutate-fixture.test.ts": {
 		detector: "never-settling-wait",
 		reason:

@@ -71,6 +71,9 @@ const EXEMPTIONS: Record<string, string> = {
 		"lsp/client-registry.ts:inFlight, backlog #1753",
 
 	// ── Not the primitive's shape: these hold no promise per key ──
+	"lsp/lean4-ilean.ts:activeInFlightScans":
+		"exempt: a scalar number COUNTER of running ilean scans used by the " +
+		"test-reset state probe, not a per-key promise registry",
 	"ndjson-logger.ts:inFlightBatch":
 		"exempt: the BATCH of queue items one writer is currently flushing, not " +
 		"a per-key promise registry — there is one writer per file and nothing " +

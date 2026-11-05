@@ -148,12 +148,22 @@ describe("cpp-check scoped Lean runtime context", () => {
 			expect.objectContaining({
 				phase: "degradation_ledger",
 				metadata: expect.objectContaining({
-					kind: "runner-empty-result",
+					kind: "lean-context-unavailable",
 					subject: "cpp-check",
-					mode: "lean-context-unavailable",
+					consumer: "cpp-check",
+					phase: "pre-execution",
+					reasonCode: "admission-missing",
 				}),
 			}),
 		);
+		expect(
+			rows.some(
+				(row) =>
+					row.phase === "degradation_ledger" &&
+					(row.metadata?.kind === "runner-empty-result" ||
+						row.metadata?.kind === "runner-parsed-nothing"),
+			),
+		).toBe(false);
 	});
 
 	it("declines a wrong compiler version or absent headers without running the C compiler", async () => {

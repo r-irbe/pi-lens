@@ -57,6 +57,7 @@
  * now applies the ordinary tier precedence and the deny union to ONE node.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -200,9 +201,19 @@ export interface LeanContextRejection {
 	readonly key?: LeanContextKey;
 }
 
+export interface ConfigSourceDigest {
+	readonly file: string;
+	readonly tier: SourceTier;
+	readonly exists: boolean;
+	readonly sha256?: string;
+	readonly byteLength?: number;
+}
+
 export interface PiLensConfigResolution {
 	/** Bounded effective rejection provenance, computed before lossy normalization. */
 	readonly leanContextRejection?: LeanContextRejection;
+	/** Read-time candidate source digests (existing and absent candidate paths). */
+	readonly contributingConfigSources: readonly ConfigSourceDigest[];
 	/** The merged configuration. */
 	readonly value: Record<string, unknown>;
 	readonly provenance: ReadonlyMap<string, Provenance>;
@@ -236,11 +247,56 @@ function canonicalGlobalFile(
 		: path.join(options.globalDir, CANONICAL_GLOBAL_CONFIG_FILE);
 }
 
+function readConfigDocumentAndDigest(
+	file: string,
+	tier: SourceTier,
+): { outcome: ConfigReadOutcome; digest: ConfigSourceDigest } {
+	let rawBytes: Buffer;
+	try {
+		rawBytes = fs.readFileSync(file);
+	} catch (thrown) {
+		if (
+			thrown instanceof Error &&
+			"code" in thrown &&
+			thrown.code === "ENOENT"
+		) {
+			return {
+				outcome: { ["status"]: "missing" },
+				digest: { file, tier, exists: false },
+			};
+		}
+		return {
+			outcome: { ["status"]: "error", ["error"]: thrown },
+			digest: { file, tier, exists: false },
+		};
+	}
+	const digest: ConfigSourceDigest = {
+		file,
+		tier,
+		exists: true,
+		sha256: createHash("sha256").update(rawBytes).digest("hex"),
+		byteLength: rawBytes.byteLength,
+	};
+	const text = rawBytes.toString("utf-8");
+	try {
+		return {
+			outcome: { ["status"]: "ok", value: JSON.parse(text) as unknown },
+			digest,
+		};
+	} catch (thrown) {
+		return {
+			outcome: { ["status"]: "error", ["error"]: thrown, sourceText: text },
+			digest,
+		};
+	}
+}
+
 function collectDocuments(
 	dir: string,
 	locations: readonly ConfigLocation[],
 	tier: SourceTier,
 	onReadError: ((failure: ConfigReadFailure) => void) | undefined,
+	digests?: ConfigSourceDigest[],
 ): ConfigDocument[] {
 	const documents: ConfigDocument[] = [];
 	for (const location of locations) {
@@ -250,7 +306,8 @@ function collectDocuments(
 		// document, which would double-read and double-validate it
 		// (global-config-location PR, refs #2457).
 		if (tier !== "global" && isResolvedGlobalConfigPath(file)) continue;
-		const outcome = readConfigDocument(file);
+		const { outcome, digest } = readConfigDocumentAndDigest(file, tier);
+		digests?.push(digest);
 		if (outcome.status === "missing") continue;
 		if (outcome.status === "error") {
 			onReadError?.({
@@ -277,6 +334,7 @@ function collectDocuments(
  */
 function collectPiLensConfigDocuments(
 	options: ResolvePiLensConfigOptions,
+	digests?: ConfigSourceDigest[],
 ): ConfigDocument[] {
 	const documents: ConfigDocument[] = [];
 	const { globalDir, onReadError } = options;
@@ -291,7 +349,8 @@ function collectPiLensConfigDocuments(
 						? undefined
 						: path.join(globalDir, location.relativePath);
 			if (file === undefined) continue;
-			const outcome = readConfigDocument(file);
+			const { outcome, digest } = readConfigDocumentAndDigest(file, "global");
+			digests?.push(digest);
 			if (outcome.status === "missing") continue;
 			if (outcome.status === "error") {
 				onReadError?.({
@@ -314,21 +373,30 @@ function collectPiLensConfigDocuments(
 			options.cwd,
 			options.homeDir ?? os.homedir(),
 		).reverse();
-		const bearing = dirs
-			.map((dir) => ({
+		const scanned = dirs.map((dir) => {
+			const dirDigests: ConfigSourceDigest[] = [];
+			const found = collectDocuments(
 				dir,
-				found: collectDocuments(
-					dir,
-					PROJECT_CONFIG_LOCATIONS,
-					"project",
-					onReadError,
-				),
-			}))
-			.filter((entry) => entry.found.length > 0);
-		bearing.forEach((entry, index) => {
-			const tier: SourceTier = index === 0 ? "project" : "nested-project";
-			for (const document of entry.found) documents.push({ ...document, tier });
+				PROJECT_CONFIG_LOCATIONS,
+				"project",
+				onReadError,
+				dirDigests,
+			);
+			return { dir, found, dirDigests };
 		});
+		let seenBearing = false;
+		for (const entry of scanned) {
+			if (entry.found.length > 0) {
+				const tier: SourceTier = seenBearing ? "nested-project" : "project";
+				seenBearing = true;
+				for (const d of entry.dirDigests) digests?.push({ ...d, tier });
+				for (const document of entry.found)
+					documents.push({ ...document, tier });
+			} else {
+				const tier: SourceTier = seenBearing ? "nested-project" : "project";
+				for (const d of entry.dirDigests) digests?.push({ ...d, tier });
+			}
+		}
 	}
 
 	return documents;
@@ -409,7 +477,11 @@ export function summarizeConfigResolution(
 export function resolvePiLensConfig(
 	options: ResolvePiLensConfigOptions,
 ): PiLensConfigResolution {
-	const documents = collectPiLensConfigDocuments(options);
+	const contributingConfigSources: ConfigSourceDigest[] = [];
+	const documents = collectPiLensConfigDocuments(
+		options,
+		contributingConfigSources,
+	);
 	const sources = configSources(documents);
 	const leanContextRejection = effectiveLeanContextRejection(sources);
 	const resolution = resolveConfig<Record<string, unknown>>({
@@ -419,6 +491,7 @@ export function resolvePiLensConfig(
 	return {
 		value: resolution.resolved.value ?? {},
 		leanContextRejection,
+		contributingConfigSources,
 		provenance: resolution.resolved.provenance,
 		records: finalizeRecords(
 			[
@@ -679,7 +752,8 @@ function effectiveLeanContextRejection(
 				});
 		}
 	}
-	return rejected.values().next().value;
+	for (const entry of rejected.values()) return entry;
+	return undefined;
 }
 
 function configSources(

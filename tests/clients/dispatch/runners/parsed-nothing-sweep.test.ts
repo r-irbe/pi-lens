@@ -166,6 +166,12 @@ describe("parsed-nothing sweep (#1948)", () => {
 			stale,
 			`stale DIRECT_LEDGER_WRITERS entries: ${stale.join(", ")}`,
 		).toEqual([]);
+
+		// Pre-execution LeanContext refusal in cpp-check.ts must record truthful
+		// lean-context-unavailable via recordLeanContextUnavailable, never runner-empty-result.
+		const cppCheckSource = read("cpp-check.ts");
+		expect(cppCheckSource).toContain("recordLeanContextUnavailable");
+		expect(cppCheckSource).not.toContain("runner-empty-result");
 	});
 
 	it("declares each runner in exactly one registry", () => {
