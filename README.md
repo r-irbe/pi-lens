@@ -24,6 +24,10 @@ When an AI agent edits code without live IDE feedback, three failure modes waste
 2. **Agents waste dozens of turns running `grep` to find symbols**: `pi-lens` keeps an always-warm identifier index (`symbol_search` -> `module_report` -> `read_symbol`) and enforces a **read-guard** so agents read the target code before overwriting it.
 3. **Stale warnings confuse agents**: `pi-lens` gates every diagnostic against file modification times, filters out stale results, lets agents triage false positives (`lens_diagnostic_mark`), and holds `git commit` / `git push` when unresolved errors remain.
 
+> **Upstream & Fork Relationship**: Built on [`apmantza/pi-lens`](https://github.com/apmantza/pi-lens) (which provides the 46-language LSP pool, 45+ edit-time runners, `review-graph` impact cascade, and freshness gate), this [`r-irbe/pi-lens`](https://github.com/r-irbe/pi-lens) fork adds **first-class Lean 4 language server (`lake serve`) integration**, exact `LeanContext` workspace admission (`lean-toolchain` + `lakefile.lean`/`lakefile.toml`), and Lean 4 build/diagnostic contracts.
+
+![How pi-lens Catches Cross-File Breakage & Eliminates Grep Loops](docs/assets/mechanics.png)
+
 ---
 
 ## Start in 2 Minutes
