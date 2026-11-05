@@ -4,44 +4,93 @@
 
 # pi-lens
 
-pi-lens gives AI coding agents fast, language-aware feedback while they write/edit.
+**Give AI coding agents real-time compiler, linter, and reverse-dependency feedback the moment they edit a file.**
+
+`pi-lens` connects coding agents ([`pi`](https://github.com/earendil-works/pi-coding-agent), Claude Code, Cursor, and MCP clients) to **47 language servers** (including first-class Lean 4 support) and **45+ linter/formatter runners** across 35+ file types.
+
+![pi-lens Architecture and Customer Journeys](docs/assets/overview.png)
 
 > **Working in this project as an AI agent?** Read the [agent guide](docs/agent-guide.md)
 > for how pi-lens surfaces diagnostics (honesty labels, blockers, read-before-edit)
 > and how to respond.
 
-## What It Does
+---
 
-- LSP diagnostics and navigation across supported languages
-- Impact cascade diagnostics that show which related files were affected and run LSP diagnostics on them
-- Language-specific linters, type-checkers, and scanners on every write/edit
-- Safe formatting/autofix where tools are configured or confidently detected
-- ast-grep and tree-sitter structural rules for correctness/security smells
-- Agent-facing tools for LSP navigation/diagnostics, AST search/replace,
-  diagnostics state, and project intelligence
-- Review-graph intelligence for supported languages via bundled tree-sitter WASMs
-- Ranked identifier search (`symbol_search`) over an always-warm word index,
-  feeding the discovery funnel (symbol_search → module_report → read_symbol)
-- Diagnostic triage (`lens_diagnostic_mark`): findings can be marked
-  false-positive, suppressed in source, deferred, or flagged-to-fix — honored
-  across all surfaces
-- `/lens-map` — interactive HTML dependency map of the project
-- Read-guard and edit-autopatch support to reduce bad edits
-- Background security/dependency scans for opted-in projects
-- Runtime health telemetry (`/lens-health`) including a bounded degradation
-  ledger for silently-degraded behavior (LSP breakers, formatter
-  skips/failures, idle evictions, timeouts)
-- MCP server (experimental) so Claude Code or any MCP client can drive the
-  same diagnostics/read-substitute tools pi-lens exposes to pi
+## Why Use `pi-lens`? (What Problem Does It Solve?)
 
-## Architecture
+When an AI agent edits code without live IDE feedback, three failure modes waste time and tokens:
 
-Most lifecycle events enter through one wrapper, which drops and counts events
-that arrive on a replaced session. `tool_call` registers raw: it delegates
-straight to a handler that owns its own total guard. Events fan out into the
-edit-time lane and the LSP lane. Both lanes write into the findings stores.
-Nothing reaches the agent from those stores until a freshness gate or an
-explicit age label clears it.
+1. **Editing one file silently breaks callers in other files**: If an agent changes a function signature in `utils.ts`, standard hooks only check `utils.ts`. `pi-lens` maintains a live call and import graph (`review-graph`) and runs *impact cascade diagnostics* on downstream files that import the changed symbol.
+2. **Agents waste dozens of turns running `grep` to find symbols**: `pi-lens` keeps an always-warm identifier index (`symbol_search` -> `module_report` -> `read_symbol`) and enforces a **read-guard** so agents read the target code before overwriting it.
+3. **Stale warnings confuse agents**: `pi-lens` gates every diagnostic against file modification times, filters out stale results, lets agents triage false positives (`lens_diagnostic_mark`), and holds `git commit` / `git push` when unresolved errors remain.
+
+---
+
+## Start in 2 Minutes
+
+Requires **Node.js >= 22.19.0**.
+
+```bash
+# Install from npm into pi
+pi install npm:pi-lens
+
+# Or install the Lean 4 + extended fork directly from git
+pi install git:github.com/r-irbe/pi-lens
+```
+
+<details>
+<summary><b>Want your coding agent to install and configure it for you? Paste this prompt:</b></summary>
+
+```text
+Install pi-lens (npm:pi-lens) into pi, then read AGENTS.md in
+https://github.com/apmantza/pi-lens for how the extension works and how it
+expects to be operated.
+```
+
+> **npm v12 note:** If `npm install` prompts about lifecycle scripts (such as `@ast-grep/cli`), run `npm approve-scripts` or accept the git-dependency prompt so the build step can finish.
+</details>
+
+---
+
+## Adapt to Your Use Case (Customer Journeys)
+
+<details open>
+<summary><b>1. Polyglot & Full-Stack Engineering -- Catch Broken Imports & Type Errors Early</b></summary>
+
+- **Who this is for**: Developers using AI agents on TypeScript, Python, Rust, Go, C++, or Java codebases.
+- **What you get**: Automatic formatting, secret scanning, `ast-grep` / `tree-sitter` bug-smell detection, warm LSP pooling, and reverse-dependency impact checks on every edit.
+</details>
+
+<details>
+<summary><b>2. Lean 4 Formal Verification & Mathlib Repositories</b></summary>
+
+- **Who this is for**: Theorem-proving workflows that need live Lean 4 diagnostics, symbol search, and project-wide dependency awareness alongside standard programming languages.
+- **What you get**: Integrated Lean 4 language server pooling, structural indexing, and honest degradation telemetry (`/lens-health`) if a language server times out.
+</details>
+
+<details>
+<summary><b>3. Claude Code & External MCP Clients</b></summary>
+
+- **Who this is for**: Teams using Claude Code or other MCP hosts who want the same symbol discovery funnel (`symbol_search`, `read_symbol`), AST search/replace, and live diagnostics that `pi-lens` gives to `pi`.
+- **How to use it**: See the [MCP Server Guide (`docs/mcp.md`)](docs/mcp.md) to attach `pi-lens` as an MCP server.
+</details>
+
+---
+
+## Detailed Capabilities & Internal Architecture
+
+<details>
+<summary><b>View full feature list and internal event-flow diagram</b></summary>
+
+### Core Capabilities
+- **LSP & Impact Cascade**: Warm language-server pool across 47 LSP definitions plus reverse-dependency cascade checks.
+- **Edit-Time Runners**: 45+ linter, type-checker, formatter, and security scanner runners across 35+ file kinds.
+- **Discovery Funnel**: Ranked identifier search (`symbol_search` -> `module_report` -> `read_symbol`) and `/lens-map` interactive HTML dependency maps.
+- **Guards & Triage**: Read-before-edit guard, git commit/push guard on unresolved errors, `lens_diagnostic_mark` triage (`false-positive`, `suppress`, `defer`, `flagged`), and `/lens-health` degradation ledger.
+
+### Event & Freshness Architecture
+
+Most lifecycle events enter through a stale-context wrapper. Events fan out into the **edit-time lane** and the **LSP lane**, writing into the findings stores. Nothing reaches the agent until the **freshness gate** clears it:
 
 ```mermaid
 flowchart TD
@@ -132,58 +181,7 @@ flowchart TD
     GG --> SINKS
     FRESH --> SINKS
 ```
-
-Architecture-level view, updated when a lane changes. Per-tool inventories live
-in [features](docs/features.md) and
-[language coverage](docs/language-coverage.md). Today the edit-time lane carries
-45+ runner modules over 35+ file kinds, and the LSP lane speaks to 47
-language server definitions.
-
-The gating box is an abstraction, not a call order. Freshness covers several
-independent mechanisms: path freshness against scan time, past-EOF line checks,
-and forward-import dependency drift. Dispositions are one more filter alongside
-them, not a second stage every finding walks through. Read the box as "a finding
-passes the gates that apply to it", and see `clients/finding-delivery-gate.ts`
-for the per-surface contract.
-
-## Install
-
-```bash
-pi install npm:pi-lens
-```
-
-Or from git:
-
-```bash
-pi install git:github.com/apmantza/pi-lens
-```
-
-pi-lens delivers its four skills through the `pi.skills` package manifest, so
-install it as a package (`npm:`, `git:`, or a local path); a package install
-honours the host's `packages[].skills` filters (for example `[]`,
-`!skills/<name>/SKILL.md`, or `-skills/<name>/SKILL.md`). Loading the extension
-file directly (`pi --extension ./index.js`) does not read that manifest and
-loads no pi-lens skills.
-
-Requires Node.js >=22.19.0 (matches the pi host's own floor — see `engines`
-in `package.json`).
-
-Letting a coding agent do it: paste this into its prompt.
-
-```text
-Install pi-lens (npm:pi-lens) into pi, then read AGENTS.md in
-https://github.com/apmantza/pi-lens for how the extension works and how it
-expects to be operated.
-```
-
-> **npm v12 users:** dependency lifecycle scripts (e.g. `@ast-grep/cli`'s
-> `postinstall`) now require explicit approval — if `npm install` warns about
-> unreviewed install scripts, review and allow them with
-> `npm approve-scripts`, or trust the `allowScripts` entries already declared
-> in this package's `package.json` (maintainers: see CONTRIBUTING.md
-> "Lifecycle-script approvals"). Installing from a git source (`pi install
-> git:...` / `pi update --extension git:...`) may similarly prompt for
-> git-dependency approval; accept it to let the `prepare` build step run.
+</details>
 
 ## Documentation
 
