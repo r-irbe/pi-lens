@@ -81,7 +81,6 @@ import { getServersForFileWithConfig } from "./config.js";
 // from `config.js` is mirrored by explicit `vi.mock` factories in ~58 test
 // files, so every new symbol taken from there breaks all of them.
 import { getSessionRootsForTelemetry } from "./session-roots.js";
-import { invalidateILeanScans } from "../lean-context.js";
 
 import {
 	configureLspServiceLifecycle,
@@ -147,29 +146,6 @@ function textDocumentSaveOf(client: {
 }
 
 const WORKSPACE_ATTRIBUTION_CLIENT_CAP = 16;
-let workspaceRouteResetStamp = 0;
-
-export type WorkspaceScopeRouteDisposition =
-	| "proven-non-lean"
-	| "lean-targeted"
-	| "mixed-or-unresolved"
-	| "no-warm-route";
-
-export interface WorkspaceScopeRouteCandidate {
-	readonly key: string;
-	readonly serverId: string;
-	readonly root: string;
-	readonly role: "primary" | "auxiliary";
-	readonly supportsOp: boolean;
-}
-
-export interface WorkspaceScopeRouteSnapshot {
-	readonly operation: "workspaceSymbol" | "executeCommand";
-	readonly disposition: WorkspaceScopeRouteDisposition;
-	readonly selected: WorkspaceScopeRouteCandidate | undefined;
-	readonly candidates: readonly WorkspaceScopeRouteCandidate[];
-	isCurrent(): boolean;
-}
 const AUX_WAIT_DEMOTION_THRESHOLD = 5;
 const AUX_WAIT_DEMOTION_RATIO = 0.9;
 const AUX_WAIT_REPROMOTION_THRESHOLD = 5;
@@ -7048,159 +7024,6 @@ export class LSPService {
 	}
 
 	/**
-	 * Pure read-only route inspection over existing in-memory warm clients.
-	 * Never spawns, never resolves roots on disk, and never awaits initialization.
-	 */
-	peekWorkspaceScopeRouteSnapshot(
-		operation: "workspaceSymbol" | "executeCommand",
-		directoryPath?: string,
-	): WorkspaceScopeRouteSnapshot {
-		const capturedResetStamp = workspaceRouteResetStamp;
-		if (this.checkDestroyed()) {
-			return Object.freeze({
-				operation,
-				disposition: "no-warm-route" as const,
-				selected: undefined,
-				candidates: Object.freeze([]),
-				isCurrent: () => false,
-			});
-		}
-		const normalizedDir = directoryPath
-			? normalizeMapKey(directoryPath)
-			: undefined;
-		const dirPrefix =
-			normalizedDir === undefined
-				? undefined
-				: normalizedDir.endsWith("/")
-					? normalizedDir
-					: `${normalizedDir}/`;
-		const matchesDir = (candidateRoot: string): boolean => {
-			if (!normalizedDir || !dirPrefix) return true;
-			const normalizedRoot = normalizeMapKey(candidateRoot);
-			const rootPrefix = normalizedRoot.endsWith("/")
-				? normalizedRoot
-				: `${normalizedRoot}/`;
-			return (
-				normalizedRoot === normalizedDir ||
-				normalizedRoot.startsWith(dirPrefix) ||
-				normalizedDir.startsWith(rootPrefix)
-			);
-		};
-		const readSupport = (client: LSPClientInfo): boolean => {
-			if (operation === "executeCommand") return true;
-			const peek = client.peekOperationSupportSnapshot;
-			if (typeof peek === "function") {
-				return Boolean(peek.call(client).workspaceSymbol);
-			}
-			const get = client.getOperationSupport;
-			if (typeof get === "function") {
-				return Boolean(get.call(client).workspaceSymbol);
-			}
-			return false;
-		};
-		const candidates: WorkspaceScopeRouteCandidate[] = [];
-		let selectedPrimary: WorkspaceScopeRouteCandidate | undefined;
-		let selectedAux: WorkspaceScopeRouteCandidate | undefined;
-		let sawLeanCandidate = false;
-		let sawNonLeanCandidate = false;
-
-		for (const [key, client] of this.state.clients) {
-			if (!client.isAlive()) continue;
-			const separator = key.indexOf(":");
-			const serverId = separator >= 0 ? key.slice(0, separator) : key;
-			const root = separator >= 0 ? key.slice(separator + 1) : "";
-			if (!matchesDir(root)) continue;
-			const role = isAuxiliary(getServerById(serverId))
-				? "auxiliary"
-				: "primary";
-			const supportsOp = readSupport(client);
-			const candidate: WorkspaceScopeRouteCandidate = Object.freeze({
-				key,
-				serverId,
-				root,
-				role,
-				supportsOp,
-			});
-			candidates.push(candidate);
-			if (serverId === "lean") {
-				sawLeanCandidate = true;
-			} else {
-				sawNonLeanCandidate = true;
-			}
-			if (!supportsOp) continue;
-			if (role === "primary") {
-				if (!selectedPrimary) selectedPrimary = candidate;
-			} else if (!selectedAux) {
-				selectedAux = candidate;
-			}
-		}
-
-		const selected = selectedPrimary ?? selectedAux;
-		let disposition: WorkspaceScopeRouteDisposition;
-		if (sawLeanCandidate && sawNonLeanCandidate) {
-			disposition = "mixed-or-unresolved";
-		} else if (selected?.serverId === "lean" || sawLeanCandidate) {
-			disposition = "lean-targeted";
-		} else if (selected) {
-			disposition = "proven-non-lean";
-		} else {
-			disposition = "no-warm-route";
-		}
-
-		const capturedClient = selected
-			? this.state.clients.get(selected.key)
-			: undefined;
-
-		return Object.freeze({
-			operation,
-			disposition,
-			selected,
-			candidates: Object.freeze(candidates),
-			isCurrent: () => {
-				if (workspaceRouteResetStamp !== capturedResetStamp) return false;
-				if (this.checkDestroyed()) return false;
-				if (peekOwnedLspService<LSPService>() !== this) return false;
-				for (const [key, client] of this.state.clients) {
-					if (!client.isAlive()) continue;
-					const separator = key.indexOf(":");
-					const serverId = separator >= 0 ? key.slice(0, separator) : key;
-					const root = separator >= 0 ? key.slice(separator + 1) : "";
-					if (!matchesDir(root)) continue;
-					if (serverId === "lean") return false;
-				}
-				if (!selected) return true;
-				const currentClient = this.state.clients.get(selected.key);
-				if (
-					!currentClient ||
-					currentClient !== capturedClient ||
-					!currentClient.isAlive()
-				) {
-					return false;
-				}
-				const rescanned = this.selectWorkspaceScopeClient((client) => {
-					if (normalizedDir) {
-						let clientRoot = "";
-						for (const [k, c] of this.state.clients) {
-							if (c === client) {
-								const sep = k.indexOf(":");
-								clientRoot = sep >= 0 ? k.slice(sep + 1) : "";
-								break;
-							}
-						}
-						if (!matchesDir(clientRoot)) return false;
-					}
-					return readSupport(client);
-				});
-				return Boolean(
-					rescanned &&
-					rescanned.client === capturedClient &&
-					rescanned.serverId === selected.serverId,
-				);
-			},
-		});
-	}
-
-	/**
 	 * Navigation: workspace-wide symbol search
 	 *
 	 * #1789: gated on the target server's advertised `workspaceSymbolProvider`
@@ -9720,8 +9543,6 @@ configureLspServiceLifecycle<LSPService>({
 	create: (generationHandoff) =>
 		new LSPService(generationHandoff, process.cwd()),
 	beforeReset: (options) => {
-		workspaceRouteResetStamp += 1;
-		invalidateILeanScans();
 		abortDeferredLspWork(
 			`lsp service reset: ${options.reason ?? "unspecified"}`,
 		);
@@ -9782,8 +9603,6 @@ export async function resyncGitChangedFiles(
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {
-	workspaceRouteResetStamp += 1;
-	invalidateILeanScans();
 	// Keep the session-start reset names visible at this public seam for the
 	// session-state reachability ratchet; the owner hook performs the same
 	// transition for facade-only callers.

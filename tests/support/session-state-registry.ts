@@ -728,16 +728,6 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"The service is torn down and rebuilt per session; this reset also clears the adaptive auxiliary wait streak and demotion set, alongside the sweep hold and TS-repair guard resets.",
 	},
 	{
-		id: "lsp-lean4-ilean:scanInvalidation",
-		module: "lsp/lean4-ilean.ts",
-		state: "activeInFlightScans, ileanScanInvalidationStamp",
-		policy: "session_start",
-		resetName: "clearILeanScanCache",
-		sessionStartResetName: "resetLSPService",
-		reason:
-			"In-flight Lean .ilean scan tickets are invalidated at session replacement and whole-service reset so a scan captured under an older session or service generation can never complete or publish after replacement.",
-	},
-	{
 		id: "lsp-mutation:noBridgeDbgLogged",
 		module: "lsp-mutation.ts",
 		state: "noBridgeDbgLogged",

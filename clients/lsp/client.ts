@@ -492,8 +492,6 @@ export interface LSPClientInfo {
 	>;
 	/** Capability snapshot for navigation/edit operations */
 	getOperationSupport(): LSPOperationSupport;
-	/** Read-only clone of operation support capabilities for pure route inspection. */
-	peekOperationSupportSnapshot?(): Readonly<LSPOperationSupport>;
 	/** File-operation registrations rejected during initialize parsing. */
 	getMalformedFileOperationRegistrations(): ReadonlySet<
 		"willRename" | "didRename"
@@ -6507,10 +6505,6 @@ export async function createLSPClient(options: {
 
 		getOperationSupport() {
 			return state.operationSupport;
-		},
-
-		peekOperationSupportSnapshot() {
-			return Object.freeze({ ...state.operationSupport });
 		},
 
 		getMalformedFileOperationRegistrations() {

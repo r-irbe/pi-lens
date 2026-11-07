@@ -98,11 +98,6 @@ import {
 } from "./config-core/provenance.js";
 import { PI_LENS_CONFIG_SCHEMA } from "./config-schema.js";
 import {
-	isLeanContextContribution,
-	LEAN_CONTEXT_KEYS,
-	type LeanContextKey,
-} from "./lean-context.js";
-import {
 	type IgnoredConfigSubsystem,
 	normalizeParseErrorReason,
 	warnIgnoredConfigOnce,
@@ -195,12 +190,6 @@ export interface ResolvePiLensConfigOptions {
 	readonly onReadError?: (failure: ConfigReadFailure) => void;
 }
 
-export interface LeanContextRejection {
-	readonly tier: SourceTier;
-	readonly file?: string;
-	readonly key?: LeanContextKey;
-}
-
 export interface ConfigSourceDigest {
 	readonly file: string;
 	readonly tier: SourceTier;
@@ -210,8 +199,6 @@ export interface ConfigSourceDigest {
 }
 
 export interface PiLensConfigResolution {
-	/** Bounded effective rejection provenance, computed before lossy normalization. */
-	readonly leanContextRejection?: LeanContextRejection;
 	/** Read-time candidate source digests (existing and absent candidate paths). */
 	readonly contributingConfigSources: readonly ConfigSourceDigest[];
 	/** The merged configuration. */
@@ -483,14 +470,12 @@ export function resolvePiLensConfig(
 		contributingConfigSources,
 	);
 	const sources = configSources(documents);
-	const leanContextRejection = effectiveLeanContextRejection(sources);
 	const resolution = resolveConfig<Record<string, unknown>>({
 		sources,
 		schema: PI_LENS_CONFIG_SCHEMA,
 	});
 	return {
 		value: resolution.resolved.value ?? {},
-		leanContextRejection,
 		contributingConfigSources,
 		provenance: resolution.resolved.provenance,
 		records: finalizeRecords(
@@ -711,51 +696,6 @@ function assignRaw(
  * half-migrated the file it was written in is the defect this whole change
  * exists to remove.
  */
-// At most three rejection entries; never retain contribution values. A bad
-// contribution is atomic: every field it supplies stays unavailable until a
-// higher valid contribution explicitly replaces it. A bad whole object taints
-// all three axes, so a complete valid higher context can recover.
-function effectiveLeanContextRejection(
-	sources: readonly RawConfigSource[],
-): LeanContextRejection | undefined {
-	const object = (value: unknown): Record<string, unknown> | undefined =>
-		value !== null && typeof value === "object" && !Array.isArray(value)
-			? (value as Record<string, unknown>)
-			: undefined;
-	const rejected = new Map<LeanContextKey, LeanContextRejection>();
-	const ordered = [...sources].sort(
-		(a, b) => SOURCE_TIERS.indexOf(a.tier) - SOURCE_TIERS.indexOf(b.tier),
-	);
-	for (const source of ordered) {
-		const lean = object(
-			object(object(object(source.value)?.lsp)?.serverOverrides)?.lean,
-		);
-		if (!lean || !Object.hasOwn(lean, "leanContext")) continue;
-		const contribution = lean.leanContext;
-		const fields = object(contribution);
-		const known =
-			fields &&
-			Object.keys(fields).every((key) =>
-				(LEAN_CONTEXT_KEYS as readonly string[]).includes(key),
-			);
-		const affected = known
-			? LEAN_CONTEXT_KEYS.filter((key) => Object.hasOwn(fields, key))
-			: LEAN_CONTEXT_KEYS;
-		if (isLeanContextContribution(contribution)) {
-			for (const key of affected) rejected.delete(key);
-		} else {
-			for (const key of affected)
-				rejected.set(key, {
-					tier: source.tier,
-					file: source.file,
-					key: known && affected.length === 1 ? key : undefined,
-				});
-		}
-	}
-	for (const entry of rejected.values()) return entry;
-	return undefined;
-}
-
 function configSources(
 	documents: readonly ConfigDocument[],
 ): RawConfigSource[] {

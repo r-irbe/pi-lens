@@ -588,12 +588,6 @@ export type DegradationKind =
 	 * Counted; subject is `late-auxiliary:<serverId>`, a small fixed set.
 	 */
 	| "late-auxiliary-held-dropped"
-	/**
-	 * Pre-execution Lean context gate refused a generated-C runtime header
-	 * resolution (`cpp-check`) or a gated Lean semantic navigation request
-	 * (`lsp-navigation`) before any C compiler or LSP server was invoked.
-	 */
-	| "lean-context-unavailable"
 	/** A didChange content mirror was recorded behind a newer document version. */
 	| "lens-diagnostics-analysis-root-rejected"
 	/** Cross-graph rotation options disagreed; the first writer retained ownership. */

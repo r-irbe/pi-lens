@@ -398,15 +398,6 @@ Producers access the bridge via `Symbol.for("pi-lens:io-bridge")` carrying `read
 The compatibility policy and migration path from legacy v1 symbols are documented in
 [Migration Guide: File I/O Lifecycle Bridge v1 → v2](io-bridge-v2-migration.md).
 
-## 7. Admitted-context Lean semantic navigation gate
-
-Every operation in `lsp_navigation` (`pilens_lsp_navigation` on MCP) classifies its target before touching host readiness (`ensureReady` / `maybeAutoSessionStart`) or live LSP client state (`supportsLSP`, `getOperationSupport`, `openFileBestEffort`):
-
-- **Root-confined offline Lean routes (`definition`, `implementation`, `moduleImports`, `moduleImportedBy`, `pedagogicalWalkthrough`):** require a live `SessionScope` handle (`LineageHandle`) and a registered, current `LeanContext` admission (`compilerPath`, `targetVersion`, `moduleRoots`) whose contributing config files and served-root `lean-toolchain` / `lake-manifest.json` pins match their admission-time digests. Discovery walks only `admittedContext.moduleRoots`, never workspace directories or `LEAN_INDEX_PACKAGES`. On `.lean` inputs, `definition` omits workspace-wide `@[extern "..."]` C symbol expansion so results remain strictly confined to admitted `moduleRoots`; C-input-to-Lean `definition` remains separate.
-- **Live-only Lean semantic and interactive routes (`typeDefinition`, `declaration`, `references`, `documentSymbol`, `findSymbol`, `prepareCallHierarchy`, `incomingCalls`, `outgoingCalls`, file-scoped `workspaceSymbol`, `hover`, `signatureHelp`, `goal`, `termGoal`, `codeAction`, `rename`, `rename_file`, `executeCommand`):** gated by the same session and admission requirements and return explicit structured `unavailable` (`reasonCode: "live-identity-unavailable"`) until a cryptographic/process-bound live-server identity receipt is present, never silently degrading to `[]`.
-- **Pathless and directory-scoped `workspaceSymbol` / `executeCommand`:** bind synchronously to a pure read-only warm-route snapshot (`peekWorkspaceScopeRouteSnapshot`) over existing live clients without spawning servers or probing capabilities. Proven non-Lean warm routes execute bound to that snapshot (aborting with `context-changed` if service reset or route mutation occurs mid-flight); Lean-targeted or mixed/unresolved warm routes return explicit `unavailable` (`live-identity-unavailable` or `ambiguous-warm-route-unavailable`) rather than silently filtering Lean results.
-- **Pre-execution unavailability ledger:** pre-execution Lean context refusals in both `cpp-check` and `lsp_navigation` record under the dedicated `lean-context-unavailable` degradation kind (`phase: "pre-execution"`) via `recordLeanContextUnavailable`, never `runner-empty-result`.
-
 ## Where each policy point is enforced
 
 | Policy point | Data | Test |

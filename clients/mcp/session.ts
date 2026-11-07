@@ -50,7 +50,6 @@ import { createMcpHost } from "./host-shim.js";
 import { startSituationalToolTelemetrySession } from "../situational-tool-telemetry.js";
 import { bounded } from "../deadline-utils.js";
 import { HOOK_WALL_BUDGET_MS } from "../hook-budgets.js";
-import { invalidateILeanScans } from "../lean-context.js";
 import { retireScope } from "../session-scope.js";
 
 interface McpSessionContext {
@@ -84,7 +83,6 @@ export function getMcpSessionContext(): Promise<McpSessionContext> {
 			clients: await loadBootstrapClients(),
 		};
 		if (bootstrapTicket !== ticketAtStart) {
-			invalidateILeanScans(runtime.sessionScope.scopeId);
 			retireScope(runtime.sessionScope, "mcp-session-reset");
 			throw new Error("MCP session context reset during bootstrap");
 		}
@@ -100,7 +98,6 @@ export function getMcpSessionContext(): Promise<McpSessionContext> {
 		if (contextPromise === promise) {
 			contextPromise = undefined;
 		}
-		invalidateILeanScans(runtime.sessionScope.scopeId);
 		retireScope(runtime.sessionScope, "mcp-session-bootstrap-failed");
 		throw err;
 	});
@@ -125,11 +122,9 @@ export function _resetMcpSessionContext(): void {
 	resolvedRuntime = undefined;
 	pendingRuntime = undefined;
 	if (currentResolved) {
-		invalidateILeanScans(currentResolved.sessionScope.scopeId);
 		retireScope(currentResolved.sessionScope, "mcp-session-reset");
 	}
 	if (currentPending && currentPending !== currentResolved) {
-		invalidateILeanScans(currentPending.sessionScope.scopeId);
 		retireScope(currentPending.sessionScope, "mcp-session-reset");
 	}
 }

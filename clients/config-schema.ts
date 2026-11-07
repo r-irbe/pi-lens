@@ -60,7 +60,6 @@ import {
 	PROJECT_NON_FLAG_CONFIG_SECTIONS,
 } from "./lens-flag-registry.js";
 import { LENS_TOOL_NAMES } from "./tool-config.js";
-import { LEAN_CONTEXT_CONFIG_SCHEMA } from "./lean-context.js";
 
 /** The JSON Schema dialect the published artifact declares. */
 const CONFIG_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema";
@@ -223,7 +222,6 @@ function lspServerOverrideNode(): ConfigSchemaNode {
 		additionalProperties: true,
 		[STABILITY_TIER_KEY]: "experimental",
 		properties: {
-			leanContext: LEAN_CONTEXT_CONFIG_SCHEMA,
 			command: { [STABILITY_TIER_KEY]: "experimental" },
 			env: {
 				type: "object",

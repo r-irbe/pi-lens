@@ -56,8 +56,6 @@
  * clients/lsp/server.ts (e.g. "rust", "nix", "bash", "python", "go", "ts").
  */
 
-import { createHash } from "node:crypto";
-import * as fs from "node:fs";
 import { resetIgnoredConfigWarnCache } from "../config-warn.js";
 import * as os from "node:os";
 import path from "node:path";
@@ -68,8 +66,6 @@ import {
 } from "../config-core/records.js";
 import type { SourceTier } from "../config-core/provenance.js";
 import {
-	type ConfigSourceDigest,
-	type LeanContextRejection,
 	lspSectionOf,
 	type PiLensConfigResolution,
 	reportConfigReadFailure,
@@ -106,20 +102,6 @@ import {
 	type Provenance,
 } from "../config-core/provenance.js";
 import { resolveToolCwd } from "../tool-cwd.js";
-import { safeSpawnAsync } from "../safe-spawn.js";
-import {
-	areServedRootPinDigestsCurrent,
-	captureLeanCompilerIdentity,
-	captureServedRootPinDigests,
-	invalidateILeanScans as clearILeanScanCache,
-	isLeanCompilerIdentityCurrent,
-	leanContextEnv,
-	type LeanBinaryIdentity,
-	type LeanContext,
-	type ServedRootPinDigest,
-	validateLeanContext,
-	verifyLeanContext,
-} from "../lean-context.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { launchLSP } from "./launch.js";
 import {
@@ -132,8 +114,6 @@ import {
 	LSP_SERVERS,
 	resetLSPCaseSensitivityState,
 	resolveLspServerCwd,
-	isLeanWorkspaceLocked,
-	shouldUseLeanAnalyzerLsp,
 	type LSPServerInfo,
 	type LspRootFallback,
 } from "./server.js";
@@ -176,14 +156,6 @@ export interface CustomServerConfig {
 export interface ServerInitOverride {
 	command?: string | string[];
 	env?: Record<string, string>;
-	/** Experimental exact Lean compiler context; executable trust admission applies. */
-	leanContext?: LeanContext;
-	/** Registry-owned refusal; never admitted from a config document. */
-	leanContextUnavailable?: string;
-	/** Rejection provenance when leanContext was refused. */
-	leanContextRejection?: LeanContextRejection;
-	/** Compiler binary stat fingerprint captured at admission time. */
-	leanCompilerIdentity?: LeanBinaryIdentity;
 	/**
 	 * Deep-merged onto the server's built-in initializationOptions defaults.
 	 * User values win on key conflicts at every nesting level.
@@ -205,35 +177,7 @@ export interface LSPConfig {
 	warmFiles?: string[];
 	/** Non-enumerable source map attached by loadLSPConfig. */
 	readonly __provenance?: ProvenanceMap;
-	/** Presence only, retained when schema rejection removes a requested context. */
-	readonly __leanContextRequested?: boolean;
-	readonly __leanContextRejection?: LeanContextRejection;
-	readonly __contributingConfigSources?: readonly ConfigSourceDigest[];
 }
-
-export interface LeanNavigationAdmissionAvailable {
-	readonly ["status"]: "available";
-	readonly admittedContext: LeanContext;
-	readonly servedRoot: string;
-	readonly registrationId: object;
-	readonly contributingSources: readonly ConfigSourceDigest[];
-	isCurrent(): boolean;
-}
-
-export interface LeanNavigationAdmissionUnavailable {
-	readonly ["status"]: "unavailable";
-	readonly reasonCode:
-		| "admission-missing"
-		| "admission-rejected"
-		| "context-changed";
-	readonly message: string;
-	readonly servedRoot?: string;
-	readonly rejection?: LeanContextRejection;
-}
-
-export type LeanNavigationAdmissionResult =
-	| LeanNavigationAdmissionAvailable
-	| LeanNavigationAdmissionUnavailable;
 
 /**
  * A workspace's LSP config in the shape the gates consume: custom servers
@@ -247,9 +191,6 @@ export interface RegisteredLSPConfig {
 	registeredServers: LSPServerInfo[];
 	disabledServerIds: Set<string>;
 	serverOverrides: Map<string, ServerInitOverride>;
-	registrationId?: object;
-	contributingConfigSources?: readonly ConfigSourceDigest[];
-	servedRootPinDigests?: readonly ServedRootPinDigest[];
 }
 
 // --- Config Loading ---
@@ -546,22 +487,6 @@ export async function loadLSPConfig(
 	// resolution's records and the covers records report here, once, together.
 	const coversProblems = newCoversClaimProblems();
 	const config = lspConfigOf(resolution.value, coversProblems);
-	Object.defineProperty(config, "__leanContextRejection", {
-		value: resolution.leanContextRejection,
-		enumerable: false,
-	});
-	Object.defineProperty(config, "__leanContextRequested", {
-		value: resolution.documents.some((document) => {
-			const section = lspSectionOf(asRecord(document.value) ?? {});
-			const lean = asRecord(asRecord(section.serverOverrides)?.lean);
-			return lean !== undefined && Object.hasOwn(lean, "leanContext");
-		}),
-		enumerable: false,
-	});
-	Object.defineProperty(config, "__contributingConfigSources", {
-		value: resolution.contributingConfigSources,
-		enumerable: false,
-	});
 	// Preserve the source map for the registry compiler without changing the
 	// enumerable loader projection consumed by existing callers.
 	Object.defineProperty(config, "__provenance", {
@@ -985,9 +910,7 @@ function isSameOrChildPath(filePath: string, candidateRoot: string): boolean {
 	return filePath.startsWith(`${candidateRoot}${path.sep}`);
 }
 
-function getMatchedConfigForFile(
-	filePath: string,
-): { root: string; config: RegisteredLSPConfig } | undefined {
+function getConfigForFile(filePath: string): RegisteredLSPConfig {
 	const resolvedFilePath = path.resolve(filePath);
 	let bestMatch: { root: string; config: RegisteredLSPConfig } | undefined;
 
@@ -1003,147 +926,7 @@ function getMatchedConfigForFile(
 		}
 	}
 
-	return bestMatch;
-}
-
-function getConfigForFile(filePath: string): RegisteredLSPConfig {
-	return getMatchedConfigForFile(filePath)?.config ?? EMPTY_CONFIG;
-}
-
-function areContributingConfigSourcesCurrent(
-	sources: readonly ConfigSourceDigest[] | undefined,
-): boolean {
-	if (!sources) return true;
-	for (const source of sources) {
-		if (!source.exists) {
-			if (fs.existsSync(source.file)) return false;
-			continue;
-		}
-		try {
-			const rawBytes = fs.readFileSync(source.file);
-			if (rawBytes.byteLength !== source.byteLength) return false;
-			const sha256 = createHash("sha256").update(rawBytes).digest("hex");
-			if (sha256 !== source.sha256) return false;
-		} catch {
-			return false;
-		}
-	}
-	return true;
-}
-
-function areModuleRootsCurrent(moduleRoots: readonly string[]): boolean {
-	for (const root of moduleRoots) {
-		try {
-			if (!fs.statSync(root).isDirectory()) return false;
-			if (fs.realpathSync(root) !== root) return false;
-		} catch {
-			return false;
-		}
-	}
-	return true;
-}
-
-export function getLeanNavigationAdmission(
-	filePathOrServedRoot: string,
-): LeanNavigationAdmissionResult {
-	const matched = getMatchedConfigForFile(filePathOrServedRoot);
-	if (!matched) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "admission-missing",
-			message:
-				"environment_unavailable: no registered session root covers this Lean path; initialize the session root with an admitted leanContext first",
-		};
-	}
-	const { root: servedRoot, config } = matched;
-	const registrationId = config.registrationId ?? config;
-	const contributingSources = config.contributingConfigSources ?? [];
-	const leanOverride = config.serverOverrides.get("lean");
-	if (config.disabledServerIds.has("lean")) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "admission-rejected",
-			message:
-				"environment_unavailable: Lean server is disabled by configuration for this root",
-			servedRoot,
-		};
-	}
-	if (!leanOverride) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "admission-missing",
-			message:
-				"environment_unavailable: Lean semantic navigation requires an explicit admitted lsp.serverOverrides.lean.leanContext",
-			servedRoot,
-		};
-	}
-	if (leanOverride.command || leanOverride.env) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "admission-rejected",
-			message:
-				"environment_unavailable: leanContext cannot be combined with command or env overrides",
-			servedRoot,
-		};
-	}
-	if (leanOverride.leanContextUnavailable) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "admission-rejected",
-			message: leanOverride.leanContextUnavailable,
-			servedRoot,
-			...(leanOverride.leanContextRejection
-				? { rejection: leanOverride.leanContextRejection }
-				: {}),
-		};
-	}
-	const admittedContext = leanOverride.leanContext;
-	if (!admittedContext) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "admission-missing",
-			message:
-				"environment_unavailable: Lean semantic navigation requires an explicit admitted lsp.serverOverrides.lean.leanContext",
-			servedRoot,
-		};
-	}
-	const compilerIdentity =
-		leanOverride.leanCompilerIdentity ??
-		captureLeanCompilerIdentity(admittedContext.compilerPath);
-	const isCurrent = (): boolean => {
-		const latest = getMatchedConfigForFile(servedRoot);
-		if (!latest || latest.root !== servedRoot) return false;
-		const latestId = latest.config.registrationId ?? latest.config;
-		if (latestId !== registrationId) return false;
-		if (!areContributingConfigSourcesCurrent(config.contributingConfigSources))
-			return false;
-		if (
-			config.servedRootPinDigests &&
-			!areServedRootPinDigestsCurrent(servedRoot, config.servedRootPinDigests)
-		) {
-			return false;
-		}
-		if (!isLeanCompilerIdentityCurrent(compilerIdentity)) return false;
-		if (!areModuleRootsCurrent(admittedContext.moduleRoots)) return false;
-		return true;
-	};
-	if (!isCurrent()) {
-		return {
-			["status"]: "unavailable",
-			reasonCode: "context-changed",
-			message:
-				"environment_unavailable: admitted Lean context, contributing configuration, or pin files changed since registration; reload the session configuration",
-			servedRoot,
-		};
-	}
-	return {
-		["status"]: "available",
-		admittedContext,
-		servedRoot,
-		registrationId,
-		contributingSources,
-		isCurrent,
-	};
+	return bestMatch?.config ?? EMPTY_CONFIG;
 }
 
 /**
@@ -1220,73 +1003,12 @@ export function compileLspRegistry(
 	}
 
 	const serverOverrides = new Map<string, ServerInitOverride>();
-	if (config.__leanContextRejection) {
-		const source = config.__leanContextRejection;
-		const reason = `environment_unavailable: malformed leanContext contribution in ${source.file ?? source.tier} at /lsp/serverOverrides/lean/leanContext${source.key ? `/${source.key}` : ""}; correct the contribution or explicitly override it with valid higher-priority fields`;
-		serverOverrides.set("lean", {
-			leanContextUnavailable: reason,
-			leanContextRejection: source,
-		});
-		recordDegradationOnce({
-			kind: "lsp-registry-decision",
-			subject: "lean:leanContext:contribution",
-			reason,
-		});
-	} else if (
-		config.__leanContextRequested &&
-		config.serverOverrides?.lean?.leanContext === undefined
-	) {
-		serverOverrides.set("lean", {
-			leanContextUnavailable:
-				"environment_unavailable: explicitly requested leanContext was rejected by the configuration schema",
-		});
-	}
 	if (config.serverOverrides) {
 		for (const [id, entry] of Object.entries(config.serverOverrides)) {
 			if (entry && typeof entry === "object" && !Array.isArray(entry)) {
 				const initOpts = (entry as Record<string, unknown>)
 					.initializationOptions;
 				const command = (entry as ServerInitOverride).command;
-				const requestedContext =
-					id === "lean" ? (entry as ServerInitOverride).leanContext : undefined;
-				let leanContext: LeanContext | undefined;
-				let leanCompilerIdentity: LeanBinaryIdentity | undefined;
-				let leanContextUnavailable =
-					serverOverrides.get(id)?.leanContextUnavailable;
-				const leanContextRejection =
-					serverOverrides.get(id)?.leanContextRejection;
-				if (requestedContext !== undefined && !leanContextUnavailable) {
-					const pointer = `/lsp/serverOverrides/${id}/leanContext`;
-					const sources = [
-						pointer,
-						...["compilerPath", "targetVersion", "moduleRoots"].map(
-							(key) => `${pointer}/${key}`,
-						),
-					].map((key) => sourceFor(provenance, key));
-					const denied = sources.find(
-						(source) => !executableAllowed(source, trust),
-					);
-					if (denied) {
-						registryDecision(id, "leanContext", denied, trust, false);
-						leanContextUnavailable =
-							"environment_unavailable: project leanContext requires pi project trust";
-					} else {
-						try {
-							leanContext = validateLeanContext(requestedContext);
-							leanCompilerIdentity = captureLeanCompilerIdentity(
-								leanContext.compilerPath,
-							);
-						} catch {
-							leanContextUnavailable =
-								"environment_unavailable: invalid leanContext; admit existing exact compilerPath, targetVersion and moduleRoots";
-							recordDegradationOnce({
-								kind: "lsp-registry-decision",
-								subject: "lean:leanContext:invalid",
-								reason: leanContextUnavailable,
-							});
-						}
-					}
-				}
 				const commandSource = sourceFor(
 					provenance,
 					`/lsp/serverOverrides/${id}/command`,
@@ -1318,8 +1040,6 @@ export function compileLspRegistry(
 					overrideInitAllowed,
 				);
 				if (
-					requestedContext !== undefined ||
-					leanContextUnavailable !== undefined ||
 					command !== undefined ||
 					(entry as ServerInitOverride).env !== undefined ||
 					(initOpts !== undefined &&
@@ -1328,10 +1048,6 @@ export function compileLspRegistry(
 						!Array.isArray(initOpts))
 				) {
 					serverOverrides.set(id, {
-						...(leanContext ? { leanContext } : {}),
-						...(leanCompilerIdentity ? { leanCompilerIdentity } : {}),
-						...(leanContextUnavailable ? { leanContextUnavailable } : {}),
-						...(leanContextRejection ? { leanContextRejection } : {}),
 						...(overrideInitAllowed && initOpts !== undefined
 							? { initializationOptions: initOpts as Record<string, unknown> }
 							: {}),
@@ -1347,38 +1063,6 @@ export function compileLspRegistry(
 
 	const overriddenBuiltins = LSP_SERVERS.map((server) => {
 		const override = serverOverrides.get(server.id);
-		if (
-			server.id === "lean" &&
-			(override?.leanContext || override?.leanContextUnavailable)
-		) {
-			return {
-				...server,
-				async spawn(root: string) {
-					if (override.leanContextUnavailable)
-						throw new Error(override.leanContextUnavailable);
-					if (isLeanWorkspaceLocked(root) || shouldUseLeanAnalyzerLsp(root))
-						throw new Error(
-							"environment_unavailable: exact leanContext cannot bypass analyzer mode or a workspace build lock",
-						);
-					if (override.command || override.env)
-						throw new Error(
-							"environment_unavailable: leanContext cannot be combined with command or env overrides",
-						);
-					const context = override.leanContext!;
-					const proc = await verifyLeanContext(
-						context,
-						root,
-						safeSpawnAsync,
-					).then(() =>
-						launchLSP(context.compilerPath, ["--server"], {
-							cwd: root,
-							env: leanContextEnv(context),
-						}),
-					);
-					return { process: proc, source: "direct" as const };
-				},
-			};
-		}
 		if (!override?.command) return { ...server };
 		const argv = Array.isArray(override.command)
 			? override.command
@@ -1402,16 +1086,11 @@ export function compileLspRegistry(
 			},
 		};
 	});
-	clearILeanScanCache();
 	return {
 		customServers,
 		registeredServers: overriddenBuiltins,
 		disabledServerIds,
 		serverOverrides,
-		registrationId: {},
-		...(config.__contributingConfigSources
-			? { contributingConfigSources: config.__contributingConfigSources }
-			: {}),
 	};
 }
 
@@ -1441,9 +1120,6 @@ export function compileLspRegistry(
  * made the release miss and the reload silent again (review F6).
  */
 function forgetConfigResolvedClaims(evictedRoots: readonly string[]): void {
-	if (evictedRoots.length > 0) {
-		clearILeanScanCache();
-	}
 	for (const root of evictedRoots) {
 		releasePhaseClaim(CONFIG_RESOLVED_PHASE, configResolutionKey(root));
 	}
@@ -1472,7 +1148,6 @@ export async function initLSPConfig(cwd: string): Promise<void> {
 
 	const promise = (async () => {
 		const config = registerLSPConfig(await loadLSPConfig(cwd, os.homedir()));
-		config.servedRootPinDigests = captureServedRootPinDigests(normalizedCwd);
 		forgetConfigResolvedClaims(setSessionRootConfig(normalizedCwd, config));
 	})();
 
@@ -1702,7 +1377,6 @@ export function getServerInitOverride(
 }
 
 export function resetLSPConfigStateForTests(): void {
-	clearILeanScanCache();
 	resetLSPCaseSensitivityState();
 	// One call clears both the served roots and their configs: since #2518 they
 	// are one store, so a reset cannot leave a cleared config store beside a

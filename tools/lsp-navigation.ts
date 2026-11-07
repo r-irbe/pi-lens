@@ -6,31 +6,16 @@
 
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
-import { basename, isAbsolute, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Type } from "../clients/deps/typebox.js";
-import { detectFileKind, LEAN_ROOT_MARKERS } from "../clients/file-kinds.js";
 import { logLatency } from "../clients/latency-logger.js";
-import {
-	recordLeanContextUnavailable,
-	type LeanContextUnavailableReasonCode,
-} from "../clients/lean-context-unavailable.js";
 import {
 	newLspMutationCorrelationId,
 	recordLspMutationOutcome,
 	type LspMutationContext,
 } from "../clients/lsp-mutation.js";
 import type { LSPCallHierarchyItem } from "../clients/lsp/client.js";
-import {
-	getLeanNavigationAdmission,
-	primaryServerId,
-} from "../clients/lsp/config.js";
-import {
-	isSessionRootRegistered,
-	sessionRootConfigEntries,
-} from "../clients/lsp/session-roots.js";
 import { uriToPath } from "../clients/path-utils.js";
-import type { LineageHandle } from "../clients/session-scope.js";
 import { escapeRegExp } from "../clients/string-utils.js";
 import { isRecordableProjectPath } from "../clients/file-utils.js";
 import { compactRenderResult } from "./render-compact.js";
@@ -44,21 +29,11 @@ import { configDisabledAuxiliaryLspServerIds } from "../clients/dispatch/auxilia
 import { hashDiagnosticContent } from "../clients/lsp/diagnostic-binding.js";
 import {
 	getLSPService,
-	peekLSPService,
 	type LSPWorkspaceScopeAttribution,
 } from "../clients/lsp/capabilities.js";
-import type { WorkspaceScopeRouteSnapshot } from "../clients/lsp/index.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
-import {
-	buildILeanModuleGraph,
-	lookupILeanDeclaration,
-	lookupGeneratedCDeclaration,
-	lookupLeanExternForCSymbol,
-	resolveConfinedDeclarationLocations,
-	scanAllILeanFiles,
-} from "../clients/lsp/lean4-ilean.js";
 
 const VALID_OPERATIONS = [
 	"definition",
@@ -98,141 +73,6 @@ const NAVIGABLE_SYMBOL_KINDS = new Set([
 ]);
 
 type LspNavigationOperation = (typeof VALID_OPERATIONS)[number];
-
-const UNCONDITIONAL_LEAN_OPERATIONS = new Set<LspNavigationOperation>([
-	"goal",
-	"termGoal",
-	"moduleImports",
-	"moduleImportedBy",
-]);
-
-const OFFLINE_CAPABLE_LEAN_OPERATIONS = new Set<LspNavigationOperation>([
-	"definition",
-	"implementation",
-	"moduleImports",
-	"moduleImportedBy",
-]);
-
-function isLeanTargetFile(targetFile: string): boolean {
-	if (!targetFile) return false;
-	return (
-		detectFileKind(targetFile) === "lean" ||
-		primaryServerId(targetFile) === "lean"
-	);
-}
-
-function isWithinServedRoot(targetFile: string, servedRoot: string): boolean {
-	if (!targetFile || !servedRoot) return false;
-	const a = resolve(targetFile);
-	const b = resolve(servedRoot);
-	if (a === b) return true;
-	const prefix = b.endsWith("/") || b.endsWith("\\") ? b : `${b}${sep}`;
-	return (
-		a.startsWith(prefix) || a.startsWith(`${b}/`) || a.startsWith(`${b}\\`)
-	);
-}
-
-function isDirectoryLeanImplicated(targetDir: string): boolean {
-	const resolvedDir = path.resolve(targetDir);
-	for (const marker of LEAN_ROOT_MARKERS) {
-		try {
-			if (nodeFs.existsSync(path.join(resolvedDir, marker))) return true;
-		} catch {
-			// ignore stat failures
-		}
-	}
-	try {
-		const entries = nodeFs.readdirSync(resolvedDir, { withFileTypes: true });
-		if (entries.some((e) => e.isFile() && e.name.endsWith(".lean"))) {
-			return true;
-		}
-	} catch {
-		// ignore readdir failures
-	}
-	for (const [rootPath, reg] of sessionRootConfigEntries()) {
-		if (
-			isWithinServedRoot(resolvedDir, rootPath) ||
-			isWithinServedRoot(rootPath, resolvedDir)
-		) {
-			if (reg?.serverOverrides.get("lean") !== undefined) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-function readConfinedLeanModuleSource(
-	targetFile: string,
-	moduleRoots: readonly string[],
-): {
-	realFile: string;
-	moduleName: string;
-	moduleRoot: string;
-	content: string;
-} | null {
-	try {
-		const preLst = nodeFs.lstatSync(targetFile);
-		if (preLst.isSymbolicLink() || !preLst.isFile()) return null;
-		const realFile = nodeFs.realpathSync(targetFile);
-		for (const rawRoot of moduleRoots) {
-			let rootReal: string;
-			try {
-				rootReal = nodeFs.realpathSync(rawRoot);
-			} catch {
-				continue;
-			}
-			if (!isWithinServedRoot(realFile, rootReal)) continue;
-			const rel = path.relative(rootReal, realFile);
-			if (!rel || rel.startsWith("..") || !rel.endsWith(".lean")) continue;
-			const rawSegments = rel.slice(0, -5).split(/[/\\]/);
-			const segments: string[] = [];
-			for (const seg of rawSegments) {
-				if (seg) segments.push(seg);
-			}
-			if (segments.length === 0) continue;
-			let cur = rootReal;
-			let validWalk = true;
-			for (let i = 0; i < segments.length - 1; i++) {
-				const nextDir = path.join(cur, segments[i]!);
-				const dirLst = nodeFs.lstatSync(nextDir);
-				if (dirLst.isSymbolicLink() || !dirLst.isDirectory()) {
-					validWalk = false;
-					break;
-				}
-				const nextReal = nodeFs.realpathSync(nextDir);
-				if (!isWithinServedRoot(nextReal, rootReal)) {
-					validWalk = false;
-					break;
-				}
-				cur = nextReal;
-			}
-			if (!validWalk) continue;
-			const content = nodeFs.readFileSync(realFile, "utf-8");
-			const postLst = nodeFs.lstatSync(targetFile);
-			if (
-				postLst.isSymbolicLink() ||
-				!postLst.isFile() ||
-				postLst.dev !== preLst.dev ||
-				postLst.ino !== preLst.ino ||
-				postLst.size !== preLst.size ||
-				postLst.mtimeMs !== preLst.mtimeMs ||
-				postLst.ctimeMs !== preLst.ctimeMs
-			) {
-				return null;
-			}
-			return {
-				realFile,
-				moduleName: segments.join("."),
-				moduleRoot: rootReal,
-				content,
-			};
-		}
-		return null;
-	} catch {
-		return null;
-	}
-}
 
 function normalizeOperation(value: unknown): string {
 	if (typeof value !== "string") return "";
@@ -1054,7 +894,6 @@ export function createLspNavigationTool(
 		LspMutationContext,
 		"runtime" | "cacheManager" | "readGuard" | "dbg"
 	>,
-	captureSessionGeneration?: () => LineageHandle | undefined,
 ) {
 	return {
 		name: "lsp_navigation" as const,
@@ -1208,9 +1047,7 @@ export function createLspNavigationTool(
 		) {
 			// #3763: before the first await, so the rename's bookkeeping drops
 			// once this session is replaced (`context.session`, #3576).
-			const session = captureSessionGeneration
-				? captureSessionGeneration()
-				: mutationDeps?.runtime?.captureSessionGeneration?.();
+			const session = mutationDeps?.runtime?.captureSessionGeneration?.();
 			const startedAt = Date.now();
 			let supported: boolean | null = null;
 			let diagnosticsMode: "pull" | "push-only" | "unknown" = "unknown";
@@ -1465,9 +1302,9 @@ export function createLspNavigationTool(
 			}
 
 			const filePath = rawPath
-				? isAbsolute(rawPath)
+				? path.isAbsolute(rawPath)
 					? rawPath
-					: resolve(ctx.cwd || ".", rawPath)
+					: path.resolve(ctx.cwd || ".", rawPath)
 				: "";
 
 			let filePathIsDirectory = false;
@@ -1476,409 +1313,6 @@ export function createLspNavigationTool(
 					filePathIsDirectory = nodeFs.statSync(filePath).isDirectory();
 				} catch {
 					// non-existent path — existing error paths handle this
-				}
-			}
-
-			if (needsFilePath && filePathIsDirectory) {
-				return finalize(
-					{
-						content: [
-							{
-								type: "text" as const,
-								text: `path must be a source file, got directory: ${filePath}. Pass a source file path, or omit path for workspace-level operations.`,
-							},
-						],
-						isError: true,
-					},
-					{
-						operation,
-						filePath,
-						failureKind: "filepath_is_directory",
-						resultCount: 0,
-					},
-				);
-			}
-
-			const finalizeUnavailable = (
-				reasonCode: LeanContextUnavailableReasonCode,
-				message: string,
-				extraDetails?: Record<string, unknown>,
-			) => {
-				recordLeanContextUnavailable({
-					caller: "lsp-navigation",
-					reasonCode,
-					reason: message,
-				});
-				return finalize(
-					{
-						content: [{ type: "text" as const, text: message }],
-						isError: true,
-						details: {
-							operation,
-							availability: "unavailable",
-							reasonCode,
-							...extraDetails,
-						},
-					},
-					{
-						operation,
-						filePath: rawPath ? filePath : "(workspace)",
-						failureKind: "unavailable",
-						resultCount: 0,
-					},
-				);
-			};
-
-			const resolvedNewFileForGate =
-				operation === "rename_file" && newFilePath && newFilePath.trim()
-					? isAbsolute(newFilePath)
-						? newFilePath
-						: resolve(ctx.cwd || ".", newFilePath)
-					: "";
-
-			let isCallHierarchyLean = false;
-			if (isCallHierarchyTraversal && callHierarchyItem) {
-				const itemUri = callHierarchyItem.uri;
-				if (!itemUri || !itemUri.startsWith("file:")) {
-					if (
-						(filePath && isLeanTargetFile(filePath)) ||
-						isDirectoryLeanImplicated(filePath || resolve(ctx.cwd || "."))
-					) {
-						isCallHierarchyLean = true;
-					}
-				} else {
-					const itemFile = uriToPath(itemUri);
-					if (
-						isLeanTargetFile(itemFile) ||
-						(filePath && isLeanTargetFile(filePath))
-					) {
-						isCallHierarchyLean = true;
-					}
-				}
-			}
-
-			const isDirectLeanTargeted =
-				UNCONDITIONAL_LEAN_OPERATIONS.has(operation) ||
-				isCallHierarchyLean ||
-				(operation !== "capabilities" &&
-					operation !== "workspaceDiagnostics" &&
-					!isCallHierarchyTraversal &&
-					((Boolean(filePath) &&
-						!filePathIsDirectory &&
-						isLeanTargetFile(filePath)) ||
-						(Boolean(resolvedNewFileForGate) &&
-							isLeanTargetFile(resolvedNewFileForGate))));
-
-			if (isDirectLeanTargeted) {
-				if (!session || !session.isCurrent()) {
-					return finalizeUnavailable(
-						"session-unavailable",
-						"environment_unavailable: Lean semantic navigation requires a live SessionScope handle",
-					);
-				}
-				const scopeTarget =
-					filePath ||
-					(isCallHierarchyTraversal &&
-					callHierarchyItem?.uri?.startsWith("file:")
-						? uriToPath(callHierarchyItem.uri)
-						: "") ||
-					resolve(ctx.cwd || ".");
-				const admission = getLeanNavigationAdmission(scopeTarget);
-				if (admission["status"] === "unavailable") {
-					return finalizeUnavailable(admission.reasonCode, admission.message);
-				}
-				if (!admission.isCurrent()) {
-					return finalizeUnavailable(
-						"context-changed",
-						"environment_unavailable: admitted Lean context or contributing configuration changed",
-					);
-				}
-				if (!OFFLINE_CAPABLE_LEAN_OPERATIONS.has(operation)) {
-					return finalizeUnavailable(
-						"live-identity-unavailable",
-						`environment_unavailable: live Lean semantic operation "${operation}" is unavailable without a verified live-server identity receipt`,
-					);
-				}
-
-				const scanRes = await scanAllILeanFiles(admission, session, _signal);
-				if (scanRes["status"] === "unavailable") {
-					return finalizeUnavailable(scanRes.reasonCode, scanRes.message);
-				}
-
-				let offlineResult: unknown = [];
-				let offlineSearchReads: SearchReadLocation[] = [];
-
-				if (operation === "moduleImports" || operation === "moduleImportedBy") {
-					const confined = readConfinedLeanModuleSource(
-						filePath,
-						admission.admittedContext.moduleRoots,
-					);
-					if (!confined) {
-						return finalizeUnavailable(
-							"source-location-unavailable",
-							"environment_unavailable: target Lean source is outside admitted moduleRoots or unavailable",
-						);
-					}
-					const graph = buildILeanModuleGraph(scanRes["snapshot"]);
-					const mods =
-						operation === "moduleImports"
-							? (graph.imports.get(confined.moduleName) ?? [])
-							: (graph.importedBy.get(confined.moduleName) ?? []);
-					offlineResult = mods.map((name) => ({ name, kind: "module" }));
-				} else if (
-					operation === "definition" ||
-					operation === "implementation"
-				) {
-					const confined = readConfinedLeanModuleSource(
-						filePath,
-						admission.admittedContext.moduleRoots,
-					);
-					if (!confined) {
-						return finalizeUnavailable(
-							"source-location-unavailable",
-							"environment_unavailable: target Lean source is outside admitted moduleRoots or unavailable",
-						);
-					}
-					const resolvedCol = resolveSymbolColumn(
-						confined.content,
-						line ?? 1,
-						character,
-						symbol,
-					);
-					columnResolution = resolvedCol;
-					const navToken =
-						(line
-							? tokenAtPosition(confined.content, line, resolvedCol.character)
-							: undefined) ||
-						(symbol ? parseSymbolSelector(symbol).baseSymbol : undefined);
-					if (!navToken) {
-						offlineResult = [];
-					} else if (operation === "definition") {
-						const decls = lookupILeanDeclaration(scanRes["snapshot"], navToken);
-						if (decls.length === 0) {
-							offlineResult = [];
-						} else {
-							const locRes = resolveConfinedDeclarationLocations(decls);
-							if (locRes["status"] === "unavailable") {
-								return finalizeUnavailable(locRes.reasonCode, locRes.message);
-							}
-							offlineResult = locRes.locations.map((loc) => ({
-								uri: loc.uri,
-								range: loc.range,
-							}));
-							offlineSearchReads = collectLocationSearchReads(offlineResult);
-						}
-					} else {
-						const decls = lookupILeanDeclaration(scanRes["snapshot"], navToken);
-						if (decls.length === 0) {
-							offlineResult = [];
-						} else {
-							const cLocs: Array<{
-								uri: string;
-								range: {
-									start: { line: number; character: number };
-									end: { line: number; character: number };
-								};
-							}> = [];
-							for (const decl of decls) {
-								const cLoc = lookupGeneratedCDeclaration(
-									scanRes["snapshot"],
-									decl.module,
-									decl.name,
-								);
-								if (cLoc) {
-									cLocs.push({
-										uri: pathToFileURL(cLoc.filePath).href,
-										range: {
-											start: { line: cLoc.line, character: 0 },
-											end: {
-												line: cLoc.line,
-												character: cLoc.symbol.length,
-											},
-										},
-									});
-									break;
-								}
-							}
-							if (cLocs.length === 0) {
-								return finalizeUnavailable(
-									"source-location-unavailable",
-									"environment_unavailable: generated C source is unavailable under admitted moduleRoot",
-								);
-							}
-							offlineResult = cLocs;
-							offlineSearchReads = collectLocationSearchReads(offlineResult);
-						}
-					}
-				}
-
-				if (_signal?.aborted) {
-					return finalizeUnavailable(
-						"cancelled",
-						"environment_unavailable: Lean navigation request cancelled",
-					);
-				}
-				if (!session.isCurrent()) {
-					return finalizeUnavailable(
-						"session-unavailable",
-						"environment_unavailable: SessionScope retired before response delivery",
-					);
-				}
-				if (!admission.isCurrent()) {
-					return finalizeUnavailable(
-						"context-changed",
-						"environment_unavailable: admitted Lean context changed before response delivery",
-					);
-				}
-
-				const isEmpty =
-					!offlineResult ||
-					(Array.isArray(offlineResult) && offlineResult.length === 0);
-				const fileCtx = filePath ? " at " + basename(filePath) : "";
-				const lineCtx = line ? ":" + line + ":" + character : "";
-				const output = isEmpty
-					? "No results for " + operation + fileCtx + lineCtx
-					: JSON.stringify(offlineResult);
-				const resultCount = Array.isArray(offlineResult)
-					? offlineResult.length
-					: offlineResult
-						? 1
-						: 0;
-				return finalize(
-					{
-						content: [{ type: "text" as const, text: output }],
-						details: {
-							operation,
-							supported: true,
-							searchReads:
-								offlineSearchReads.length > 0 ? offlineSearchReads : undefined,
-							emptyReason: isEmpty
-								? emptyReasonForOperation(operation)
-								: undefined,
-							columnResolution:
-								columnResolution?.strategy === "explicit"
-									? undefined
-									: columnResolution,
-							resultCount,
-						},
-					},
-					{
-						operation,
-						filePath: rawPath ? filePath : "(workspace)",
-						failureKind: isEmpty ? "empty_result" : "success",
-						resultCount,
-					},
-				);
-			}
-
-			if (
-				operation === "workspaceDiagnostics" &&
-				rawPath &&
-				!filePathIsDirectory &&
-				isLeanTargetFile(filePath)
-			) {
-				const admission = getLeanNavigationAdmission(filePath);
-				if (admission["status"] === "unavailable") {
-					return finalizeUnavailable(admission.reasonCode, admission.message);
-				}
-				if (!admission.isCurrent()) {
-					return finalizeUnavailable(
-						"context-changed",
-						"environment_unavailable: admitted Lean context changed before diagnostics read",
-					);
-				}
-			}
-
-			let boundWarmRoute: WorkspaceScopeRouteSnapshot | undefined;
-			if (
-				(operation === "workspaceSymbol" || operation === "executeCommand") &&
-				(!rawPath || filePathIsDirectory)
-			) {
-				const targetDir = filePathIsDirectory
-					? filePath
-					: resolve(ctx.cwd || ".");
-				const hasPeekFn = typeof peekLSPService === "function";
-				const warmSvc = hasPeekFn ? peekLSPService() : getLSPService();
-				if (
-					warmSvc &&
-					typeof warmSvc.peekWorkspaceScopeRouteSnapshot === "function"
-				) {
-					boundWarmRoute = warmSvc.peekWorkspaceScopeRouteSnapshot(
-						operation,
-						filePathIsDirectory ? filePath : undefined,
-					);
-				} else if (!hasPeekFn && warmSvc) {
-					if (isDirectoryLeanImplicated(targetDir)) {
-						return finalizeUnavailable(
-							"ambiguous-warm-route-unavailable",
-							`environment_unavailable: pathless or directory-scoped ${operation} in a Lean-implicated workspace requires a verified warm non-Lean route`,
-						);
-					}
-				} else {
-					if (
-						isDirectoryLeanImplicated(targetDir) ||
-						!isSessionRootRegistered(targetDir)
-					) {
-						const admission = getLeanNavigationAdmission(targetDir);
-						const reasonCode =
-							admission["status"] === "unavailable"
-								? admission.reasonCode
-								: "ambiguous-warm-route-unavailable";
-						return finalizeUnavailable(
-							reasonCode,
-							`environment_unavailable: no warm proven non-Lean route for ${operation} in ${targetDir}`,
-						);
-					}
-				}
-
-				if (boundWarmRoute) {
-					if (boundWarmRoute.disposition === "lean-targeted") {
-						if (!session || !session.isCurrent()) {
-							return finalizeUnavailable(
-								"session-unavailable",
-								"environment_unavailable: Lean semantic navigation requires a live SessionScope handle",
-							);
-						}
-						const admission = getLeanNavigationAdmission(targetDir);
-						if (admission["status"] === "unavailable") {
-							return finalizeUnavailable(
-								admission.reasonCode,
-								admission.message,
-							);
-						}
-						if (!admission.isCurrent()) {
-							return finalizeUnavailable(
-								"context-changed",
-								"environment_unavailable: admitted Lean context changed",
-							);
-						}
-						return finalizeUnavailable(
-							"live-identity-unavailable",
-							`environment_unavailable: warm Lean route for ${operation} is unavailable without a verified live-server identity receipt`,
-						);
-					}
-					if (boundWarmRoute.disposition === "mixed-or-unresolved") {
-						return finalizeUnavailable(
-							"ambiguous-warm-route-unavailable",
-							`environment_unavailable: mixed Lean and non-Lean warm routes for ${operation} cannot be disambiguated without silent filtering`,
-						);
-					}
-					if (boundWarmRoute.disposition === "no-warm-route") {
-						if (
-							isDirectoryLeanImplicated(targetDir) ||
-							!isSessionRootRegistered(targetDir)
-						) {
-							const admission = getLeanNavigationAdmission(targetDir);
-							const reasonCode =
-								admission["status"] === "unavailable"
-									? admission.reasonCode
-									: "ambiguous-warm-route-unavailable";
-							return finalizeUnavailable(
-								reasonCode,
-								`environment_unavailable: no warm proven non-Lean route for ${operation} in ${targetDir}`,
-							);
-						}
-					}
 				}
 			}
 
@@ -2147,11 +1581,6 @@ export function createLspNavigationTool(
 			const lspEndChar = (endCharacter ?? resolvedCharacter.character) - 1;
 
 			const runWorkspaceSymbolOperation = async (): Promise<SymbolNode[]> => {
-				if (boundWarmRoute && !boundWarmRoute.isCurrent()) {
-					throw new Error(
-						"__UNAVAILABLE__ context-changed::environment_unavailable: warm route changed before workspaceSymbol dispatch",
-					);
-				}
 				const support = rawPath
 					? await lspService.getOperationSupport(filePath)
 					: await lspService.getOperationSupport(
@@ -2172,11 +1601,6 @@ export function createLspNavigationTool(
 				if (rawPath) {
 					await openFileBestEffort(lspService, filePath);
 				}
-				if (boundWarmRoute && !boundWarmRoute.isCurrent()) {
-					throw new Error(
-						"__UNAVAILABLE__ context-changed::environment_unavailable: warm route changed before workspaceSymbol execution",
-					);
-				}
 				try {
 					const raw = rawPath
 						? await lspService.workspaceSymbol(query ?? "", filePath)
@@ -2185,11 +1609,6 @@ export function createLspNavigationTool(
 								undefined,
 								workspaceScopeAttribution,
 							);
-					if (boundWarmRoute && !boundWarmRoute.isCurrent()) {
-						throw new Error(
-							"__UNAVAILABLE__ context-changed::environment_unavailable: warm route changed during workspaceSymbol execution",
-						);
-					}
 					const filtered = (Array.isArray(raw) ? raw : [raw]).filter(
 						(s) =>
 							typeof s === "object" &&
@@ -2355,22 +1774,12 @@ export function createLspNavigationTool(
 								"__BADINPUT__ command parameter required for executeCommand",
 							);
 						}
-						if (boundWarmRoute && !boundWarmRoute.isCurrent()) {
-							throw new Error(
-								"__UNAVAILABLE__ context-changed::environment_unavailable: warm route changed before executeCommand advertisement check",
-							);
-						}
 						const advertised = rawPath
 							? await lspService.getAdvertisedCommands(filePath)
 							: await lspService.getAdvertisedCommands(
 									undefined,
 									workspaceScopeAttribution,
 								);
-						if (boundWarmRoute && !boundWarmRoute.isCurrent()) {
-							throw new Error(
-								"__UNAVAILABLE__ context-changed::environment_unavailable: warm route changed before executeCommand dispatch",
-							);
-						}
 						const isAdvertised = advertised.includes(command);
 						// Dry-run by default: report advertisement status without running.
 						// Mutation only on explicit apply:true (and the client re-checks
@@ -2392,26 +1801,20 @@ export function createLspNavigationTool(
 								`__UNSUPPORTED__ command "${command}" is not advertised by the active LSP server (advertised: ${advertised.join(", ") || "none"})`,
 							);
 						}
-						const cmdRes = rawPath
-							? await lspService.executeCommand(
+						return rawPath
+							? lspService.executeCommand(
 									filePath,
 									command,
 									commandArguments,
 									mutationContext,
 								)
-							: await lspService.executeCommand(
+							: lspService.executeCommand(
 									undefined,
 									command,
 									commandArguments,
 									mutationContext,
 									workspaceScopeAttribution,
 								);
-						if (boundWarmRoute && !boundWarmRoute.isCurrent()) {
-							throw new Error(
-								"__UNAVAILABLE__ context-changed::environment_unavailable: warm route changed during executeCommand execution",
-							);
-						}
-						return cmdRes;
 					}
 					case "incomingCalls": {
 						if (!callHierarchyItem) {
@@ -2515,55 +1918,25 @@ export function createLspNavigationTool(
 
 				const stillEmpty =
 					!result || (Array.isArray(result) && result.length === 0);
-				let navToken: string | undefined;
-				if (
-					stillEmpty &&
-					needsFilePath &&
-					(operation === "definition" || operation === "implementation")
-				) {
-					try {
-						const content = nodeFs.readFileSync(filePath, "utf-8");
-						navToken =
-							(line && character
-								? tokenAtPosition(content, line, character)
-								: undefined) ||
-							(symbol ? parseSymbolSelector(symbol).baseSymbol : undefined);
-					} catch {
-						// ignore read error
-					}
-				}
-				if (
-					stillEmpty &&
-					needsFilePath &&
-					operation === "definition" &&
-					navToken &&
-					!filePath.endsWith(".lean")
-				) {
-					const docSymbols = (await lspService.documentSymbol(
-						filePath,
-					)) as SymbolNode[];
-					const locations = pickLocalSymbolLocation(
-						docSymbols,
-						navToken,
-						filePath,
-					);
-					if (locations.length > 0) {
-						result = locations;
-						usedDocumentSymbolFallback = true;
-					}
-				}
-				if (
-					stillEmpty &&
-					operation === "definition" &&
-					navToken &&
-					filePath &&
-					/\.(c|h|cpp|hpp|cc)$/i.test(filePath)
-				) {
-					const root = ctx.cwd || ".";
-					const externDecl = lookupLeanExternForCSymbol(root, navToken);
-					if (externDecl) {
-						result = [externDecl];
-						usedDocumentSymbolFallback = true;
+				if (stillEmpty && needsFilePath && operation === "definition") {
+					const content = nodeFs.readFileSync(filePath, "utf-8");
+					const token =
+						line && character
+							? tokenAtPosition(content, line, character)
+							: undefined;
+					if (token) {
+						const docSymbols = (await lspService.documentSymbol(
+							filePath,
+						)) as SymbolNode[];
+						const locations = pickLocalSymbolLocation(
+							docSymbols,
+							token,
+							filePath,
+						);
+						if (locations.length > 0) {
+							result = locations;
+							usedDocumentSymbolFallback = true;
+						}
 					}
 				}
 				if (
@@ -2589,15 +1962,6 @@ export function createLspNavigationTool(
 				}
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				if (msg.startsWith("__UNAVAILABLE__ ")) {
-					const payload = msg.replace("__UNAVAILABLE__ ", "");
-					const sepIdx = payload.indexOf("::");
-					const reasonCode = (
-						sepIdx > 0 ? payload.slice(0, sepIdx) : "context-changed"
-					) as LeanContextUnavailableReasonCode;
-					const textMsg = sepIdx > 0 ? payload.slice(sepIdx + 2) : payload;
-					return finalizeUnavailable(reasonCode, textMsg);
-				}
 				if (msg.startsWith("__UNSUPPORTED__ ")) {
 					return finalize(
 						{

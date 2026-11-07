@@ -7,22 +7,16 @@ import { removeTempDirSync } from "../clients/test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
-import type { WorkspaceScopeRouteSnapshot } from "../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
-import { beginScope } from "../../clients/session-scope.js";
 
 const mocked = vi.hoisted(() => ({
 	service: null as unknown,
-	extraExports: (): Record<string, unknown> => ({
-		peekLSPService: () => mocked.service,
-	}),
 }));
 
 vi.mock("../../clients/lsp/capabilities.js", () => ({
 	getLSPService: () => mocked.service,
-	...mocked.extraExports(),
 }));
 
 import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
@@ -112,31 +106,6 @@ describe("lsp_navigation tool", () => {
 			getWorkspaceDiagnosticsSupport: vi
 				.fn()
 				.mockResolvedValue({ mode: "push-only" }),
-			peekWorkspaceScopeRouteSnapshot: vi.fn(
-				(
-					operation: "workspaceSymbol" | "executeCommand" = "workspaceSymbol",
-				): WorkspaceScopeRouteSnapshot => ({
-					operation,
-					disposition: "proven-non-lean",
-					selected: {
-						key: "typescript:/workspace",
-						serverId: "typescript",
-						root: "/workspace",
-						role: "primary",
-						supportsOp: true,
-					},
-					candidates: [
-						{
-							key: "typescript:/workspace",
-							serverId: "typescript",
-							root: "/workspace",
-							role: "primary",
-							supportsOp: true,
-						},
-					],
-					isCurrent: () => true,
-				}),
-			),
 		});
 	});
 
@@ -1714,133 +1683,4 @@ describe("lsp_navigation tool", () => {
 	// tests/clients/lsp/integration.test.ts ("records a server-initiated
 	// edit on a sibling package when the mutation context's isRecordable
 	// judges against the project root, not cwd").
-
-	it("enforces pure warm-route binding for pathless workspaceSymbol across proven-non-lean, lean-targeted, mixed, and route-mutation dispositions", async () => {
-		const scope = beginScope({ role: "primary" });
-		const tool = createLspNavigationTool(
-			(flag) => flag === "lens-lsp",
-			undefined,
-			() => scope.capture(),
-		);
-		const svc = mocked.service as {
-			workspaceSymbol: ReturnType<typeof vi.fn>;
-			peekWorkspaceScopeRouteSnapshot: ReturnType<typeof vi.fn>;
-		};
-
-		// (a) Warm Lean route without live-server identity receipt -> refuses before workspaceSymbol RPC
-		svc.peekWorkspaceScopeRouteSnapshot.mockReturnValueOnce({
-			operation: "workspaceSymbol",
-			disposition: "lean-targeted",
-			selected: {
-				key: "lean:/workspace",
-				serverId: "lean",
-				root: "/workspace",
-				role: "primary",
-				supportsOp: true,
-			},
-			candidates: [
-				{
-					key: "lean:/workspace",
-					serverId: "lean",
-					root: "/workspace",
-					role: "primary",
-					supportsOp: true,
-				},
-			],
-			isCurrent: () => true,
-		} satisfies WorkspaceScopeRouteSnapshot);
-
-		const leanRes = await tool.execute(
-			"warm-lean",
-			{ operation: "workspaceSymbol", query: "foo" },
-			new AbortController().signal,
-			null,
-			{ cwd: "/workspace" },
-		);
-		expect(leanRes.isError).toBe(true);
-		expect(parseToolJson(leanRes).metadata).toMatchObject({
-			availability: "unavailable",
-			reasonCode: "admission-missing",
-		});
-		expect(svc.workspaceSymbol).not.toHaveBeenCalled();
-
-		// (b) Mixed warm routes -> refuses with ambiguous-warm-route-unavailable
-		svc.peekWorkspaceScopeRouteSnapshot.mockReturnValueOnce({
-			operation: "workspaceSymbol",
-			disposition: "mixed-or-unresolved",
-			selected: undefined,
-			candidates: [
-				{
-					key: "typescript:/workspace",
-					serverId: "typescript",
-					root: "/workspace",
-					role: "primary",
-					supportsOp: true,
-				},
-				{
-					key: "lean:/workspace",
-					serverId: "lean",
-					root: "/workspace",
-					role: "primary",
-					supportsOp: true,
-				},
-			],
-			isCurrent: () => true,
-		} satisfies WorkspaceScopeRouteSnapshot);
-
-		const mixedRes = await tool.execute(
-			"warm-mixed",
-			{ operation: "workspaceSymbol", query: "foo" },
-			new AbortController().signal,
-			null,
-			{ cwd: "/workspace" },
-		);
-		expect(mixedRes.isError).toBe(true);
-		expect(parseToolJson(mixedRes).metadata).toMatchObject({
-			availability: "unavailable",
-			reasonCode: "ambiguous-warm-route-unavailable",
-		});
-		expect(svc.workspaceSymbol).not.toHaveBeenCalled();
-
-		// (c) Route mutation mid-flight -> aborts with context-changed
-		let routeCurrent = true;
-		svc.peekWorkspaceScopeRouteSnapshot.mockReturnValueOnce({
-			operation: "workspaceSymbol",
-			disposition: "proven-non-lean",
-			selected: {
-				key: "typescript:/workspace",
-				serverId: "typescript",
-				root: "/workspace",
-				role: "primary",
-				supportsOp: true,
-			},
-			candidates: [
-				{
-					key: "typescript:/workspace",
-					serverId: "typescript",
-					root: "/workspace",
-					role: "primary",
-					supportsOp: true,
-				},
-			],
-			isCurrent: () => routeCurrent,
-		} satisfies WorkspaceScopeRouteSnapshot);
-		svc.workspaceSymbol.mockImplementationOnce(async () => {
-			routeCurrent = false;
-			return [];
-		});
-
-		const mutatedRes = await tool.execute(
-			"warm-mutated",
-			{ operation: "workspaceSymbol", query: "foo" },
-			new AbortController().signal,
-			null,
-			{ cwd: "/workspace" },
-		);
-		expect(mutatedRes.isError).toBe(true);
-		expect(parseToolJson(mutatedRes).metadata).toMatchObject({
-			availability: "unavailable",
-			reasonCode: "context-changed",
-		});
-	});
 });

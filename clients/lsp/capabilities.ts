@@ -68,7 +68,6 @@ export type LspWorkspaceCapabilities = CapabilityMethods<
 	| "getOperationSupport"
 	| "getWarmClientForFile"
 	| "hasServerPublishedForFileRoot"
-	| "peekWorkspaceScopeRouteSnapshot"
 	| "supportsLSP"
 >;
 
@@ -144,7 +143,6 @@ export function adaptLspService(service: LSPService): LspCapabilities {
 			"getOperationSupport",
 			"getWarmClientForFile",
 			"hasServerPublishedForFileRoot",
-			"peekWorkspaceScopeRouteSnapshot",
 			"supportsLSP",
 		]),
 	};

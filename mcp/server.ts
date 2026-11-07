@@ -23,7 +23,6 @@ import { setProjectTrustState } from "../clients/project-trust.js";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
-import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	finalizeToolResult,
@@ -105,8 +104,6 @@ import {
 import { logExtension, flushExtensionLog } from "../clients/extension-log.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
 import { shouldInitializeSessionRoot } from "../clients/lsp/session-roots.js";
-import { getLanguageId } from "../clients/lsp/language.js";
-import { uriToPath } from "../clients/path-utils.js";
 import {
 	findIgnoredArguments,
 	ignoredArgumentsStructured,
@@ -621,64 +618,9 @@ const astGrepReplaceTool = createAstGrepReplaceTool(astGrepClient);
 // whatever `.pi-lens.json` happens to sit there, never the caller's project.
 // Resolve lazily against the call's own `cwd` instead (config loads are
 // mtime-cached, so this stays cheap).
-const lspNavigationTool = createLspNavigationTool(
-	(name, cwd) => createMcpHost(undefined, cwd ?? DEFAULT_CWD).getFlag(name),
-	undefined,
-	() => peekMcpSessionRuntime()?.captureSessionGeneration(),
+const lspNavigationTool = createLspNavigationTool((name, cwd) =>
+	createMcpHost(undefined, cwd ?? DEFAULT_CWD).getFlag(name),
 );
-
-const LEAN_ALWAYS_GATED_NAV_OPS = new Set([
-	"goal",
-	"termGoal",
-	"moduleImports",
-	"moduleImportedBy",
-	"capabilities",
-	"workspaceDiagnostics",
-]);
-
-function isProvenNonLeanNavigationCall(
-	args: Record<string, unknown>,
-	cwd: string,
-): boolean {
-	const op = typeof args.operation === "string" ? args.operation : "";
-	if (!op || LEAN_ALWAYS_GATED_NAV_OPS.has(op)) return false;
-	const checkTargetFile = (candidate: string): boolean => {
-		const resolved = isAbsolute(candidate)
-			? resolve(candidate)
-			: resolve(cwd, candidate);
-		try {
-			if (fs.statSync(resolved).isDirectory()) return false;
-		} catch {
-			// A non-existent file path can still be classified by extension/basename.
-		}
-		const lang = getLanguageId(resolved);
-		return Boolean(lang && lang !== "lean" && lang !== "lean4");
-	};
-	if (op === "incomingCalls" || op === "outgoingCalls") {
-		const item = args.callHierarchyItem;
-		if (!item || typeof item !== "object") return false;
-		const uri = (item as { uri?: unknown }).uri;
-		if (typeof uri !== "string" || !uri.startsWith("file://")) return false;
-		const uriTarget = uriToPath(uri);
-		if (!uriTarget || !checkTargetFile(uriTarget)) return false;
-		if (typeof args["path"] === "string" && !checkTargetFile(args["path"])) {
-			return false;
-		}
-		return true;
-	}
-	const rawTarget = args["path"];
-	if (typeof rawTarget !== "string" || rawTarget.trim().length === 0) {
-		return false;
-	}
-	if (!checkTargetFile(rawTarget)) return false;
-	if (op === "rename_file") {
-		const newTarget = args.newFilePath;
-		if (typeof newTarget !== "string" || !checkTargetFile(newTarget)) {
-			return false;
-		}
-	}
-	return true;
-}
 
 // Wrapped pi tools already declare their params as typebox (which IS JSON
 // Schema). Emit that directly as the MCP inputSchema (+ the MCP-only `cwd`)
@@ -1866,9 +1808,7 @@ async function callTool(
 
 	if (name === "pilens_lsp_navigation") {
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
-		if (isProvenNonLeanNavigationCall(args, cwd)) {
-			await ensureReady(cwd);
-		}
+		await ensureReady(cwd);
 		const tool = lspNavigationTool;
 		const out = (await tool.execute(
 			"mcp",
@@ -2081,15 +2021,7 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 			// once it has actually succeeded (see the in-flight/succeeded guard
 			// inside maybeAutoSessionStart), so this does NOT re-run session_start
 			// on every tool call, only until the connection's first success.
-			const skipAutoSession =
-				enabledName === "pilens_lsp_navigation" &&
-				!isProvenNonLeanNavigationCall(
-					args,
-					typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD,
-				);
-			if (!skipAutoSession) {
-				maybeAutoSessionStart();
-			}
+			maybeAutoSessionStart();
 			try {
 				let result = await callTool(name, args);
 				// #535: pilens_analyze already self-routes (fresh-fork) when stale —

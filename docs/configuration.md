@@ -195,32 +195,6 @@ while it exists; with neither file present, the canonical default path is used.
 See also the [environment-variable reference](environment-variables.md#config-location)
 and [settings overview](settings.md#the-three-ways-to-configure-pi-lens).
 
-### Experimental exact Lean compiler context
-
-An operator can admit a pre-installed Lean compiler through the existing LSP override owner:
-
-```json
-{
-  "lsp": {
-    "serverOverrides": {
-      "lean": {
-        "leanContext": {
-          "compilerPath": "/absolute/installed/toolchain/bin/lean",
-          "targetVersion": "4.35.0",
-          "moduleRoots": ["/absolute/admitted/modules"]
-        }
-      }
-    }
-  }
-}
-```
-
-This field is **experimental** and host-admitted executable input. Project-tier values (including a project override of one field in a global context) require the existing pi project-trust decision; an untrusted or unknown project cannot inject a compiler or module path. The context accepts only the three documented fields, no command, args, or environment. Compiler and module directories must exist. Compiler paths whose realpath differs from their normalized absolute spelling (including executable or parent-directory symlinks) are unsupported; admit a direct installed `lean` binary rather than silently changing argv0-dependent shim semantics. Not all elan launcher paths are supported. Module roots replace inherited `LEAN_PATH`, never append global includes; `[]` admits no extra module roots. An exact bounded version probe precedes launching `lean --server`. Wrong/missing context is `environment_unavailable`, not proof that the source fails under the requested compiler. Raw context contributions are validated before normalization can drop bad leaves or array members. Valid partial tiers still merge. A malformed contribution is atomic: its supplied fields stay unavailable until explicitly replaced by valid higher-priority contributions; a malformed whole context requires all three axes to be replaced. Thus invalid effective project input cannot fall back to global context A, while a complete valid higher context can recover a lower malformed one. Refusals name the source location without retaining config values. An explicitly rejected context does not fall back to ambient Lake. Do not combine this context with `command` or `env` overrides.
-
-The built-in Lean server retains `requiresProjectRoot`, `executesProjectCode`, root ceilings, and analyzer/build-lock routing. Exact context does not enable markerless LSP projects or bypass an active analyzer/lock; those remain unavailable under this mode. Reload the project/server after changing configuration: this patch does not add live config/session reconfiguration.
-
-The `cpp-check` fallback uses this same admitted context only for generated-style Lean C whose first non-comment directive is a paired literal `#include <lean/lean.h>` or `#include "lean/lean.h"` (as emitted by Lean). Recognition splices backslash-LF/CRLF before comments and accepts a complete logical directive, not a newline between `#` and `include`, mismatched header delimiters, or trailing junk. It is not a general preprocessor. Nonmatching or unreadable input remains on the ordinary native-compiler path; the real content provider's `null` sentinel does not cause a scanner exception. It probes that compiler's prefix per check, requires the matching runtime header, and supplies only that include directory to the selected C compiler (`-I` or MSVC `/I`). No compile database, global include defaults, or `leanc` build is synthesized. Without admitted headers it returns actionable `unavailable` evidence; with them, ordinary compiler errors remain diagnostics. This is syntax-check context, not proof of full target native-build/ABI compatibility.
-
 ### One exception: `lsp.disabledServers` is a denial, not a value
 
 Ordinary settings are last-tier-wins. A **denial** is not, because the tier
