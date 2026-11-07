@@ -38,10 +38,9 @@ export const SUPPORTED_RANGE_ENV_VAR = "PI_HOST_SUPPORTED_RANGE";
  * @returns {string}
  */
 export function readPeerRange(pkg, packageName) {
-	const range =
-		/** @type {Record<string, unknown> | undefined} */ (
-			pkg?.peerDependencies
-		)?.[packageName];
+	const range = /** @type {Record<string, unknown> | undefined} */ (
+		pkg?.peerDependencies
+	)?.[packageName];
 	if (typeof range !== "string" || range.trim() === "") {
 		throw new Error(
 			`package.json has no peerDependencies["${packageName}"] entry`,

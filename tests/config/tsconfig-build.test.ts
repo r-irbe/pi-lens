@@ -3,7 +3,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const root = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 const readJson = (name: string) =>
 	JSON.parse(fs.readFileSync(path.join(root, name), "utf8"));
 

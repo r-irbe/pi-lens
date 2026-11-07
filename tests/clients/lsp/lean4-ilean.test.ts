@@ -5,16 +5,13 @@ import { describe, expect, it, vi } from "vitest";
 import { beginScope, retireScope } from "../../../clients/session-scope.js";
 import type { LeanNavigationAdmissionAvailable } from "../../../clients/lsp/config.js";
 import {
-	auditLeanBlueprintStatus,
 	buildILeanModuleGraph,
 	clearILeanScanCache,
 	findILeanRoot,
 	findILeanRoots,
-	generatePedagogicalProofWalkthrough,
 	lookupExternCDeclaration,
 	lookupGeneratedCDeclaration,
 	lookupILeanDeclaration,
-	lookupItpConceptForLeanDeclaration,
 	lookupLeanExternForCSymbol,
 	readILeanFile,
 	resolveConfinedDeclarationLocations,
@@ -342,72 +339,7 @@ LEAN_EXPORT lean_object* lp_MyPkg_myBoxedFn___boxed(lean_object* a, lean_object*
 		}
 	});
 
-	it("generates pedagogical proof walkthrough from an admitted observation and refuses raw workspace string", async () => {
-		const tmpDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-pedagogical-walkthrough-"),
-		);
-		try {
-			const leanDir = path.join(tmpDir, "EASCI");
-			fs.mkdirSync(leanDir, { recursive: true });
-
-			const sampleLean = `/-- Cauchy-Schwarz inequality for inner products -/
-theorem cauchy_schwarz_inequality (u v : Real) : u * v <= u * u + v * v := by
-  have h1 : 0 <= (u - v) * (u - v) := by sorry
-  have h2 : 2 * (u * v) <= u * u + v * v := by sorry
-  sorry
-`;
-			const filePath = path.join(leanDir, "Analysis.lean");
-			fs.writeFileSync(filePath, sampleLean, "utf-8");
-			fs.writeFileSync(
-				path.join(leanDir, "Analysis.ilean"),
-				JSON.stringify({
-					version: 5,
-					module: "Analysis",
-					directImports: [],
-					decls: {
-						cauchy_schwarz_inequality: [0, 0, 4, 7, 1, 8, 1, 33],
-					},
-				}),
-				"utf-8",
-			);
-
-			// Raw workspace string is refused
-			expect(
-				generatePedagogicalProofWalkthrough(
-					tmpDir,
-					"cauchy_schwarz_inequality",
-					filePath,
-				),
-			).toBeNull();
-
-			const admission = makeAdmission(tmpDir, [leanDir]);
-			const scope = beginScope({ role: "primary" });
-			const scanRes = await scanAllILeanFiles(
-				admission,
-				scope.capture(),
-				undefined,
-				{ probe: makeProbe() as never },
-			);
-			expect(scanRes.status).toBe("available");
-			if (scanRes.status !== "available") return;
-
-			const walkthrough = generatePedagogicalProofWalkthrough(
-				scanRes.snapshot,
-				"cauchy_schwarz_inequality",
-			);
-
-			expect(walkthrough).not.toBeNull();
-			expect(walkthrough?.symbol).toBe("cauchy_schwarz_inequality");
-			expect(walkthrough?.docstring).toContain("Cauchy-Schwarz inequality");
-			expect(walkthrough?.milestones.length).toBe(2);
-			expect(walkthrough?.statement.rigorousLatex).toContain("\\le");
-			expect(walkthrough?.statement.rigorousLatex).toContain("\\mathbb{R}");
-		} finally {
-			removeTempDirSync(tmpDir);
-		}
-	});
-
-	it("preserves extern C lookup, ITP ontology lookup, and blueprintStatus audit", () => {
+	it("preserves extern C lookup", () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-c-extern-test-"),
 		);
@@ -435,53 +367,6 @@ theorem cauchy_schwarz_inequality (u v : Real) : u * v <= u * u + v * v := by
 			expect(
 				lookupLeanExternForCSymbol(tmpDir, "my_native_c_func")?.uri,
 			).toContain("Native.lean");
-
-			const indexDir = path.join(
-				tmpDir,
-				"docs",
-				"investigation-garden",
-				"source-materials",
-				"indexes",
-			);
-			fs.mkdirSync(indexDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(indexDir, "master-authority-index.json"),
-				JSON.stringify({
-					version: "1.0.0",
-					master_concepts: [
-						{
-							concept_id: "CONCEPT-HOARE",
-							canonical_name: "Hoare Logic",
-							ranganathan_facet: { domain_theory: "Verification" },
-							msc2020: ["68Q60"],
-							prover_mappings: { lean4: { primary_tactics: ["wp"] } },
-						},
-					],
-				}),
-				"utf-8",
-			);
-			expect(lookupItpConceptForLeanDeclaration("Hoare", tmpDir)).toHaveLength(
-				1,
-			);
-
-			const bpDir = path.join(tmpDir, "blueprint", "src");
-			fs.mkdirSync(bpDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(leanDir, "Core.lean"),
-				"theorem proven_theorem (n : Nat) : n = n := by\n  rfl\n",
-				"utf-8",
-			);
-			fs.writeFileSync(
-				path.join(bpDir, "content.tex"),
-				"\\begin{theorem}\\label{thm:p}\\lean{proven_theorem}\\leanok\\end{theorem}\n",
-				"utf-8",
-			);
-			const bp = auditLeanBlueprintStatus(tmpDir, {
-				blueprintDir: "blueprint/src",
-				formalizationDir: "MyPkg",
-			});
-			expect(bp.leanTheoremsCount).toBe(1);
-			expect(bp.blueprintTheoremsCount).toBe(1);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

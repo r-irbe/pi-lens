@@ -628,13 +628,10 @@ const lspNavigationTool = createLspNavigationTool(
 );
 
 const LEAN_ALWAYS_GATED_NAV_OPS = new Set([
-	"pedagogicalWalkthrough",
 	"goal",
 	"termGoal",
 	"moduleImports",
 	"moduleImportedBy",
-	"itpConcept",
-	"blueprintStatus",
 	"capabilities",
 	"workspaceDiagnostics",
 ]);

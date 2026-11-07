@@ -914,7 +914,7 @@
 				"NavEntryCapture": {
 					"value": "TRUE",
 					"test": "tests/tools/lsp-navigation-admitted-context.test.ts",
-					"title": "serves the 5 root-confined offline Lean routes, omits @[extern] workspace C expansion, and refuses live-only routes with live-identity-unavailable",
+					"title": "serves the 4 root-confined offline Lean routes, omits @[extern] workspace C expansion, and refuses live-only routes with live-identity-unavailable",
 					"also": [
 						{
 							"test": "tests/tools/lsp-navigation-admitted-context.test.ts",

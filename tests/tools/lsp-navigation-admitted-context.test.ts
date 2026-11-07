@@ -112,7 +112,6 @@ describe("lsp_navigation admitted-context gate, 5 offline routes, and pure warm-
 			{ operation: "implementation", path: leanFile, line: 1, character: 9 },
 			{ operation: "moduleImports", path: leanFile },
 			{ operation: "moduleImportedBy", path: leanFile },
-			{ operation: "pedagogicalWalkthrough", symbol: "t", path: leanFile },
 			{ operation: "typeDefinition", path: leanFile, line: 1, character: 9 },
 			{ operation: "declaration", path: leanFile, line: 1, character: 9 },
 			{ operation: "references", path: leanFile, line: 1, character: 9 },
@@ -215,7 +214,7 @@ describe("lsp_navigation admitted-context gate, 5 offline routes, and pure warm-
 		expect(group?.count).toBeGreaterThanOrEqual(gatedOps.length);
 	});
 
-	it("serves the 5 root-confined offline Lean routes, omits @[extern] workspace C expansion, and refuses live-only routes with live-identity-unavailable", async () => {
+	it("serves the 4 root-confined offline Lean routes, omits @[extern] workspace C expansion, and refuses live-only routes with live-identity-unavailable", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-nav-offline-"),
 		);
@@ -366,20 +365,7 @@ describe("lsp_navigation admitted-context gate, 5 offline routes, and pure warm-
 		expect(impByRes.isError).toBeUndefined();
 		expect(parseEnvelope(impByRes).status).toBe("empty");
 
-		// 5. pedagogicalWalkthrough
-		const pedRes = await tool.execute(
-			"ped-1",
-			{ operation: "pedagogicalWalkthrough", symbol: "myTheorem" },
-			new AbortController().signal,
-			null,
-			{ cwd: tmpDir },
-		);
-		expect(pedRes.isError).toBeUndefined();
-		const pedEnv = parseEnvelope(pedRes);
-		expect(pedEnv.ok).toBe(true);
-		expect((pedEnv.result as { symbol: string }).symbol).toBe("myTheorem");
-
-		// 6. Live-only Lean operation with admitted context -> live-identity-unavailable
+		// 5. Live-only Lean operation with admitted context -> live-identity-unavailable
 		const hoverRes = await tool.execute(
 			"hover-1",
 			{ operation: "hover", path: leanFile, line: 3, character: 9 },

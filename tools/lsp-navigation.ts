@@ -51,15 +51,11 @@ import type { WorkspaceScopeRouteSnapshot } from "../clients/lsp/index.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
 import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
-import { resolveLanguageRootForFile } from "../clients/language-profile.js";
 import {
 	buildILeanModuleGraph,
 	lookupILeanDeclaration,
 	lookupGeneratedCDeclaration,
 	lookupLeanExternForCSymbol,
-	lookupItpConceptForLeanDeclaration,
-	auditLeanBlueprintStatus,
-	generatePedagogicalProofWalkthrough,
 	resolveConfinedDeclarationLocations,
 	scanAllILeanFiles,
 } from "../clients/lsp/lean4-ilean.js";
@@ -88,9 +84,6 @@ const VALID_OPERATIONS = [
 	"termGoal",
 	"moduleImports",
 	"moduleImportedBy",
-	"itpConcept",
-	"blueprintStatus",
-	"pedagogicalWalkthrough",
 ] as const;
 
 const NAVIGABLE_SYMBOL_KINDS = new Set([
@@ -107,7 +100,6 @@ const NAVIGABLE_SYMBOL_KINDS = new Set([
 type LspNavigationOperation = (typeof VALID_OPERATIONS)[number];
 
 const UNCONDITIONAL_LEAN_OPERATIONS = new Set<LspNavigationOperation>([
-	"pedagogicalWalkthrough",
 	"goal",
 	"termGoal",
 	"moduleImports",
@@ -119,7 +111,6 @@ const OFFLINE_CAPABLE_LEAN_OPERATIONS = new Set<LspNavigationOperation>([
 	"implementation",
 	"moduleImports",
 	"moduleImportedBy",
-	"pedagogicalWalkthrough",
 ]);
 
 function isLeanTargetFile(targetFile: string): boolean {
@@ -295,9 +286,6 @@ function emptyReasonForOperation(operation: LspNavigationOperation): string {
 	if (operation === "termGoal") return "no-term-goal-at-position";
 	if (operation === "moduleImports") return "no-module-imports-found";
 	if (operation === "moduleImportedBy") return "no-importing-modules-found";
-	if (operation === "blueprintStatus")
-		return "no-blueprint-or-formalization-found";
-	if (operation === "pedagogicalWalkthrough") return "declaration-not-found";
 	return "no-results";
 }
 
@@ -1455,9 +1443,6 @@ export function createLspNavigationTool(
 				operation !== "workspaceSymbol" &&
 				operation !== "executeCommand" &&
 				operation !== "capabilities" &&
-				operation !== "itpConcept" &&
-				operation !== "blueprintStatus" &&
-				operation !== "pedagogicalWalkthrough" &&
 				!isCallHierarchyTraversal;
 			if (needsFilePath && (!rawPath || rawPath.trim().length === 0)) {
 				return finalize(
@@ -1544,65 +1529,6 @@ export function createLspNavigationTool(
 				);
 			};
 
-			if (operation === "itpConcept") {
-				const queryToken = symbol || query || "";
-				const root = filePath
-					? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
-					: ctx.cwd || ".";
-				const itpMatches = lookupItpConceptForLeanDeclaration(queryToken, root);
-				const isEmpty = itpMatches.length === 0;
-				const fileCtx = filePath ? " at " + path.basename(filePath) : "";
-				const lineCtx = line ? ":" + line + ":" + character : "";
-				const output = isEmpty
-					? "No results for " + operation + fileCtx + lineCtx
-					: JSON.stringify(itpMatches);
-				return finalize(
-					{
-						content: [{ type: "text" as const, text: output }],
-						details: {
-							operation,
-							supported: null,
-							emptyReason: isEmpty
-								? emptyReasonForOperation(operation)
-								: undefined,
-							resultCount: itpMatches.length,
-						},
-					},
-					{
-						operation,
-						filePath: rawPath ? filePath : "(workspace)",
-						failureKind: isEmpty ? "empty_result" : "success",
-						resultCount: itpMatches.length,
-					},
-				);
-			}
-
-			if (operation === "blueprintStatus") {
-				const root = filePath
-					? resolveLanguageRootForFile(filePath, ctx.cwd || ".")
-					: ctx.cwd || ".";
-				const bpRes = auditLeanBlueprintStatus(root, {
-					blueprintDir: query,
-					formalizationDir: symbol,
-				});
-				return finalize(
-					{
-						content: [{ type: "text" as const, text: JSON.stringify(bpRes) }],
-						details: {
-							operation,
-							supported: null,
-							resultCount: 1,
-						},
-					},
-					{
-						operation,
-						filePath: rawPath ? filePath : "(workspace)",
-						failureKind: "success",
-						resultCount: 1,
-					},
-				);
-			}
-
 			const resolvedNewFileForGate =
 				operation === "rename_file" && newFilePath && newFilePath.trim()
 					? isAbsolute(newFilePath)
@@ -1682,29 +1608,7 @@ export function createLspNavigationTool(
 				let offlineResult: unknown = [];
 				let offlineSearchReads: SearchReadLocation[] = [];
 
-				if (operation === "pedagogicalWalkthrough") {
-					const targetSymbol = symbol || query || "";
-					if (filePath) {
-						const confined = readConfinedLeanModuleSource(
-							filePath,
-							admission.admittedContext.moduleRoots,
-						);
-						if (!confined) {
-							return finalizeUnavailable(
-								"source-location-unavailable",
-								"environment_unavailable: walkthrough target source is outside admitted moduleRoots or unavailable",
-							);
-						}
-					}
-					offlineResult = generatePedagogicalProofWalkthrough(
-						scanRes["snapshot"],
-						targetSymbol,
-						filePath || undefined,
-					);
-				} else if (
-					operation === "moduleImports" ||
-					operation === "moduleImportedBy"
-				) {
+				if (operation === "moduleImports" || operation === "moduleImportedBy") {
 					const confined = readConfinedLeanModuleSource(
 						filePath,
 						admission.admittedContext.moduleRoots,
