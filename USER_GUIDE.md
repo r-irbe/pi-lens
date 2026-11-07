@@ -33,7 +33,7 @@ Add `pi-lens-mcp` to your MCP client configuration (for example, `~/.claude.json
 
 - `pilens_analyze`: Run the per-file diagnostic pipeline (`mode="warm"` uses the hot in-process LSP pool; `mode="fresh"` forks a worker against the latest build).
 - `pilens_diagnostics`: Query session, file, or workspace diagnostics and manage finding dispositions.
-- `pilens_lsp_navigation`: IDE navigation (`definition`, `references`, `hover`, `implementations`, `incomingCalls`, `outgoingCalls`, plus Lean 4 `.ilean` and proof-state queries).
+- `pilens_lsp_navigation`: IDE navigation (`definition`, `references`, `hover`, `implementations`, `incomingCalls`, `outgoingCalls`).
 - `pilens_symbol_search` / `pilens_module_report` / `pilens_read_symbol` / `pilens_read_enclosing`: Token-efficient symbol discovery and structural outline inspection before full-file reads.
 - `pilens_ast_grep_search` / `pilens_ast_grep_replace`: Structural AST search and rewrite across supported languages.
 - `pilens_project_scan` / `pilens_project_report`: Project-wide static analysis and dependency health reports.

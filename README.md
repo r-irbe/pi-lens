@@ -6,7 +6,7 @@
 
 **Give AI coding agents real-time compiler, linter, and reverse-dependency feedback the moment they edit a file.**
 
-`pi-lens` connects coding agents ([`pi`](https://github.com/earendil-works/pi-coding-agent), Claude Code, Cursor, and MCP clients) to **47 language servers** (including first-class Lean 4 support) and **45+ linter/formatter runners** across 35+ file types.
+`pi-lens` connects coding agents ([`pi`](https://github.com/earendil-works/pi-coding-agent), Claude Code, Cursor, and MCP clients) to **47 language servers** and **45+ linter/formatter runners** across 35+ file types.
 
 ![pi-lens Architecture and Customer Journeys](docs/assets/overview.png)
 
@@ -24,8 +24,6 @@ When an AI agent edits code without live IDE feedback, three failure modes waste
 2. **Agents waste dozens of turns running `grep` to find symbols**: `pi-lens` keeps an always-warm identifier index (`symbol_search` -> `module_report` -> `read_symbol`) and enforces a **read-guard** so agents read the target code before overwriting it.
 3. **Stale warnings confuse agents**: `pi-lens` gates every diagnostic against file modification times, filters out stale results, lets agents triage false positives (`lens_diagnostic_mark`), and holds `git commit` / `git push` when unresolved errors remain.
 
-> **Upstream & Fork Relationship**: Built on [`apmantza/pi-lens`](https://github.com/apmantza/pi-lens) (which provides the 46-language LSP pool, 45+ edit-time runners, `review-graph` impact cascade, and freshness gate), this [`r-irbe/pi-lens`](https://github.com/r-irbe/pi-lens) fork adds **first-class Lean 4 language server (`lake serve`) integration**, exact `LeanContext` workspace admission (`lean-toolchain` + `lakefile.lean`/`lakefile.toml`), and Lean 4 build/diagnostic contracts.
-
 ![How pi-lens Catches Cross-File Breakage & Eliminates Grep Loops](docs/assets/mechanics.png)
 
 ---
@@ -38,7 +36,7 @@ Requires **Node.js >= 22.19.0**.
 # Install from npm into pi
 pi install npm:pi-lens
 
-# Or install the Lean 4 + extended fork directly from git
+# Or install directly from git
 pi install git:github.com/r-irbe/pi-lens
 ```
 
@@ -66,14 +64,7 @@ expects to be operated.
 </details>
 
 <details>
-<summary><b>2. Lean 4 Formal Verification & Mathlib Repositories</b></summary>
-
-- **Who this is for**: Theorem-proving workflows that need live Lean 4 diagnostics, symbol search, and project-wide dependency awareness alongside standard programming languages.
-- **What you get**: Integrated Lean 4 language server pooling, structural indexing, and honest degradation telemetry (`/lens-health`) if a language server times out.
-</details>
-
-<details>
-<summary><b>3. Claude Code & External MCP Clients</b></summary>
+<summary><b>2. Claude Code & External MCP Clients</b></summary>
 
 - **Who this is for**: Teams using Claude Code or other MCP hosts who want the same symbol discovery funnel (`symbol_search`, `read_symbol`), AST search/replace, and live diagnostics that `pi-lens` gives to `pi`.
 - **How to use it**: See the [MCP Server Guide (`docs/mcp.md`)](docs/mcp.md) to attach `pi-lens` as an MCP server.

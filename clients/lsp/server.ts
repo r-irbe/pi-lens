@@ -7,7 +7,6 @@
  * - Platform-specific handling
  */
 
-import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { access, readFile, readdir, stat } from "node:fs/promises";
 import os from "node:os";
@@ -511,7 +510,7 @@ export interface LSPServerInfo {
 	/** True for entries supplied through `lsp.servers.*`, not the built-in table. */
 	custom?: boolean;
 	/** True when startup/indexing can execute project-owned build or plugin code. */
-	executesProjectCode?: boolean | ((root: string) => boolean);
+	executesProjectCode?: boolean;
 	/** Set by compileLspRegistry after the source trust decision is admitted. */
 	trustAllowed?: boolean;
 	/**
@@ -1554,7 +1553,7 @@ interface InteractiveServerSpec {
 	language: string;
 	fallbackFor?: string;
 	requiresProjectRoot?: boolean;
-	executesProjectCode?: boolean | ((root: string) => boolean);
+	executesProjectCode?: boolean;
 	command: string | ((root: string) => string);
 	args?: string[] | ((root: string) => string[]);
 	initialization?:
@@ -1567,10 +1566,6 @@ interface InteractiveServerSpec {
 	 * silently failing. Currently only "java" (jdtls).
 	 */
 	runtime?: "java";
-	/** Optional per-server wait budget for navigation requests (ms) */
-	clientWaitTimeoutMs?: number;
-	/** Optional per-server initialize timeout (ms) */
-	initializeTimeoutMs?: number;
 }
 
 function createInteractiveServer(spec: InteractiveServerSpec): LSPServerInfo {
@@ -1589,8 +1584,6 @@ function createInteractiveServer(spec: InteractiveServerSpec): LSPServerInfo {
 		fallbackFor: spec.fallbackFor,
 		requiresProjectRoot: spec.requiresProjectRoot,
 		executesProjectCode: spec.executesProjectCode,
-		clientWaitTimeoutMs: spec.clientWaitTimeoutMs,
-		initializeTimeoutMs: spec.initializeTimeoutMs,
 		availabilityKey:
 			typeof spec.command === "string" && isSimpleCommand(spec.command)
 				? spec.command
@@ -3502,42 +3495,6 @@ export const KotlinServer: LSPServerInfo = {
 	},
 };
 
-export function isLeanWorkspaceLocked(root: string): boolean {
-	if (existsSync("/dev/shm/lean_global_workspace.lock")) return true;
-	if (!root) return false;
-	if (
-		existsSync(path.join(root, ".lake", "build", ".lake.lock")) ||
-		existsSync(path.join(root, "lake.lock")) ||
-		existsSync(path.join(root, ".lake", "lake.lock"))
-	) {
-		return true;
-	}
-	let cur = path.resolve(root);
-	while (true) {
-		if (existsSync(path.join(cur, ".lake", "build", ".lake.lock"))) {
-			return true;
-		}
-		const parent = path.dirname(cur);
-		if (parent === cur) break;
-		cur = parent;
-	}
-	return false;
-}
-
-function resolveLeanAnalyzerBinary(): string | undefined {
-	const cand =
-		process.env.LEAN_ANALYZER_BIN ||
-		path.join(os.homedir(), ".local", "bin", "lean-analyzer");
-	return existsSync(cand) ? cand : undefined;
-}
-
-export function shouldUseLeanAnalyzerLsp(root: string): boolean {
-	return (
-		(process.env.LEAN_ANALYZER_LSP === "1" || isLeanWorkspaceLocked(root)) &&
-		Boolean(resolveLeanAnalyzerBinary())
-	);
-}
-
 export const LeanServer = createInteractiveServer({
 	id: "lean",
 	name: "Lean 4 Language Server",
@@ -3549,23 +3506,10 @@ export const LeanServer = createInteractiveServer({
 	requiresProjectRoot: true,
 	// `lake serve` loads and interprets the project's `lakefile.lean` and its
 	// imported build scripts, so it executes project-owned code: refuse it until
-	// the host grants project trust (#4269). When `LEAN_ANALYZER_LSP=1` or an
-	// active `.lake.lock` is detected, `lean-analyzer lsp --mode=auto` serves
-	// lock-safe Mode A without executing project code.
-	executesProjectCode: (root) => !shouldUseLeanAnalyzerLsp(root),
-	command: (root) => {
-		if (shouldUseLeanAnalyzerLsp(root)) {
-			const bin = resolveLeanAnalyzerBinary();
-			if (bin) return bin;
-		}
-		return "lake";
-	},
-	args: (root) => {
-		if (shouldUseLeanAnalyzerLsp(root)) {
-			return ["lsp", "--mode=auto"];
-		}
-		return ["serve"];
-	},
+	// the host grants project trust (#4269).
+	executesProjectCode: true,
+	command: "lake",
+	args: ["serve"],
 });
 
 export const SwiftServer = createInteractiveServer({
@@ -3653,64 +3597,6 @@ export const LuaServer: LSPServerInfo = createTreeBinaryServer({
 	binRelPath: "bin/lua-language-server",
 });
 
-const leanFallbackFlagsCache = new Map<string, string[] | undefined>();
-// Named cap (bounded-container guard #2981): keys are project root paths, which
-// are finite per host but not statically bounded; a plain clear() at the cap
-// keeps the memo correct (recomputation is cheap) and the memory bounded.
-const LEAN_FALLBACK_FLAGS_CACHE_CAP = 64;
-
-/**
- * Resolves C/C++ fallback compiler flags for Lean 4 projects interfacing with C FFI.
- * Dynamically queries the active Lean toolchain sysroot so clangd can resolve
- * `<lean/lean.h>` and runtime types with zero external scripts or hardcoded paths.
- */
-export function resolveLeanFallbackFlags(root: string): string[] | undefined {
-	if (leanFallbackFlagsCache.has(root)) {
-		return leanFallbackFlagsCache.get(root);
-	}
-	if (leanFallbackFlagsCache.size >= LEAN_FALLBACK_FLAGS_CACHE_CAP) {
-		leanFallbackFlagsCache.clear();
-	}
-
-	const isLeanProject =
-		existsSync(path.join(root, "lakefile.lean")) ||
-		existsSync(path.join(root, "lakefile.toml")) ||
-		existsSync(path.join(root, "lean-toolchain"));
-
-	if (!isLeanProject) {
-		leanFallbackFlagsCache.set(root, undefined);
-		return undefined;
-	}
-
-	try {
-		const prefix = execSync("lean --print-prefix", {
-			cwd: root,
-			timeout: 2000,
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		}).trim();
-
-		if (prefix && existsSync(path.join(prefix, "include", "lean", "lean.h"))) {
-			const includeDir = path.join(prefix, "include");
-			const clangIncludeDir = path.join(includeDir, "clang");
-			const flags = [
-				`-I${includeDir}`,
-				...(existsSync(clangIncludeDir) ? ["-isystem", clangIncludeDir] : []),
-				"-Wno-unused-parameter",
-				"-Wno-unused-label",
-				"-fvisibility=hidden",
-			];
-			leanFallbackFlagsCache.set(root, flags);
-			return flags;
-		}
-	} catch {
-		// execSync failed or lean is not installed
-	}
-
-	leanFallbackFlagsCache.set(root, undefined);
-	return undefined;
-}
-
 // clangd ships a self-contained native tree bundle (bin/clangd + bundled
 // libclang headers). Prefer a system clangd on PATH; else auto-install the
 // managed bundle (#241) and launch bin/clangd within it. Graceful skip when
@@ -3764,8 +3650,6 @@ export const HaskellServer = createInteractiveServer({
 	command: "haskell-language-server-wrapper",
 	args: ["--lsp"],
 });
-
-export const Lean4Server = LeanServer;
 
 export const ElixirServer = createInteractiveServer({
 	id: "elixir",

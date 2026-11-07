@@ -59,7 +59,7 @@ const expected = {
 		],
 	},
 	lsp_navigation: {
-		total: 2565,
+		total: 2432,
 		maximum: 2593,
 		keys: [
 			"operation",

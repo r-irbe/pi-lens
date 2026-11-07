@@ -55,10 +55,6 @@ const VALID_OPERATIONS = [
 	"executeCommand",
 	"workspaceDiagnostics",
 	"capabilities",
-	"goal",
-	"termGoal",
-	"moduleImports",
-	"moduleImportedBy",
 ] as const;
 
 const NAVIGABLE_SYMBOL_KINDS = new Set([
@@ -122,10 +118,6 @@ function emptyReasonForOperation(operation: LspNavigationOperation): string {
 	if (operation === "executeCommand") return "command-returned-no-result";
 	if (operation === "incomingCalls" || operation === "outgoingCalls")
 		return "no-call-hierarchy-results";
-	if (operation === "goal") return "no-goals-or-not-in-tactic-state";
-	if (operation === "termGoal") return "no-term-goal-at-position";
-	if (operation === "moduleImports") return "no-module-imports-found";
-	if (operation === "moduleImportedBy") return "no-importing-modules-found";
 	return "no-results";
 }
 
@@ -181,13 +173,6 @@ function firstNonWhitespaceCharacter(lineText: string): number {
 	return (match?.index ?? 0) + 1;
 }
 
-function hasNonAscii(str: string): boolean {
-	for (let i = 0; i < str.length; i++) {
-		if (str.charCodeAt(i) > 127) return true;
-	}
-	return false;
-}
-
 function resolveSymbolColumn(
 	content: string,
 	line1: number,
@@ -221,12 +206,8 @@ function resolveSymbolColumn(
 		};
 	}
 
-	const hasUnicodeWordChar = hasNonAscii(baseSymbol);
-	const pattern = hasUnicodeWordChar
-		? `(?<=^|[^\\p{L}\\p{N}_])${escapeRegExp(baseSymbol)}(?=[^\\p{L}\\p{N}_]|$)`
-		: `\\b${escapeRegExp(baseSymbol)}\\b`;
-	const regexFlags = hasUnicodeWordChar ? "gu" : "g";
-	const exactRegex = new RegExp(pattern, regexFlags);
+	const pattern = `\\b${escapeRegExp(baseSymbol)}\\b`;
+	const exactRegex = new RegExp(pattern, "g");
 	const exact = findNthMatch(lineText, exactRegex, occurrence);
 	if (exact) {
 		return {
@@ -253,8 +234,7 @@ function resolveSymbolColumn(
 		};
 	}
 
-	const insensitiveFlags = hasUnicodeWordChar ? "giu" : "gi";
-	const insensitiveRegex = new RegExp(pattern, insensitiveFlags);
+	const insensitiveRegex = new RegExp(pattern, "gi");
 	const insensitive = findNthMatch(lineText, insensitiveRegex, occurrence);
 	if (insensitive) {
 		return {
@@ -922,7 +902,7 @@ export function createLspNavigationTool(
 		parameters: Type.Object({
 			operation: Type.String({
 				description:
-					"Operation: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities, goal (Lean 4: proof state at cursor), termGoal (Lean 4: expected type at cursor), moduleImports (Lean 4: imports), moduleImportedBy (Lean 4: reverse dependents).",
+					"LSP operation to perform. Valid values: definition, typeDefinition, declaration, references, hover, signatureHelp, documentSymbol, findSymbol, workspaceSymbol, codeAction, rename, rename_file, implementation, prepareCallHierarchy, incomingCalls, outgoingCalls, executeCommand, workspaceDiagnostics, capabilities.",
 			}),
 			path: Type.Optional(
 				Type.String({
@@ -1558,8 +1538,6 @@ export function createLspNavigationTool(
 				"rename",
 				"implementation",
 				"prepareCallHierarchy",
-				"goal",
-				"termGoal",
 			].includes(operation);
 			const resolvedCharacter =
 				needsPosition && filePath
@@ -1648,14 +1626,6 @@ export function createLspNavigationTool(
 						return lspService.references(filePath, lspLine, lspChar);
 					case "hover":
 						return lspService.hover(filePath, lspLine, lspChar);
-					case "goal":
-						return lspService.plainGoal(filePath, lspLine, lspChar);
-					case "termGoal":
-						return lspService.plainTermGoal(filePath, lspLine, lspChar);
-					case "moduleImports":
-						return lspService.moduleHierarchyImports(filePath);
-					case "moduleImportedBy":
-						return lspService.moduleHierarchyImportedBy(filePath);
 					case "signatureHelp":
 						return lspService.signatureHelp(filePath, lspLine, lspChar);
 					case "documentSymbol":
@@ -1875,18 +1845,7 @@ export function createLspNavigationTool(
 			let result: unknown;
 			let usedDocumentSymbolFallback = false;
 			try {
-				try {
-					result = await runOperation();
-				} catch (opErr) {
-					const opErrMsg =
-						opErr instanceof Error ? opErr.message : String(opErr);
-					if (needsFilePath && /closed file/i.test(opErrMsg)) {
-						await openFileBestEffort(lspService, filePath, true);
-						result = await runOperation();
-					} else {
-						throw opErr;
-					}
-				}
+				result = await runOperation();
 				const isEmptyInitial =
 					!result || (Array.isArray(result) && result.length === 0);
 				const shouldRetryOnEmpty =
@@ -1902,10 +1861,6 @@ export function createLspNavigationTool(
 						"codeAction",
 						"rename",
 						"implementation",
-						"goal",
-						"termGoal",
-						"moduleImports",
-						"moduleImportedBy",
 					].includes(operation);
 				if (shouldRetryOnEmpty) {
 					openedFileContent = await openFileBestEffort(
@@ -2017,48 +1972,6 @@ export function createLspNavigationTool(
 			let output = isEmpty
 				? "No results for " + operation + fileCtx + lineCtx
 				: JSON.stringify(result);
-			if (
-				!isEmpty &&
-				operation === "goal" &&
-				typeof result === "object" &&
-				result !== null &&
-				"rendered" in result
-			) {
-				const goalObj = result as { rendered?: string };
-				if (typeof goalObj.rendered === "string") {
-					output = goalObj.rendered;
-				}
-			} else if (
-				!isEmpty &&
-				operation === "termGoal" &&
-				typeof result === "object" &&
-				result !== null &&
-				"goal" in result
-			) {
-				const termGoalObj = result as { goal?: string };
-				if (typeof termGoalObj.goal === "string") {
-					output = termGoalObj.goal;
-				}
-			} else if (
-				!isEmpty &&
-				(operation === "moduleImports" || operation === "moduleImportedBy") &&
-				Array.isArray(result)
-			) {
-				const imports = result as Array<{
-					module?: { name?: string; uri?: string };
-					kind?: { isPrivate?: boolean; isAll?: boolean; metaKind?: string };
-				}>;
-				const lines = imports.map((imp) => {
-					const name = imp.module?.name ?? "(unknown)";
-					const uri = imp.module?.uri ? ` (${imp.module.uri})` : "";
-					const meta =
-						imp.kind?.metaKind && imp.kind.metaKind !== "nonMeta"
-							? ` [${imp.kind.metaKind}]`
-							: "";
-					return `- ${name}${meta}${uri}`;
-				});
-				output = lines.length > 0 ? lines.join("\n") : "None";
-			}
 			if (isEmpty && operation === "workspaceSymbol" && !rawPath) {
 				output +=
 					"\nHint: provide path to scope workspaceSymbol to the active language server/root.";
@@ -2085,36 +1998,12 @@ export function createLspNavigationTool(
 						"\nNote: no diagnostic quick fixes returned; refactor-only actions available.";
 				}
 			}
-			if (isEmpty && operation === "goal") {
-				output +=
-					"\nHint: Goal inspection requires placing the cursor inside an active tactic block (e.g. after 'by', on a tactic line, or before 'sorry'). On headers or non-tactic lines, no goals exist.";
-			}
-			if (!isEmpty && operation === "goal" && output.includes("✝")) {
-				output +=
-					"\nNote: Hypotheses marked with '✝' are inaccessible hygienic names generated by Lean. Use 'rename_i' or bind them explicitly to reference them in tactics.";
-			}
-			if (!isEmpty && operation === "goal" && output.trim() === "no goals") {
-				output +=
-					" (Proof complete: no remaining open goals at this position).";
-			}
-			if (!isEmpty && operation === "termGoal") {
-				output +=
-					"\nHint: This is the expected type that any expression placed at this cursor position must satisfy.";
-			}
 
-			const resultCount =
-				operation === "goal" &&
-				result &&
-				typeof result === "object" &&
-				"goals" in result &&
-				Array.isArray((result as { goals?: unknown[] }).goals) &&
-				(result as { goals: unknown[] }).goals.length > 0
-					? (result as { goals: unknown[] }).goals.length
-					: Array.isArray(result)
-						? result.length
-						: result
-							? 1
-							: 0;
+			const resultCount = Array.isArray(result)
+				? result.length
+				: result
+					? 1
+					: 0;
 			const searchReads = collectSearchReadsForOperation(
 				operation,
 				result,

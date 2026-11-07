@@ -39,7 +39,6 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Lua                   | ✓   | lsp                                                                                                            | stylua                  |
 | Zig                   | ✓   | lsp, zig-check                                                                                                 | zig fmt                 |
 | Haskell               | ✓   | lsp                                                                                                            | ormolu                  |
-| Lean 4                | ✓ (lake serve) | lsp                                                                                                            | —                       |
 | Elixir                | ✓ (ElixirLS default, Expert alternate) | lsp, elixir-check, credo                                                                   | mix format              |
 | Gleam                 | ✓   | lsp, gleam-check                                                                                               | gleam format            |
 | Typst                 | ✓ (tinymist) | —                                                                                                         | typstyle (`.typ`, `.typc`) |
@@ -97,18 +96,6 @@ languages could never be analysed on those hosts. A grammar that never loads
 (fetch failure, unwritable target, an unsupported runtime) is recorded as a
 `grammar_unavailable` **skip**, never a clean pass
 (`clients/dispatch/runners/tree-sitter.ts`).
-
-### Lean 4: Parser and LSP Strategy
-
-Lean 4 uses an extensible runtime parser: macros, syntax extensions, notations, and embedded proof domain languages (tactics, `calc` blocks) are registered dynamically during elaboration. Static grammars (such as `tree-sitter-lean`) cannot reliably parse Lean files without the macro context produced by imports (e.g., Mathlib).
-
-`pi-lens` routes Lean 4 analysis through the language server (`lake serve`). `Lean4Server` provides kernel-accurate `documentSymbol`, `workspaceSymbol`, `definition`, `hover`, proof goal inspection (`$/lean/plainGoal`, `$/lean/plainTermGoal`), and dependency DAG traversal (`$/lean/prepareModuleHierarchy`, `$/lean/moduleHierarchy/*`).
-
-Repository and scanner integration:
-- Build and dependency trees (`.lake/packages/`, `.lake/build/`) are excluded from in-process walks (`EXCLUDED_DIRS`) and vendor-tagged (`VENDOR_DIR_NAMES`), preventing Mathlib from flooding source indexers.
-- `lake-manifest.json` is treated as a generated lockfile (`LOCKFILE_NAMES`).
-- `lakefile.lean` is classified as build configuration (`config`).
-- Project roots resolve via `lakefile.lean`, `lakefile.toml`, or `lean-toolchain`.
 
 ## Considered and skipped (2026-08-20 survey, closed out by #1757)
 

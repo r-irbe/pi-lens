@@ -282,33 +282,6 @@ export interface LSPCallHierarchyOutgoingCall {
 	fromRanges: LSPLocation["range"][];
 }
 
-// --- Lean 4 Custom Protocol Types ---
-
-export interface LSPPlainGoal {
-	rendered?: string;
-	goals?: string[];
-}
-
-export interface LSPPlainTermGoal {
-	goal?: string;
-	range?: LSPLocation["range"];
-}
-
-export interface LSPLeanModule {
-	name: string;
-	uri: string;
-	data?: unknown;
-}
-
-export interface LSPLeanImport {
-	module: LSPLeanModule;
-	kind?: {
-		isPrivate?: boolean;
-		isAll?: boolean;
-		metaKind?: string;
-	};
-}
-
 export interface LSPClientInfo {
 	serverId: string;
 	root: string;
@@ -658,30 +631,6 @@ export interface LSPClientInfo {
 	outgoingCalls(
 		item: LSPCallHierarchyItem,
 	): Promise<LSPCallHierarchyOutgoingCall[]>;
-	/** Lean 4: tactic proof goal inspection ($/lean/plainGoal) */
-	plainGoal(
-		filePath: string,
-		line: number,
-		character: number,
-	): Promise<LSPPlainGoal | null>;
-	/** Lean 4: expected term type inspection ($/lean/plainTermGoal) */
-	plainTermGoal(
-		filePath: string,
-		line: number,
-		character: number,
-	): Promise<LSPPlainTermGoal | null>;
-	/** Lean 4: prepare module hierarchy ($/lean/prepareModuleHierarchy) */
-	prepareModuleHierarchy(filePath: string): Promise<LSPLeanModule | null>;
-	/** Lean 4: module imports ($/lean/moduleHierarchy/imports) */
-	moduleHierarchyImports(
-		mod: LSPLeanModule,
-		filePath?: string,
-	): Promise<LSPLeanImport[]>;
-	/** Lean 4: module imported by ($/lean/moduleHierarchy/importedBy) */
-	moduleHierarchyImportedBy(
-		mod: LSPLeanModule,
-		filePath?: string,
-	): Promise<LSPLeanImport[]>;
 	shutdown(options?: LSPShutdownOptions): Promise<void>;
 }
 
@@ -6854,68 +6803,6 @@ export async function createLSPClient(options: {
 				state,
 				"callHierarchy/outgoingCalls",
 				{ item },
-			);
-			return result ?? [];
-		},
-
-		async plainGoal(filePath, line, character) {
-			const result = await navRequest<LSPPlainGoal>(
-				state,
-				"$/lean/plainGoal",
-				{
-					textDocument: { uri: pathToFileURL(filePath).href },
-					position: await toWirePosition(state, filePath, line, character),
-				},
-				filePath,
-			);
-			return result ?? null;
-		},
-
-		async plainTermGoal(filePath, line, character) {
-			const result = await navRequest<LSPPlainTermGoal>(
-				state,
-				"$/lean/plainTermGoal",
-				{
-					textDocument: { uri: pathToFileURL(filePath).href },
-					position: await toWirePosition(state, filePath, line, character),
-				},
-				filePath,
-			);
-			return result ?? null;
-		},
-
-		async prepareModuleHierarchy(filePath) {
-			const result = await navRequest<LSPLeanModule>(
-				state,
-				"$/lean/prepareModuleHierarchy",
-				{
-					textDocument: { uri: pathToFileURL(filePath).href },
-				},
-				filePath,
-			);
-			return result ?? null;
-		},
-
-		async moduleHierarchyImports(mod, filePath) {
-			const result = await navRequest<LSPLeanImport[]>(
-				state,
-				"$/lean/moduleHierarchy/imports",
-				{
-					module: mod,
-				},
-				filePath,
-			);
-			return result ?? [];
-		},
-
-		async moduleHierarchyImportedBy(mod, filePath) {
-			const result = await navRequest<LSPLeanImport[]>(
-				state,
-				"$/lean/moduleHierarchy/importedBy",
-				{
-					module: mod,
-				},
-				filePath,
 			);
 			return result ?? [];
 		},
