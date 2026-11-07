@@ -125,9 +125,7 @@
     "clients/agent-nudge.ts": [
       "session-lifecycle"
     ],
-    "clients/mcp/session.ts": [
-      "session-straddle"
-    ],
+    "clients/mcp/session.ts": "unmodelled",
     "clients/dispatch/dispatcher.ts": "unmodelled",
     "clients/dispatch/pending-runner-findings.ts": [
       "pending-runner-store"
@@ -171,12 +169,8 @@
       "session-lifecycle",
       "read-guard"
     ],
-    "clients/lsp/lean4-ilean.ts": [
-      "session-straddle"
-    ],
     "tools/lsp-navigation.ts": [
-      "lsp-rename-edit",
-      "session-straddle"
+      "lsp-rename-edit"
     ],
     "clients/instance-registry.ts": [
       "session-registry",
@@ -391,7 +385,7 @@
     "clients/installer/index.ts": "Only the install lock (tryAcquireInstallLock, acquireInstallLock, assertOwnsLock, the generation heartbeat) is modelled, and only partly: file-locks has no heartbeat or ownership recheck (#3553). The rest of the installer is not lifecycle.",
     "clients/lsp/server.ts": "The LSP service generation (captureLspServiceGeneration, lspServiceGenerationCell, #3755) is session-lifecycle's `svc` (one process counter; `perEvalSvc` is the pre-#3755 per-evaluation counter, `Mut3755GenPerEval`, caught by `FleetOwnersLive`), format-drain's ServiceGen and lsp-idle-reset's reset. The server registry table (idleEviction policy data, #3622) is not lifecycle.",
     "clients/lsp/client-registry.ts": "ClientRegistry (#2372 slice 3) holds what moved out of index.ts: per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) map to lsp-crash `Evict`, the dead-client respawn and breaker to lsp-crash `Crash`/`Acquire`, and `markDestroyed` plus the client half of shutdown to lsp-idle-reset's reset. The per-generation derived state it drops through hooks stays in index.ts.",
-    "clients/lsp/index.ts": "Per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) live in clients/lsp/client-registry.ts since #2372 slice 3 and map to lsp-crash `Evict`; whole-service reset and shutdown invoke configureLspServiceLifecycle.beforeReset (clearILeanScanCache), modelled by session-straddle `NavigationLifecycle.tla` (`NavBeforeReset`); per-generation derived state (EWMA, aux inflight, write-timeout streak) is not modelled yet (#3672, #3584). applyWorkspaceEdit callers are unmodelled (clients/lsp/edits.ts).",
+    "clients/lsp/index.ts": "Per-client retirement (retireClient, #3672), capacity and idle eviction (#3622) live in clients/lsp/client-registry.ts since #2372 slice 3 and map to lsp-crash `Evict`; per-generation derived state (EWMA, aux inflight, write-timeout streak) is not modelled yet (#3672, #3584). applyWorkspaceEdit callers are unmodelled (clients/lsp/edits.ts).",
     "clients/agent-nudge.ts": "The agent-advisories store (#3757, carried on /reload by #3777) belongs to session-lifecycle, which does not model it yet. The `_touched` accumulator is unscoped (#3758 class).",
     "clients/widget-state.ts": "The widget's per-verb write guards and rows (`diagnosticsWriteGuard`, `runnerWriteGuard`, `widgetStore`): session-lifecycle's WG policy row (carry on /reload, /fork, /clone, /tree; reset on the other starts, #3589) and, in SessionLifecycleF1, the two-verb pipeline write, the tie the guards must admit (`>=`), the rows' carry across a fork and the late verb's fence (F1 of #3803).",
     "clients/write-ordering-guard.ts": "`WriteOrderingGuard.shouldWrite` drops a token below the last seen and admits a tie. SessionLifecycleF1's `MutWidgetTieDrop` (`>`) and `Pre555WidgetNoGuard` pin both directions (F1 of #3803).",
@@ -400,10 +394,9 @@
     "clients/tree-sitter-client.ts": "Wasm trap budget, per-input trap entries with first-trap identity, decay on success, batch-compile keys (#3673, #3706, #3731). Modelled by tree-sitter-trap-budget (#3829).",
     "clients/fix-run-restore.ts": "Whole-package fixer vs concurrent agent sibling edits: capture, the restore under pi's queue for the sibling after the target's hold is released, and the lock order against multi-path LSP edits (#3741, #3830). Modelled by dispatch-pipeline `SiblingRestore.tla`.",
     "clients/lsp/edits.ts": "applyWorkspaceEdit under every path's queue (#3610) and the rename staleness capture (#3736, #3747, #3734). Modelled by lsp-rename-edit (#3826).",
-    "clients/lsp/lean4-ilean.ts": "Admitted-context .ilean scan ticket lifecycle (`beginILeanScanTicket`, `clearILeanScanCache`, `getILeanScanInvalidationStamp`): entry capture of live SessionScope and admitted LeanContext plus whole-service reset invalidation via `configureLspServiceLifecycle.beforeReset`. Modelled by session-straddle `NavigationLifecycle.tla`.",
-    "tools/lsp-navigation.ts": "Rename staleness capture is modelled by lsp-rename-edit (see clients/lsp/edits.ts). Admitted-context Lean semantic navigation and pure warm-route binding across session replacement, config re-admission, and service reset are modelled by session-straddle `NavigationLifecycle.tla`.",
+    "tools/lsp-navigation.ts": "See clients/lsp/edits.ts.",
     "clients/lsp-mutation.ts": "bookkeepLspMutation decides authorship on both branches (#4131, #4187): the direct recordWritten asks for an advance the read guard grants only for a path the call licensed, and the bridge fallback sends the same provenance and call id, so read-guard's own-write (OwnCall/OwnWrite) and co-process (BridgeWrite) actions are its two branches. The server-initiated workspace/applyEdit caller has no tool call and therefore no license; the fallback's missing-bridge degradation and its fail-open lineage (#3763 residual) are not lifecycle. For session-lifecycle, the fallback captures the session at `lsp_navigation`'s execute entry and sends it as the entry's lineage, so the bridge fences it like the settled sweep (#3824); `BridgeLineage` is fenced and `BridgeExtNoLineage` is the accepted I4 residual of #3763. The LSP request and workspace edit are lsp-rename-edit's.",
-    "clients/mcp/session.ts": "MCP session bootstrap epoch guard (`getMcpSessionContext` vs `_resetMcpSessionContext` while `loadBootstrapClients` is in flight) is modelled by session-straddle `NavigationLifecycle.tla` (`McpBootstrapEpoch`, `NoStaleMcpRuntimePublish`).",
+    "clients/mcp/session.ts": "MCP session refresh calls handleSessionStart (scope 'superseded'); session-lifecycle states the MCP host is out of scope.",
     "clients/dispatch/dispatcher.ts": "`buildCoverageNotice` decides per dispatch whether the synthetic model-facing coverage notice is emitted; the decision is the session-scoped `coverageNoticeSeen` latch (kind + file + sorted server sets) with the `dedupe` push/pull axis. No formal family models a model-facing coverage-notice dedupe: `dispatch-pipeline`'s `latch` is the `(file, hash)` analysed/in-flight dedupe in `clients/pipeline.ts`, and `session-lifecycle`'s `dedupe` is the #2890 duplicate-start gate. Unmodelled at the TLA axis (advisory), so the row only gates the seam record rule for the file's decision branches.",
     "clients/dispatch/pending-runner-findings.ts": "The deferred collect-later runner store (#3758/#3813): both readers (drain, commit gate's non-draining peek) apply the owned-admission fence (ownedByLiveSession), and requeueRunnerFindings carries entry.session, so a requeued answer stays fenced to its producer scope. Modelled by pending-runner-store (#3814, #3824); the producer's captured-scope fence composed with the real lifecycle transitions is session-lifecycle's `StoreRunner` writer (SessionLifecycleF1, F1 of #3803).",
     "clients/workspace-topology.ts": "Marker-walk miss cache keyed by start-dir mtime plus the 2 s cadence (#3456). Low value; store-freshness could host it as a gate kind.",

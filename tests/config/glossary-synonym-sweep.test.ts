@@ -525,7 +525,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/config-core/deny.ts": 1,
 		"clients/config-core/merge.ts": 2,
 		"clients/config-locations.ts": 4,
-		"clients/config-resolve.ts": 1,
 		"clients/deadline-utils.ts": 1,
 		"clients/debug-handles.ts": 1,
 		"clients/debug-heap.ts": 1,
@@ -623,11 +622,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/jvm-runtime.ts": 3,
 		"clients/lsp/language.ts": 1,
 		"clients/lsp/launch.ts": 2,
-		// lean4-lsp (2026-10): the single live `filter` here is the ECMAScript
-		// Array.prototype.filter method call (`.filter(Boolean)`), not a naming
-		// use of the retired reference-drift sense; renaming the stdlib call
-		// would degrade the code, so the per-file pin records it.
-		"clients/lsp/lean4-ilean.ts": 1,
 		"clients/lsp/ruby-drive-dirs.ts": 1,
 		"clients/lsp/server.ts": 5,
 		"clients/lsp/tsserver-sync.ts": 1,
@@ -970,12 +964,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		// 30 -> 31 (#4248): the project-local binary refusal records the
 		// resolved command basename through the existing path vocabulary.
 		"clients/lsp/launch.ts": 31,
-		"clients/lsp/lean4-ilean.ts": 19,
 		"clients/lsp/lombok.ts": 14,
 		// #4299: 121 -> 124; OS path namespace calls for canonical compiler
 		// validation replace the wrapper-relative guess. No path-key owner changes.
-		// 130 -> 137: canonical path namespace calls in resolveLeanFallbackFlags.
-		"clients/lsp/server.ts": 137,
+		"clients/lsp/server.ts": 124,
 		"clients/lsp/session-roots.ts": 6,
 		"clients/lsp/workspace-diagnostics-cache.ts": 13,
 		// 6 -> 5 (#3643): removed the obsolete ring path-comparison branch;
@@ -1122,7 +1114,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"tools/lens-diagnostic-mark.ts": 6,
 		"tools/lens-diagnostics.ts": 30,
 		"tools/lsp-diagnostics.ts": 10,
-		"tools/lsp-navigation.ts": 17,
+		"tools/lsp-navigation.ts": 14,
 		"tools/module-report.ts": 29,
 		"tools/render-compact.ts": 3,
 		"tools/symbol-search.ts": 5,
@@ -1247,7 +1239,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/dispatch/runners/actionlint.ts": 2,
 		"clients/dispatch/runners/ast-grep-napi.ts": 11,
 		"clients/dispatch/runners/biome-check.ts": 10,
-		"clients/dispatch/runners/cpp-check.ts": 4,
+		"clients/dispatch/runners/cpp-check.ts": 3,
 		"clients/dispatch/runners/credo.ts": 2,
 		"clients/dispatch/runners/cue-vet.ts": 8,
 		"clients/dispatch/runners/dart-analyze.ts": 1,
@@ -1398,9 +1390,6 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/lsp/diagnostic-binding.ts": 1,
 		"clients/lsp/edits.ts": 24,
 		"clients/lsp/index.ts": 6,
-		// lean4-lsp (2026-10): four live `version` uses (the ilean toolchain
-		// version probe and its cache key);
-		"clients/lsp/lean4-ilean.ts": 4,
 		"clients/lsp/lombok.ts": 6,
 		// #4299: 16 -> 18; two reads of the external TypeScript package
 		// manifest's literal version field, not a pi-lens generation identity.

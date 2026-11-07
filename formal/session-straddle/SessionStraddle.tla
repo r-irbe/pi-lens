@@ -101,13 +101,6 @@ CONSTANTS
                    \*                           origins whose write landed between
                    \*                           Shutdown1 and StartReset (NoWriteBetween)
 
-\* Navigation / .ilean scan / MCP bootstrap lifecycle switches (NavigationLifecycle.tla,
-\* pinned in formal/switch-pins.json under session-straddle).
-NavEntryCapture == TRUE
-NavBeforeReset == TRUE
-McpBootstrapEpoch == TRUE
-NavNoDropSurvivor == TRUE
-
 VARIABLES
     phase,      \* "s1" | "s1down" | "s2starting" | "s2"
     gen,        \* runtime._sessionGeneration

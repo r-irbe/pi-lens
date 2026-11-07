@@ -900,34 +900,6 @@
 			]
 		},
 		"session-straddle": {
-			"pins": {
-				"McpBootstrapEpoch": {
-					"value": "TRUE",
-					"test": "tests/clients/lsp/lean4-ilean-lifecycle.test.ts",
-					"title": "prevents an in-flight MCP bootstrap interrupted by _resetMcpSessionContext from republishing resolvedRuntime"
-				},
-				"NavBeforeReset": {
-					"value": "TRUE",
-					"test": "tests/clients/lsp/lean4-ilean-lifecycle.test.ts",
-					"title": "whole-service resetLSPService invalidates in-flight scan tickets and bumps invalidation stamp"
-				},
-				"NavEntryCapture": {
-					"value": "TRUE",
-					"test": "tests/tools/lsp-navigation-admitted-context.test.ts",
-					"title": "serves the 4 root-confined offline Lean routes, omits @[extern] workspace C expansion, and refuses live-only routes with live-identity-unavailable",
-					"also": [
-						{
-							"test": "tests/tools/lsp-navigation-admitted-context.test.ts",
-							"title": "enforces pure warm-route binding for pathless workspaceSymbol and executeCommand"
-						}
-					]
-				},
-				"NavNoDropSurvivor": {
-					"value": "TRUE",
-					"test": "tests/clients/lsp/lean4-ilean-lifecycle.test.ts",
-					"title": "isolates primary and secondary session scopes and rejects retired handles mid-scan"
-				}
-			},
 			"notCodeChoice": [
 				{
 					"reason": "Scenario bound or actor set: it sizes the state space or picks which actors, inputs and steps TLC explores; no code branch reads it.",

@@ -320,29 +320,3 @@ reset already clears session 2's parked computes and recorded touches, so the
 guards make the detached paths agree with it. Whether the host can dispatch
 a tool_result between the two `session_start` events is not established
 here; this is recorded as a model finding, not as a bug.
-
-## Admitted-context navigation, `.ilean` scan invalidation, and MCP bootstrap (`NavigationLifecycle.tla`)
-
-`NavigationLifecycle.tla` extends the `session-straddle` family to cover:
-
-1. **Admitted-context navigation and `.ilean` scan ticket capture** (`NavEntryCapture`, `tools/lsp-navigation.ts`, `clients/lsp/lean4-ilean.ts`):
-   - At operation entry, before the first `await`, navigation and `.ilean` scans capture the live `SessionScope` handle, the admitted `LeanContext` / warm-route identity, the LSP service generation, and the `.ilean` scan invalidation stamp.
-   - Before publishing any semantic result (`NavFinish`), the operation verifies that its captured scope is still live and its captured admission and invalidation stamp remain current (`NoStaleNavigationPublish`).
-   - Retiring an isolated secondary scope (`SecondaryScopeRetire`) does not invalidate primary-scope navigation (`NoDropSurvivorNavigation`).
-2. **Whole-service reset hook (`beforeReset`)** (`NavBeforeReset`, `clients/lsp/index.ts`, `clients/lsp/lean4-ilean.ts`):
-   - `resetLSPService()` and `LSPService.shutdown()` invoke `configureLspServiceLifecycle.beforeReset`, which calls `clearILeanScanCache()` to bump the `.ilean` scan invalidation stamp synchronously (`ServiceReset`).
-   - Removing `beforeReset` (`MutNavNoBeforeReset`) violates `NoStaleNavigationPublish`.
-3. **MCP pending-bootstrap epoch guard** (`McpBootstrapEpoch`, `clients/mcp/session.ts`):
-   - `getMcpSessionContext()` captures `bootstrapEpoch` before awaiting `loadBootstrapClients()`, and `_resetMcpSessionContext()` increments `bootstrapEpoch`, retires any published runtime, and clears `resolvedRuntime`.
-   - If `_resetMcpSessionContext()` runs while `loadBootstrapClients()` is in flight, the stale bootstrap is rejected and never republishes `resolvedRuntime` (`NoStaleMcpRuntimePublish`; broken by `MutMcpPendingBootstrapReset`).
-4. **No-drop survivor guarantee** (`NavNoDropSurvivor`):
-   - A navigation call in the current scope with no intervening reset or retirement completes and publishes (`NoDropSurvivorNavigation`; broken by `MutNavDropSurvivor`).
-
-| Config (`NavigationLifecycle`) | Expect |
-|---|---|
-| `NavLifecycleAsBuilt` | pass |
-| `MutNavLateCapture` | violated `NoStaleNavigationPublish` |
-| `MutNavNoBeforeReset` | violated `NoStaleNavigationPublish` |
-| `MutMcpPendingBootstrapReset` | violated `NoStaleMcpRuntimePublish` |
-| `MutNavDropSurvivor` | violated `NoDropSurvivorNavigation` |
-
